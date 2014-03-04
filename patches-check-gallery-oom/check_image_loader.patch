@@ -1,0 +1,524 @@
+# HG changeset patch
+# Parent f675d9223e5239757a5854d9b95e3237198fbc7f
+# User Jerry Shih <hshih@mozilla.com>
+check image loader memory
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -690,17 +690,17 @@ pref("hal.processPriorityManager.gonk.no
+ // We wait this long before polling the memory-pressure fd after seeing one
+ // memory pressure event.  (When we're not under memory pressure, we sit
+ // blocked on a poll(), and this pref has no effect.)
+ pref("gonk.systemMemoryPressureRecoveryPollMS", 5000);
+ 
+ #ifndef DEBUG
+ // Enable pre-launching content processes for improved startup time
+ // (hiding latency).
+-pref("dom.ipc.processPrelaunch.enabled", true);
++pref("dom.ipc.processPrelaunch.enabled", false);
+ // Wait this long before pre-launching a new subprocess.
+ pref("dom.ipc.processPrelaunch.delayMs", 5000);
+ #endif
+ 
+ // When a process receives a system message, we hold a CPU wake lock on its
+ // behalf for this many seconds, or until it handles the system message,
+ // whichever comes first.
+ pref("dom.ipc.systemMessageCPULockTimeoutSec", 30);
+diff --git a/content/base/public/nsDOMFile.h b/content/base/public/nsDOMFile.h
+--- a/content/base/public/nsDOMFile.h
++++ b/content/base/public/nsDOMFile.h
+@@ -361,39 +361,74 @@ public:
+   nsDOMMemoryFile(void *aMemoryBuffer,
+                   uint64_t aLength,
+                   const nsAString& aName,
+                   const nsAString& aContentType)
+     : nsDOMFile(aName, aContentType, aLength, UINT64_MAX),
+       mDataOwner(new DataOwner(aMemoryBuffer, aLength))
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
++
++    const size_t LARGE_OBJECT_MIN_SIZE = 8 * 1024;
++    size_t size = moz_malloc_size_of(mDataOwner->mData);
++    if(size>=LARGE_OBJECT_MIN_SIZE){
++      int test=0;
++      test=10;
++      printf_stderr("bignose nsDOMMemoryFile get large, line:%d",__LINE__);
++    }
+   }
+ 
+   // Create as blob
+   nsDOMMemoryFile(void *aMemoryBuffer,
+                   uint64_t aLength,
+                   const nsAString& aContentType)
+     : nsDOMFile(aContentType, aLength),
+       mDataOwner(new DataOwner(aMemoryBuffer, aLength))
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
++
++    const size_t LARGE_OBJECT_MIN_SIZE = 8 * 1024;
++    size_t size = moz_malloc_size_of(mDataOwner->mData);
++    if(size>=LARGE_OBJECT_MIN_SIZE){
++      int test=0;
++      test=10;
++
++      printf_stderr("bignose nsDOMMemoryFile get large, line:%d",__LINE__);
++
++      GDBFunc();
++    }
+   }
+ 
+   NS_IMETHOD GetInternalStream(nsIInputStream**) MOZ_OVERRIDE;
+ 
++  NS_IMETHOD_(bool) IsMemoryFile(void) MOZ_OVERRIDE
++  {
++    return true;
++  }
++
+ protected:
++  void GDBFunc(void);
++
+   // Create slice
+   nsDOMMemoryFile(const nsDOMMemoryFile* aOther, uint64_t aStart,
+                   uint64_t aLength, const nsAString& aContentType)
+     : nsDOMFile(aContentType, aOther->mStart + aStart, aLength),
+       mDataOwner(aOther->mDataOwner)
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
+     mImmutable = aOther->mImmutable;
++
++    const size_t LARGE_OBJECT_MIN_SIZE = 8 * 1024;
++    size_t size = moz_malloc_size_of(mDataOwner->mData);
++    if(size>=LARGE_OBJECT_MIN_SIZE){
++      int test=0;
++      test=10;
++
++      printf_stderr("bignose nsDOMMemoryFile get large, line:%d",__LINE__);
++    }
+   }
+   virtual already_AddRefed<nsIDOMBlob>
+   CreateSlice(uint64_t aStart, uint64_t aLength,
+               const nsAString& aContentType) MOZ_OVERRIDE;
+ 
+   // These classes need to see DataOwner.
+   friend class DataOwnerAdapter;
+   friend class nsDOMMemoryFileDataOwnerMemoryReporter;
+diff --git a/content/base/public/nsHostObjectProtocolHandler.h b/content/base/public/nsHostObjectProtocolHandler.h
+--- a/content/base/public/nsHostObjectProtocolHandler.h
++++ b/content/base/public/nsHostObjectProtocolHandler.h
+@@ -49,16 +49,20 @@ public:
+   // AddDataEntry creates the URI with the given scheme and returns it in aUri
+   static nsresult AddDataEntry(const nsACString& aScheme,
+                                nsISupports* aObject,
+                                nsIPrincipal* aPrincipal,
+                                nsACString& aUri);
+   static void RemoveDataEntry(const nsACString& aUri);
+   static nsIPrincipal* GetDataEntryPrincipal(const nsACString& aUri);
+   static void Traverse(const nsACString& aUri, nsCycleCollectionTraversalCallback& aCallback);
++
++private:
++  static void Init(void);
++  static bool initialized;
+ };
+ 
+ class nsBlobProtocolHandler : public nsHostObjectProtocolHandler
+ {
+ public:
+   NS_IMETHOD GetScheme(nsACString &result) MOZ_OVERRIDE;
+ };
+ 
+diff --git a/content/base/public/nsIDOMFile.idl b/content/base/public/nsIDOMFile.idl
+--- a/content/base/public/nsIDOMFile.idl
++++ b/content/base/public/nsIDOMFile.idl
+@@ -52,16 +52,19 @@ interface nsIDOMBlob : nsISupports
+ 
+   // Called when the blob was successfully stored in a database or when
+   // the blob is initialized from a database. It can be called on any thread.
+   [notxpcom] void addFileInfo(in FileInfo aFileInfo);
+ 
+   // Called before the blob is stored in a database to decide if it can be
+   // shared or needs to be copied. It can be called on any thread.
+   [notxpcom] FileInfo getFileInfo(in FileManager aFileManager);
++
++  // Return true if this blob is memory file.
++  [notxpcom] bool isMemoryFile();
+ };
+ 
+ [scriptable, builtinclass, uuid(0acb4135-9f79-4516-ba92-b5fba5203620)]
+ interface nsIDOMFile : nsIDOMBlob
+ {
+   readonly attribute DOMString name;
+ 
+   readonly attribute DOMString path;
+diff --git a/content/base/src/Makefile.in b/content/base/src/Makefile.in
+--- a/content/base/src/Makefile.in
++++ b/content/base/src/Makefile.in
+@@ -11,8 +11,11 @@ ifneq (,$(INTEL_ARCHITECTURE))
+ ifdef GNU_CC
+ nsTextFragmentSSE2.$(OBJ_SUFFIX): CXXFLAGS+=-msse2
+ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
+ nsTextFragmentSSE2.$(OBJ_SUFFIX): CXXFLAGS+=-xarch=sse2 -xO4
+ endif
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/content/base/src/nsDOMFile.cpp b/content/base/src/nsDOMFile.cpp
+--- a/content/base/src/nsDOMFile.cpp
++++ b/content/base/src/nsDOMFile.cpp
+@@ -438,16 +438,21 @@ nsDOMFileBase::SetMutable(bool aMutable)
+     rv = this->GetSize(&dummyInt);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   mImmutable = !aMutable;
+   return rv;
+ }
+ 
++NS_IMETHODIMP_(bool)
++nsDOMFileBase::IsMemoryFile(void)
++{
++  return false;
++}
+ ////////////////////////////////////////////////////////////////////////////
+ // nsDOMFile implementation
+ 
+ DOMCI_DATA(File, nsDOMFile)
+ DOMCI_DATA(Blob, nsDOMFile)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsDOMFile)
+   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIDOMFile)
+@@ -535,23 +540,25 @@ nsDOMFileFile::GetSize(uint64_t *aFileSi
+ {
+   if (IsSizeUnknown()) {
+     NS_ASSERTION(mWholeFile,
+                  "Should only use lazy size when using the whole file");
+     int64_t fileSize;
+     nsresult rv = mFile->GetFileSize(&fileSize);
+     NS_ENSURE_SUCCESS(rv, rv);
+   
++    printf_stderr("bignose in nsDOMFileFile::GetSize");
+     if (fileSize < 0) {
+       return NS_ERROR_FAILURE;
+     }
+   
+     mLength = fileSize;
+   }
+ 
++  printf_stderr("bignose in nsDOMFileFile::GetSize");
+   *aFileSize = mLength;
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsDOMFileFile::GetType(nsAString &aType)
+ {
+@@ -631,16 +638,21 @@ NS_IMETHODIMP
+ nsDOMMemoryFile::GetInternalStream(nsIInputStream **aStream)
+ {
+   if (mLength > INT32_MAX)
+     return NS_ERROR_FAILURE;
+ 
+   return DataOwnerAdapter::Create(mDataOwner, mStart, mLength, aStream);
+ }
+ 
++void nsDOMMemoryFile::GDBFunc(void)
++{
++  printf_stderr("bignose in gdb func");
++}
++
+ /* static */ StaticMutex
+ nsDOMMemoryFile::DataOwner::sDataOwnerMutex;
+ 
+ /* static */ StaticAutoPtr<LinkedList<nsDOMMemoryFile::DataOwner> >
+ nsDOMMemoryFile::DataOwner::sDataOwners;
+ 
+ /* static */ bool
+ nsDOMMemoryFile::DataOwner::sMemoryReporterRegistered;
+diff --git a/content/base/src/nsHostObjectProtocolHandler.cpp b/content/base/src/nsHostObjectProtocolHandler.cpp
+--- a/content/base/src/nsHostObjectProtocolHandler.cpp
++++ b/content/base/src/nsHostObjectProtocolHandler.cpp
+@@ -11,16 +11,19 @@
+ #include "nsNetUtil.h"
+ #include "nsIPrincipal.h"
+ #include "nsIDOMFile.h"
+ #include "nsIDOMMediaStream.h"
+ #include "mozilla/dom/MediaSource.h"
+ #include "nsIMemoryReporter.h"
+ #include "mozilla/Preferences.h"
+ 
++#include <unistd.h>
++#include "cutils/properties.h"
++
+ // -----------------------------------------------------------------------
+ // Hash table
+ struct DataInfo
+ {
+   // mObject is expected to be an nsIDOMBlob, nsIDOMMediaStream, or MediaSource
+   nsCOMPtr<nsISupports> mObject;
+   nsCOMPtr<nsIPrincipal> mPrincipal;
+   nsCString mStack;
+@@ -169,21 +172,40 @@ class BlobURLsReporter MOZ_FINAL : publi
+       uint64_t size;
+       uint32_t refCount = 1;
+       DebugOnly<bool> blobWasCounted;
+ 
+       blobWasCounted = envp->mRefCounts.Get(blob, &refCount);
+       MOZ_ASSERT(blobWasCounted);
+       MOZ_ASSERT(refCount > 0);
+ 
++      printf_stderr("bignose in PLDHashOperator ReportCallback, before getsize");
++
++      char prop[PROPERTY_VALUE_MAX];
++      property_get("debug.oom.pid", prop, "0");
++      int pid=getpid();
++      if(atoi(prop) == pid){
++        int test;
++        test=10;
++      }
++
++      nsString type;
++
++      if (!NS_FAILED(blob->GetType(type))) {
++        printf_stderr("bignose in PLDHashOperator, blob type:%s\n", NS_ConvertUTF16toUTF8(type).get());
++      }
++
++
+       if (NS_FAILED(blob->GetSize(&size))) {
+         size = 0;
+       }
++      printf_stderr("bignose in PLDHashOperator ReportCallback, end getsize");
+ 
+-      path = "blob-urls/";
++      //path = "blob-urls/";
++      path = (blob->IsMemoryFile()) ? "memory-blob-urls/" : "file-blob-urls/";
+       if (NS_SUCCEEDED(aInfo->mPrincipal->GetURI(getter_AddRefs(principalURI))) &&
+           principalURI != nullptr &&
+           NS_SUCCEEDED(principalURI->GetSpec(owner)) &&
+           !owner.IsEmpty()) {
+         owner.ReplaceChar('/', '\\');
+         path += "owner(";
+         path += owner;
+         path += ")";
+@@ -210,16 +232,19 @@ class BlobURLsReporter MOZ_FINAL : publi
+         specialDesc += "\n\nNOTE: This blob (address ";
+         specialDesc += addrStr;
+         specialDesc += ") has ";
+         specialDesc.AppendInt(refCount);
+         specialDesc += " URLs; its size is divided ";
+         specialDesc += refCount > 2 ? "among" : "between";
+         specialDesc += " them in this report.";
+       }
++
++      printf_stderr("bignose in PLDHashOperator ReportCallback path:%s",path.get());
++
+       envp->mCallback->Callback(EmptyCString(),
+                                 path,
+                                 KIND_OTHER,
+                                 UNITS_BYTES,
+                                 size / refCount,
+                                 (specialDesc.IsEmpty()
+                                  ? static_cast<const nsACString&>(desc)
+                                  : static_cast<const nsACString&>(specialDesc)),
+@@ -228,34 +253,46 @@ class BlobURLsReporter MOZ_FINAL : publi
+     return PL_DHASH_NEXT;
+   }
+ };
+ 
+ NS_IMPL_ISUPPORTS1(BlobURLsReporter, nsIMemoryReporter)
+ 
+ }
+ 
+-nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++bool nsHostObjectProtocolHandler::initialized = false;
++
++void
++nsHostObjectProtocolHandler::Init(void)
+ {
+-  static bool initialized = false;
+-
+   if (!initialized) {
+     initialized = true;
+     RegisterStrongMemoryReporter(new mozilla::HostObjectURLsReporter());
+     RegisterStrongMemoryReporter(new mozilla::BlobURLsReporter());
+   }
+ }
+ 
++nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++{
++  printf_stderr("bignose nsHostObjectProtocolHandler::nsHostObjectProtocolHandler");
++
++  Init();
++}
++
+ 
+ nsresult
+ nsHostObjectProtocolHandler::AddDataEntry(const nsACString& aScheme,
+                                           nsISupports* aObject,
+                                           nsIPrincipal* aPrincipal,
+                                           nsACString& aUri)
+ {
++  printf_stderr("bignose nsHostObjectProtocolHandler::AddDataEntry");
++
++  Init();
++
+   nsresult rv = GenerateURIString(aScheme, aUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (!gDataTable) {
+     gDataTable = new nsClassHashtable<nsCStringHashKey, DataInfo>;
+   }
+ 
+   DataInfo* info = new DataInfo;
+diff --git a/dom/base/URL.cpp b/dom/base/URL.cpp
+--- a/dom/base/URL.cpp
++++ b/dom/base/URL.cpp
+@@ -159,16 +159,18 @@ URL::CreateObjectURLInternal(const Globa
+     }
+ 
+     nsIDocument* doc = window->GetExtantDoc();
+     if (doc) {
+       doc->RegisterHostObjectUri(url);
+     }
+   }
+ 
++  printf_stderr("bignose CreateObjectURLInternal, blob:%s", url.get());
++
+   CopyASCIItoUTF16(url, aResult);
+ }
+ 
+ void
+ URL::RevokeObjectURL(const GlobalObject& aGlobal, const nsAString& aURL)
+ {
+   nsIPrincipal* principal = nsContentUtils::GetObjectPrincipal(aGlobal.Get());
+ 
+diff --git a/image/src/Makefile.in b/image/src/Makefile.in
+--- a/image/src/Makefile.in
++++ b/image/src/Makefile.in
+@@ -2,8 +2,10 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ # Because imgFrame.cpp includes "cairo.h"
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/image/src/imgLoader.cpp b/image/src/imgLoader.cpp
+--- a/image/src/imgLoader.cpp
++++ b/image/src/imgLoader.cpp
+@@ -1,14 +1,16 @@
+ /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim: set ts=8 sts=2 et sw=2 tw=80: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#include <cstring>
++
+ #include "mozilla/Attributes.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/ClearOnShutdown.h"
+ 
+ #include "ImageLogging.h"
+ #include "nsPrintfCString.h"
+ #include "imgLoader.h"
+ #include "imgRequestProxy.h"
+@@ -969,16 +971,23 @@ bool imgLoader::PutIntoCache(nsIURI *key
+ {
+   imgCacheTable &cache = GetCache(key);
+ 
+   nsAutoCString spec;
+   key->GetSpec(spec);
+ 
+   LOG_STATIC_FUNC_WITH_PARAM(GetImgLog(), "imgLoader::PutIntoCache", "uri", spec.get());
+ 
++  printf_stderr("bignose imgLoader::PutIntoCache:%s",spec.get());
++
++  if(std::strncmp(spec.get(),"blob",4)==0){
++    int test_flag=0;
++    test_flag=10;
++  }
++
+   // Check to see if this request already exists in the cache and is being
+   // loaded on a different thread. If so, don't allow this entry to be added to
+   // the cache.
+   nsRefPtr<imgCacheEntry> tmpCacheEntry;
+   if (cache.Get(spec, getter_AddRefs(tmpCacheEntry)) && tmpCacheEntry) {
+     PR_LOG(GetImgLog(), PR_LOG_DEBUG,
+            ("[this=%p] imgLoader::PutIntoCache -- Element already in the cache", nullptr));
+     nsRefPtr<imgRequest> tmpRequest = tmpCacheEntry->GetRequest();
+@@ -1390,16 +1399,22 @@ bool imgLoader::RemoveFromCache(ImageURL
+ }
+ 
+ bool imgLoader::RemoveFromCache(nsCString& spec,
+                                 imgCacheTable &cache,
+                                 imgCacheQueue &queue)
+ {
+   LOG_STATIC_FUNC_WITH_PARAM(GetImgLog(), "imgLoader::RemoveFromCache", "uri", spec.get());
+ 
++  printf_stderr("bignose imgLoader::RemoveFromCache:%s",spec.get());
++  if(std::strncmp(spec.get(),"blob",4)==0){
++    int test_flag=0;
++    test_flag=10;
++  }
++
+   nsRefPtr<imgCacheEntry> entry;
+   if (cache.Get(spec, getter_AddRefs(entry)) && entry) {
+     cache.Remove(spec);
+ 
+     NS_ABORT_IF_FALSE(!entry->Evicted(), "Evicting an already-evicted cache entry!");
+ 
+     // Entries with no proxies are in the tracker.
+     if (entry->HasNoProxies()) {
+@@ -1429,16 +1444,22 @@ bool imgLoader::RemoveFromCache(imgCache
+     if (NS_SUCCEEDED(request->GetURI(getter_AddRefs(key))) && key) {
+       imgCacheTable &cache = GetCache(key);
+       imgCacheQueue &queue = GetCacheQueue(key);
+       nsAutoCString spec;
+       key->GetSpec(spec);
+ 
+       LOG_STATIC_FUNC_WITH_PARAM(GetImgLog(), "imgLoader::RemoveFromCache", "entry's uri", spec.get());
+ 
++      printf_stderr("bignose imgLoader::RemoveFromCache:%s",spec.get());
++      if(std::strncmp(spec.get(),"blob",4)==0){
++        int test_flag=0;
++        test_flag=10;
++      }
++
+       cache.Remove(spec);
+ 
+       if (entry->HasNoProxies()) {
+         LOG_STATIC_FUNC(GetImgLog(), "imgLoader::RemoveFromCache removing from tracker");
+         if (mCacheTracker)
+           mCacheTracker->RemoveObject(entry);
+         queue.Remove(entry);
+       }
+@@ -1555,16 +1576,22 @@ nsresult imgLoader::LoadImage(nsIURI *aU
+ 
+   if (!aURI)
+     return NS_ERROR_NULL_POINTER;
+ 
+   nsAutoCString spec;
+   aURI->GetSpec(spec);
+   LOG_SCOPE_WITH_PARAM(GetImgLog(), "imgLoader::LoadImage", "aURI", spec.get());
+ 
++  printf_stderr("bignose imgLoader::LoadImage:%s",spec.get());
++  if(std::strncmp(spec.get(),"blob",4)==0){
++    int test_flag=0;
++    test_flag=10;
++  }
++
+   *_retval = nullptr;
+ 
+   nsRefPtr<imgRequest> request;
+ 
+   nsresult rv;
+   nsLoadFlags requestFlags = nsIRequest::LOAD_NORMAL;
+ 
+ #ifdef DEBUG

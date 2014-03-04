@@ -1,0 +1,173 @@
+# HG changeset patch
+# Parent 8ad1e4c838c8a1de13e6141d50efe0e34b2a9f51
+# User Jerry Shih <hshih@mozilla.com>
+modify gfx build option to -O0
+
+diff --git a/content/media/AudioNodeEngine.cpp b/content/media/AudioNodeEngine.cpp
+--- a/content/media/AudioNodeEngine.cpp
++++ b/content/media/AudioNodeEngine.cpp
+@@ -1,14 +1,16 @@
+ /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim:set ts=2 sw=2 sts=2 et cindent: */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#undef BUILD_ARM_NEON
++
+ #include "mozilla/arm.h"
+ #include "AudioNodeEngine.h"
+ #ifdef BUILD_ARM_NEON
+ #include "AudioNodeEngineNEON.h"
+ #endif
+ 
+ namespace mozilla {
+ 
+diff --git a/content/media/Makefile.in b/content/media/Makefile.in
+--- a/content/media/Makefile.in
++++ b/content/media/Makefile.in
+@@ -12,16 +12,18 @@ include $(DEPTH)/config/autoconf.mk
+ LIBRARY_NAME = gkconmedia_s
+ MSVC_ENABLE_PGO := 1
+ LIBXUL_LIBRARY = 1
+ FAIL_ON_WARNINGS := 1
+ 
+ include $(topsrcdir)/config/rules.mk
+ include $(topsrcdir)/ipc/chromium/chromium-config.mk
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+ LOCAL_INCLUDES  += \
+   -I$(topsrcdir)/content/base/src \
+   -I$(topsrcdir)/layout/generic \
+   -I$(topsrcdir)/layout/xul/base/src \
+   $(NULL)
+ 
+ ifdef MOZ_DIRECTSHOW
+ LOCAL_INCLUDES += -I$(topsrcdir)/media/webrtc/trunk/webrtc/modules/video_capture/windows/
+diff --git a/content/media/moz.build b/content/media/moz.build
+--- a/content/media/moz.build
++++ b/content/media/moz.build
+@@ -126,12 +126,12 @@ CPP_SOURCES += [
+     'VideoFrameContainer.cpp',
+     'VideoPlaybackQuality.cpp',
+     'VideoSegment.cpp',
+     'VideoStreamTrack.cpp',
+     'VideoUtils.cpp',
+     'WebVTTLoadListener.cpp',
+ ]
+ 
+-if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['BUILD_ARM_NEON']:
+-    CPP_SOURCES += [
+-        'AudioNodeEngineNEON.cpp',
+-    ]
++#if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['BUILD_ARM_NEON']:
++#    CPP_SOURCES += [
++#        'AudioNodeEngineNEON.cpp',
++#    ]
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -67,8 +67,11 @@ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
+ ImageScalingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ BlurSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ endif
+ endif
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS)
++
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -73,8 +73,11 @@ endif
+ 
+ include $(topsrcdir)/config/rules.mk
+ include $(topsrcdir)/ipc/chromium/chromium-config.mk
+ 
+ DEFINES := $(filter-out -DUNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS) $(TK_CFLAGS)
+ CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS) $(TK_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -47,8 +47,11 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PI
+ 
+ ifdef _MSC_VER
+ ifeq ($(CPU_ARCH),x86_64)
+ # Workaround compiler bug (Bug 795594)
+ LayerTreeInvalidation.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ Layers.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ endif
+ endif
++
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
+--- a/gfx/src/Makefile.in
++++ b/gfx/src/Makefile.in
+@@ -26,8 +26,10 @@ endif
+ ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
+ CXXFLAGS += $(CAIRO_FT_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(MOZ_QT_CFLAGS)
+ endif
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -100,8 +100,12 @@ ifdef SOLARIS_SUNPRO_CXX
+ gfxAlphaRecoverySSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ endif
+ endif
+ 
+ PremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
+ 
+ gfxUtils.$(OBJ_SUFFIX): PremultiplyTables.h
++
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/ipc/ipdl/Makefile.in b/ipc/ipdl/Makefile.in
+--- a/ipc/ipdl/Makefile.in
++++ b/ipc/ipdl/Makefile.in
+@@ -45,8 +45,12 @@ ipdl: $(ALL_IPDLSRCS)
+ # toolkit libraries.
+ CXXFLAGS    += $(TK_CFLAGS)
+ 
+ # This is only needed to support |make| from this leaf directory/Makefile.
+ NONRECURSIVE_TARGETS := export
+ NONRECURSIVE_TARGETS_export := ipdl
+ NONRECURSIVE_TARGETS_export_ipdl_DIRECTORY := .
+ NONRECURSIVE_TARGETS_export_ipdl_TARGETS := ipdl
++
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/widget/gonk/Makefile.in b/widget/gonk/Makefile.in
+--- a/widget/gonk/Makefile.in
++++ b/widget/gonk/Makefile.in
+@@ -40,8 +40,11 @@ LOCAL_INCLUDES += \
+ 	-I$(topsrcdir)/widget/shared \
+ 	-I$(topsrcdir)/dom/system/android \
+ 	-I$(topsrcdir)/content/events/src \
+ 	-I$(topsrcdir)/gfx/skia/include/core \
+ 	-I$(topsrcdir)/gfx/skia/include/config \
+ 	-I$(topsrcdir)/content/media/omx/mediaresourcemanager \
+ 	-I$(srcdir) \
+ 	$(NULL)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++

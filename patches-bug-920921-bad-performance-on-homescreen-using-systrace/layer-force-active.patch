@@ -1,0 +1,27 @@
+# HG changeset patch
+# Parent 63a788f001ccdf4836184aac3d051eac27dee268
+# User Jerry Shih <hshih@mozilla.com>
+layers force active
+
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -71,16 +71,17 @@ pref("browser.sessionstore.interval", 10
+ pref("browser.sessionstore.max_tabs_undo", 1);
+ 
+ /* these should help performance */
+ pref("mozilla.widget.force-24bpp", true);
+ pref("mozilla.widget.use-buffer-pixmap", true);
+ pref("mozilla.widget.disable-native-theme", true);
+ pref("layout.reflow.synthMouseMove", false);
+ pref("layers.force-tiles", false);
++pref("layers.force-active", false); //debug homescreen layer
+ 
+ /* download manager (don't show the window or alert) */
+ pref("browser.download.useDownloadDir", true);
+ pref("browser.download.folderList", 1); // Default to ~/Downloads
+ pref("browser.download.manager.showAlertOnComplete", false);
+ pref("browser.download.manager.showAlertInterval", 2000);
+ pref("browser.download.manager.retention", 2);
+ pref("browser.download.manager.showWhenStarting", false);

@@ -1,0 +1,35 @@
+From e5c991154a37cb303a9d21385c62c9c932823654 Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Tue, 8 Oct 2013 11:05:17 +0800
+Subject: [PATCH 1/2] build pass
+
+---
+ dom/camera/Makefile.in            |    1 +
+ tools/profiler/EHABIStackWalk.cpp |    2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dom/camera/Makefile.in b/dom/camera/Makefile.in
+index b9fbdbd..49b8224 100644
+--- a/dom/camera/Makefile.in
++++ b/dom/camera/Makefile.in
+@@ -5,3 +5,4 @@
+ include $(topsrcdir)/dom/dom-config.mk
+ include $(topsrcdir)/config/rules.mk
+ include $(topsrcdir)/ipc/chromium/chromium-config.mk
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/tools/profiler/EHABIStackWalk.cpp b/tools/profiler/EHABIStackWalk.cpp
+index 7cfa805..4f68f0e 100644
+--- a/tools/profiler/EHABIStackWalk.cpp
++++ b/tools/profiler/EHABIStackWalk.cpp
+@@ -513,7 +513,7 @@ EHTable::EHTable(const void *aELF, size_t aSize, const std::string &aName)
+       file.e_ident[EI_DATA] != hostEndian ||
+       file.e_ident[EI_VERSION] != EV_CURRENT ||
+       file.e_ident[EI_OSABI] != ELFOSABI_SYSV ||
+-      file.e_ident[EI_ABIVERSION] != 0 ||
++//      file.e_ident[EI_ABIVERSION] != 0 ||
+       file.e_machine != EM_ARM ||
+       file.e_version != EV_CURRENT)
+     // e_flags?
+-- 
+1.7.9.5
+

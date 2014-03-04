@@ -1,0 +1,697 @@
+# HG changeset patch
+# Parent 3cd11859355ae6b74e0e66a653c474b4455b3a7e
+# User Morris Tseng <mtseng@mozilla.com>
+
+diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
+--- a/gfx/layers/client/CanvasClient.cpp
++++ b/gfx/layers/client/CanvasClient.cpp
+@@ -12,16 +12,18 @@
+ #include "SurfaceTypes.h"               // for SurfaceStreamHandle
+ #include "gfx2DGlue.h"                  // for ImageFormatToSurfaceFormat
+ #include "gfxASurface.h"                // for gfxASurface, etc
+ #include "gfxPlatform.h"                // for gfxPlatform
+ #include "mozilla/gfx/BaseSize.h"       // for BaseSize
+ #include "mozilla/layers/CompositableForwarder.h"
+ #include "mozilla/layers/LayersTypes.h"
+ #include "mozilla/layers/TextureClient.h"  // for TextureClient, etc
++#include "mozilla/layers/GrallocTextureClient.h"
++#include "mozilla/layers/TextureClientOGL.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsDebug.h"                    // for printf_stderr, NS_ASSERTION
+ #include "nsXULAppAPI.h"                // for XRE_GetProcessType, etc
+ #ifdef MOZ_WIDGET_GONK
+ #include "SharedSurfaceGralloc.h"
+ #endif
+ 
+ using namespace mozilla::gl;
+@@ -38,25 +40,110 @@ namespace layers {
+ /* static */ TemporaryRef<CanvasClient>
+ CanvasClient::CreateCanvasClient(CanvasClientType aType,
+                                  CompositableForwarder* aForwarder,
+                                  TextureFlags aFlags)
+ {
+   if (aType == CanvasClientGLContext &&
+       aForwarder->GetCompositorBackendType() == LAYERS_OPENGL) {
+     aFlags |= TEXTURE_DEALLOCATE_CLIENT;
+-    return new DeprecatedCanvasClientSurfaceStream(aForwarder, aFlags);
++    //return new DeprecatedCanvasClientSurfaceStream(aForwarder, aFlags);
++    return new CanvasClientSurfaceStream(aForwarder, aFlags);
+   }
+   if (gfxPlatform::GetPlatform()->UseDeprecatedTextures()) {
+     aFlags |= TEXTURE_DEALLOCATE_CLIENT;
+     return new DeprecatedCanvasClient2D(aForwarder, aFlags);
+   }
+   return new CanvasClient2D(aForwarder, aFlags);
+ }
+ 
++CanvasClientSurfaceStream::CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder,
++                                     TextureFlags aFlags)
++  : CanvasClient(aLayerForwarder, aFlags)
++{
++}
++
++void
++CanvasClientSurfaceStream::OnActorDestroy()
++{
++#ifdef MOZ_WIDGET_GONK
++  typedef std::map<gfx::SharedSurface*, RefPtr<TextureClient> >::iterator buffer_iterator;
++
++  if (mBuffers.size()) {
++    for (buffer_iterator pos = mBuffers.begin(); pos != mBuffers.end(); ++pos) {
++      if (pos->second) {
++        pos->second->OnActorDestroy();
++      }
++    }
++  }
++#else
++  if (mBuffer) {
++    mBuffer->OnActorDestroy();
++  }
++#endif
++}
++
++void
++CanvasClientSurfaceStream::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
++{
++  GLScreenBuffer* screen = aLayer->mGLContext->Screen();
++  SurfaceStream* stream = screen->Stream();
++
++  bool isCrossProcess = !(XRE_GetProcessType() == GeckoProcessType_Default);
++  if (isCrossProcess) {
++#ifdef MOZ_WIDGET_GONK
++    SharedSurface* surf = stream->SwapConsumer();
++    if (!surf) {
++      printf_stderr("surf is null post-SwapConsumer!\n");
++      return;
++    }
++
++    if (surf->Type() != SharedSurfaceType::Gralloc) {
++      printf_stderr("Unexpected non-Gralloc SharedSurface in IPC path!");
++      return;
++    }
++
++    SharedSurface_Gralloc* grallocSurf = SharedSurface_Gralloc::Cast(surf);
++
++    if (mBuffers.find(surf) == mBuffers.end()) {
++      GrallocTextureClientOGL* grallocTC = new GrallocTextureClientOGL(static_cast<GrallocBufferActor*>(grallocSurf->GetDescriptor().bufferChild()),
++                                                                       grallocSurf->Size(),
++                                                                       mTextureInfo.mTextureFlags);
++
++      mBuffers[surf] = grallocTC;
++      AddTextureClient(grallocTC);
++    }
++
++    GetForwarder()->UseTexture(this, mBuffers[surf]);
++#else
++    printf_stderr("isCrossProcess, but not MOZ_WIDGET_GONK! Someone needs to write some code!");
++    MOZ_ASSERT(false);
++#endif
++  } else {
++#ifndef MOZ_WIDGET_GONK
++    if (!mBuffer) {
++      StreamTextureClientOGL* textureClient = new StreamTextureClientOGL(mTextureInfo.mTextureFlags);
++      textureClient->InitWith(stream, gfx::IntSize());
++      AddTextureClient(textureClient);
++      mBuffer = textureClient;
++    }
++
++    GetForwarder()->UseTexture(this, mBuffer);
++#endif
++
++    // Bug 894405
++    //
++    // Ref this so the SurfaceStream doesn't disappear unexpectedly. The
++    // Compositor will need to unref it when finished.
++    aLayer->mGLContext->AddRef();
++  }
++
++  aLayer->Painted();
++}
++
+ void
+ CanvasClient2D::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
+ {
+   if (mBuffer &&
+       (mBuffer->IsImmutable() || mBuffer->GetSize() != aSize)) {
+     RemoveTextureClient(mBuffer);
+     mBuffer = nullptr;
+   }
+diff --git a/gfx/layers/client/CanvasClient.h b/gfx/layers/client/CanvasClient.h
+--- a/gfx/layers/client/CanvasClient.h
++++ b/gfx/layers/client/CanvasClient.h
+@@ -14,16 +14,22 @@
+ #include "mozilla/layers/LayersSurfaces.h"  // for SurfaceDescriptor
+ #include "mozilla/layers/TextureClient.h"  // for TextureClient, etc
+ #include "mozilla/mozalloc.h"           // for operator delete
+ 
+ #include "mozilla/gfx/Point.h"          // for IntSize
+ #include "mozilla/gfx/Types.h"          // for SurfaceFormat
+ 
+ namespace mozilla {
++namespace gfx {
++class SharedSurface;
++}
++}
++
++namespace mozilla {
+ namespace layers {
+ 
+ class ClientCanvasLayer;
+ class CompositableForwarder;
+ 
+ /**
+  * Compositable client for 2d and webgl canvas.
+  */
+@@ -92,16 +98,48 @@ public:
+   }
+ 
+   virtual void OnActorDestroy() MOZ_OVERRIDE;
+ 
+ private:
+   RefPtr<TextureClient> mBuffer;
+ };
+ 
++class CanvasClientSurfaceStream : public CanvasClient
++{
++public:
++  CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder, TextureFlags aFlags);
++
++  TextureInfo GetTextureInfo() const
++  {
++    return TextureInfo(COMPOSITABLE_IMAGE);
++  }
++
++  virtual void Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer) MOZ_OVERRIDE;
++
++  virtual void OnDetach() MOZ_OVERRIDE
++  {
++#ifdef MOZ_WIDGET_GONK
++    mBuffers.clear();
++#else
++    mBuffer = nullptr;
++#endif
++  }
++
++  virtual void OnActorDestroy() MOZ_OVERRIDE;
++
++private:
++#ifdef MOZ_WIDGET_GONK
++  std::map<gfx::SharedSurface*, RefPtr<TextureClient> > mBuffers;
++#else
++  RefPtr<TextureClient> mBuffer;
++#endif
++};
++
++
+ class DeprecatedCanvasClient2D : public CanvasClient
+ {
+ public:
+   DeprecatedCanvasClient2D(CompositableForwarder* aLayerForwarder,
+                            TextureFlags aFlags);
+ 
+   TextureInfo GetTextureInfo() const MOZ_OVERRIDE
+   {
+diff --git a/gfx/layers/client/ClientCanvasLayer.h b/gfx/layers/client/ClientCanvasLayer.h
+--- a/gfx/layers/client/ClientCanvasLayer.h
++++ b/gfx/layers/client/ClientCanvasLayer.h
+@@ -90,13 +90,14 @@ protected:
+     return CanvasClient::CanvasClientSurface;
+   }
+ 
+   RefPtr<CanvasClient> mCanvasClient;
+ 
+   friend class DeprecatedCanvasClient2D;
+   friend class CanvasClient2D;
+   friend class DeprecatedCanvasClientSurfaceStream;
++  friend class CanvasClientSurfaceStream;
+ };
+ }
+ }
+ 
+ #endif
+diff --git a/gfx/layers/opengl/TextureClientOGL.cpp b/gfx/layers/opengl/TextureClientOGL.cpp
+--- a/gfx/layers/opengl/TextureClientOGL.cpp
++++ b/gfx/layers/opengl/TextureClientOGL.cpp
+@@ -1,14 +1,15 @@
+ /* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+  * This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "mozilla/layers/TextureClientOGL.h"
++#include "SurfaceStream.h"
+ #include "GLContext.h"                  // for GLContext, etc
+ #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
+ #include "mozilla/layers/ISurfaceAllocator.h"
+ #include "nsSize.h"                     // for nsIntSize
+ 
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+@@ -61,16 +62,57 @@ SharedTextureClientOGL::InitWith(gl::Sha
+ }
+ 
+ bool
+ SharedTextureClientOGL::IsAllocated() const
+ {
+   return mHandle != 0;
+ }
+ 
++StreamTextureClientOGL::StreamTextureClientOGL(TextureFlags aFlags)
++  : TextureClient(aFlags)
++  , mStream(0)
++{
++  MOZ_ASSERT(!(aFlags & (TEXTURE_DEALLOCATE_CLIENT|TEXTURE_DEALLOCATE_HOST)),
++             "StreamTextureClientOGL doesn't know how to release textures!");
++}
++ 
++StreamTextureClientOGL::~StreamTextureClientOGL()
++{
++  // the data is owned externally.
++}
++
++
++bool
++StreamTextureClientOGL::ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor)
++{
++  if (!IsAllocated()) {
++    return false;
++  }
++
++  gfx::SurfaceStreamHandle handle = mStream->GetShareHandle();
++  aOutDescriptor = SurfaceStreamDescriptor(handle, false);
++  return true;
++}
++
++void
++StreamTextureClientOGL::InitWith(gfx::SurfaceStream* aStream,
++                                 gfx::IntSize aSize)
++{
++  MOZ_ASSERT(!IsAllocated());
++  mStream = aStream;
++  mSize = aSize;
++}
++
++bool
++StreamTextureClientOGL::IsAllocated() const
++{
++  return mStream != 0;
++}
++
+ DeprecatedTextureClientSharedOGL::DeprecatedTextureClientSharedOGL(CompositableForwarder* aForwarder,
+                                                const TextureInfo& aTextureInfo)
+   : DeprecatedTextureClient(aForwarder, aTextureInfo)
+   , mGL(nullptr)
+ {
+ }
+ 
+ void
+diff --git a/gfx/layers/opengl/TextureClientOGL.h b/gfx/layers/opengl/TextureClientOGL.h
+--- a/gfx/layers/opengl/TextureClientOGL.h
++++ b/gfx/layers/opengl/TextureClientOGL.h
+@@ -10,16 +10,21 @@
+ #include "gfxTypes.h"
+ #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
+ #include "mozilla/gfx/Point.h"          // for IntSize
+ #include "mozilla/layers/CompositorTypes.h"
+ #include "mozilla/layers/LayersSurfaces.h"  // for SurfaceDescriptor
+ #include "mozilla/layers/TextureClient.h"  // for DeprecatedTextureClient, etc
+ 
+ namespace mozilla {
++
++namespace gfx {
++  class SurfaceStream;
++}
++
+ namespace layers {
+ 
+ class CompositableForwarder;
+ 
+ /**
+  * A TextureClient implementation to share TextureMemory that is already
+  * on the GPU, for the OpenGL backend.
+  */
+@@ -52,16 +57,37 @@ public:
+ 
+ protected:
+   gl::SharedTextureHandle mHandle;
+   gfx::IntSize mSize;
+   gl::SharedTextureShareType mShareType;
+   bool mInverted;
+ };
+ 
++class StreamTextureClientOGL : public TextureClient
++{
++public:
++  StreamTextureClientOGL(TextureFlags aFlags);
++
++  ~StreamTextureClientOGL();
++
++  virtual bool IsAllocated() const MOZ_OVERRIDE;
++
++  virtual bool ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor) MOZ_OVERRIDE;
++
++  void InitWith(gfx::SurfaceStream* aStream,
++                gfx::IntSize aSize);
++
++  virtual gfx::IntSize GetSize() const { return mSize; }
++
++protected:
++  gfx::SurfaceStream* mStream;
++  gfx::IntSize mSize;
++};
++
+ class DeprecatedTextureClientSharedOGL : public DeprecatedTextureClient
+ {
+ public:
+   DeprecatedTextureClientSharedOGL(CompositableForwarder* aForwarder, const TextureInfo& aTextureInfo);
+   ~DeprecatedTextureClientSharedOGL() { ReleaseResources(); }
+ 
+   virtual bool SupportsType(DeprecatedTextureClientType aType) MOZ_OVERRIDE { return aType == TEXTURE_SHARED_GL; }
+   virtual bool EnsureAllocated(gfx::IntSize aSize, gfxContentType aType);
+diff --git a/gfx/layers/opengl/TextureHostOGL.cpp b/gfx/layers/opengl/TextureHostOGL.cpp
+--- a/gfx/layers/opengl/TextureHostOGL.cpp
++++ b/gfx/layers/opengl/TextureHostOGL.cpp
+@@ -108,16 +108,23 @@ CreateTextureHostOGL(uint64_t aID,
+ #ifdef XP_MACOSX
+     case SurfaceDescriptor::TSurfaceDescriptorMacIOSurface: {
+       const SurfaceDescriptorMacIOSurface& desc =
+         aDesc.get_SurfaceDescriptorMacIOSurface();
+       result = new MacIOSurfaceTextureHostOGL(aID, aFlags, desc);
+       break;
+     }
+ #endif
++
++    case SurfaceDescriptor::TSurfaceStreamDescriptor: {
++      const SurfaceStreamDescriptor& desc = aDesc.get_SurfaceStreamDescriptor();
++      result = new StreamTextureHostOGL(aID, aFlags, desc);
++      break;
++    }
++
+ #ifdef MOZ_WIDGET_GONK
+     case SurfaceDescriptor::TNewSurfaceDescriptorGralloc: {
+       const NewSurfaceDescriptorGralloc& desc =
+         aDesc.get_NewSurfaceDescriptorGralloc();
+       result = new GrallocTextureHostOGL(aID, aFlags, desc);
+       break;
+     }
+ #endif
+@@ -442,16 +449,188 @@ SharedTextureHostOGL::SetCompositor(Comp
+ 
+ gfx::SurfaceFormat
+ SharedTextureHostOGL::GetFormat() const
+ {
+   MOZ_ASSERT(mTextureSource);
+   return mTextureSource->GetFormat();
+ }
+ 
++void
++StreamTextureSourceOGL::BindTexture(GLenum activetex)
++{
++  MOZ_ASSERT(gl());
++  gl()->fActiveTexture(activetex);
++  gl()->fBindTexture(mTextureTarget, mTextureHandle);
++}
++
++bool
++StreamTextureSourceOGL::RetrieveTextureFromStream()
++{
++  gl()->MakeCurrent();
++
++  SharedSurface* sharedSurf = mStream->SwapConsumer();
++  if (!sharedSurf) {
++    // We don't have a valid surf to show yet.
++    return false;
++  }
++
++  gl()->MakeCurrent();
++
++  mSize = IntSize(sharedSurf->Size().width, sharedSurf->Size().height);
++
++  gfxImageSurface* toUpload = nullptr;
++  switch (sharedSurf->Type()) {
++    case SharedSurfaceType::GLTextureShare: {
++      SharedSurface_GLTexture* glTexSurf = SharedSurface_GLTexture::Cast(sharedSurf);
++      glTexSurf->SetConsumerGL(gl());
++      mTextureHandle = glTexSurf->Texture();
++      mTextureTarget = glTexSurf->TextureTarget();
++      MOZ_ASSERT(mTextureHandle);
++      mFormat = sharedSurf->HasAlpha() ? FORMAT_R8G8B8A8
++                                       : FORMAT_R8G8B8X8;
++      break;
++    }
++    case SharedSurfaceType::EGLImageShare: {
++      SharedSurface_EGLImage* eglImageSurf =
++          SharedSurface_EGLImage::Cast(sharedSurf);
++
++      mTextureHandle = eglImageSurf->AcquireConsumerTexture(gl());
++      mTextureTarget = eglImageSurf->TextureTarget();
++      if (!mTextureHandle) {
++        toUpload = eglImageSurf->GetPixels();
++        MOZ_ASSERT(toUpload);
++      } else {
++        mFormat = sharedSurf->HasAlpha() ? FORMAT_R8G8B8A8
++                                         : FORMAT_R8G8B8X8;
++      }
++      break;
++    }
++#ifdef XP_MACOSX
++    case SharedSurfaceType::IOSurface: {
++      SharedSurface_IOSurface* glTexSurf = SharedSurface_IOSurface::Cast(sharedSurf);
++      mTextureHandle = glTexSurf->Texture();
++      mTextureTarget = glTexSurf->TextureTarget();
++      MOZ_ASSERT(mTextureHandle);
++      mFormat = sharedSurf->HasAlpha() ? FORMAT_R8G8B8A8
++                                       : FORMAT_R8G8B8X8;
++      break;
++    }
++#endif
++    case SharedSurfaceType::Basic: {
++      toUpload = SharedSurface_Basic::Cast(sharedSurf)->GetData();
++      MOZ_ASSERT(toUpload);
++      break;
++    }
++    default:
++      MOZ_CRASH("Invalid SharedSurface type.");
++  }
++
++  if (toUpload) {
++    // mBounds seems to end up as (0,0,0,0) a lot, so don't use it?
++    nsIntSize size(toUpload->GetSize());
++    nsIntRect rect(nsIntPoint(0,0), size);
++    nsIntRegion bounds(rect);
++    mFormat = gl()->UploadSurfaceToTexture(toUpload,
++                                           bounds,
++                                           mUploadTexture,
++                                           true);
++    mTextureHandle = mUploadTexture;
++    mTextureTarget = LOCAL_GL_TEXTURE_2D;
++  }
++
++  MOZ_ASSERT(mTextureHandle);
++  gl()->fBindTexture(mTextureTarget, mTextureHandle);
++  gl()->fTexParameteri(mTextureTarget,
++                      LOCAL_GL_TEXTURE_WRAP_S,
++                      LOCAL_GL_CLAMP_TO_EDGE);
++  gl()->fTexParameteri(mTextureTarget,
++                      LOCAL_GL_TEXTURE_WRAP_T,
++                      LOCAL_GL_CLAMP_TO_EDGE);
++
++  return true;
++}
++
++void
++StreamTextureSourceOGL::DeallocateDeviceData() 
++{
++  if (mUploadTexture) {
++    MOZ_ASSERT(gl());
++    gl()->MakeCurrent();
++    gl()->fDeleteTextures(1, &mUploadTexture);
++    mUploadTexture = 0;
++    mTextureHandle = 0;
++  }
++}
++
++gl::GLContext*
++StreamTextureSourceOGL::gl() const
++{
++  return mCompositor ? mCompositor->gl() : nullptr;
++}
++
++StreamTextureHostOGL::StreamTextureHostOGL(uint64_t aID,
++                                           TextureFlags aFlags,
++                                           const SurfaceStreamDescriptor& aDesc)
++  : TextureHost(aID, aFlags)
++{
++  mStream = SurfaceStream::FromHandle(aDesc.handle());
++  MOZ_ASSERT(mStream);
++}
++
++StreamTextureHostOGL::~StreamTextureHostOGL()
++{
++  // If need to deallocate textures, call DeallocateSharedData() before
++  // the destructor
++}
++
++bool
++StreamTextureHostOGL::Lock()
++{
++  if (!mCompositor) {
++    return false;
++  }
++
++  if (!mTextureSource) {
++    mTextureSource = new StreamTextureSourceOGL(mCompositor,
++                                                mStream);
++  }
++
++  return mTextureSource->RetrieveTextureFromStream();
++}
++
++void
++StreamTextureHostOGL::Unlock()
++{
++}
++
++void
++StreamTextureHostOGL::SetCompositor(Compositor* aCompositor)
++{
++  CompositorOGL* glCompositor = static_cast<CompositorOGL*>(aCompositor);
++  mCompositor = glCompositor;
++  if (mTextureSource) {
++    mTextureSource->SetCompositor(glCompositor);
++  }
++}
++
++gfx::SurfaceFormat
++StreamTextureHostOGL::GetFormat() const
++{
++  MOZ_ASSERT(mTextureSource);
++  return mTextureSource->GetFormat();
++}
++
++gfx::IntSize
++StreamTextureHostOGL::GetSize() const
++{
++  MOZ_ASSERT(mTextureSource);
++  return mTextureSource->GetSize();
++}
++
+ TextureImageDeprecatedTextureHostOGL::~TextureImageDeprecatedTextureHostOGL()
+ {
+   MOZ_COUNT_DTOR(TextureImageDeprecatedTextureHostOGL);
+   if (mTexture && mTexture->InUpdate()) {
+     mTexture->EndUpdate();
+   }
+ }
+ 
+diff --git a/gfx/layers/opengl/TextureHostOGL.h b/gfx/layers/opengl/TextureHostOGL.h
+--- a/gfx/layers/opengl/TextureHostOGL.h
++++ b/gfx/layers/opengl/TextureHostOGL.h
+@@ -338,16 +338,106 @@ protected:
+   gfx::IntSize mSize;
+   CompositorOGL* mCompositor;
+   gl::SharedTextureHandle mSharedHandle;
+   gl::SharedTextureShareType mShareType;
+ 
+   RefPtr<SharedTextureSourceOGL> mTextureSource;
+ };
+ 
++class StreamTextureSourceOGL : public NewTextureSource
++                             , public TextureSourceOGL
++{
++public:
++  StreamTextureSourceOGL(CompositorOGL* aCompositor,
++                         gfx::SurfaceStream* aStream) 
++    : mCompositor(aCompositor)
++    , mStream(aStream)
++    , mTextureHandle(0)
++    , mTextureTarget(LOCAL_GL_TEXTURE_2D)
++    , mUploadTexture(0)
++    , mFormat(gfx::FORMAT_UNKNOWN)
++  {}
++
++  virtual TextureSourceOGL* AsSourceOGL() { return this; }
++
++  virtual void BindTexture(GLenum activetex) MOZ_OVERRIDE;
++
++  virtual bool IsValid() const MOZ_OVERRIDE { return !!gl(); }
++
++  virtual gfx::IntSize GetSize() const MOZ_OVERRIDE { return mSize; }
++
++  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE { return mFormat; }
++
++  virtual GLenum GetTextureTarget() const { return mTextureTarget; }
++
++  virtual GLenum GetWrapMode() const MOZ_OVERRIDE { return LOCAL_GL_CLAMP_TO_EDGE; }
++
++  virtual void UnbindTexture() MOZ_OVERRIDE {}
++
++  virtual void DeallocateDeviceData(); 
++
++  bool RetrieveTextureFromStream();
++
++  void SetCompositor(CompositorOGL* aCompositor) { mCompositor = aCompositor; }
++
++protected:
++  gl::GLContext* gl() const;
++
++  CompositorOGL* mCompositor;
++  gfx::SurfaceStream* mStream;
++  GLuint mTextureHandle;
++  GLenum mTextureTarget;
++  GLuint mUploadTexture;
++  gfx::IntSize mSize;
++  gfx::SurfaceFormat mFormat;
++};
++
++class StreamTextureHostOGL : public TextureHost
++{
++public:
++  StreamTextureHostOGL(uint64_t aID,
++                       TextureFlags aFlags,
++                       const SurfaceStreamDescriptor& aDesc);
++
++  virtual ~StreamTextureHostOGL();
++
++  // SharedTextureHostOGL doesn't own any GL texture
++  virtual void DeallocateDeviceData() MOZ_OVERRIDE {}
++
++  virtual void SetCompositor(Compositor* aCompositor) MOZ_OVERRIDE;
++
++  virtual bool Lock() MOZ_OVERRIDE;
++
++  virtual void Unlock() MOZ_OVERRIDE;
++
++  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE;
++
++  virtual NewTextureSource* GetTextureSources() MOZ_OVERRIDE
++  {
++    return mTextureSource;
++  }
++
++  virtual already_AddRefed<gfxImageSurface> GetAsSurface() MOZ_OVERRIDE
++  {
++    return nullptr; // XXX - implement this (for MOZ_DUMP_PAINTING)
++  }
++
++  virtual gfx::IntSize GetSize() const MOZ_OVERRIDE;
++
++#ifdef MOZ_LAYERS_HAVE_LOG
++  virtual const char* Name() { return "StreamTextureHostOGL"; }
++#endif
++
++protected: 
++  CompositorOGL* mCompositor;
++  gfx::SurfaceStream* mStream;
++  RefPtr<StreamTextureSourceOGL> mTextureSource;
++};
++
+ /**
+  * DeprecatedTextureHost implementation using a TextureImage as the underlying texture.
+  */
+ class TextureImageDeprecatedTextureHostOGL : public DeprecatedTextureHost
+                                            , public TextureSourceOGL
+                                            , public TileIterator
+ {
+ public:

@@ -1,0 +1,291 @@
+# HG changeset patch
+# Parent 72e964cd5a833ccf2a1ca13e964798da363a4253
+# User Jerry Shih <hshih@mozilla.com>
+debug gonkdisplayjb->post() high cost
+
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -311,17 +311,22 @@ ContainerRender(ContainerT* aContainer,
+       surface = compositor->CreateRenderTarget(surfaceRect, mode);
+       }
+     }
+ 
+     if (!surface) {
+       return;
+     }
+ 
++    {
++    PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 1-3");
++
+     compositor->SetRenderTarget(surface);
++
++    }
+   } else {
+     surface = previousTarget;
+     aContainer->mSupportsComponentAlphaChildren = (aContainer->GetContentFlags() & Layer::CONTENT_OPAQUE) ||
+       (aContainer->GetParent() && aContainer->GetParent()->SupportsComponentAlphaChildren());
+   }
+ 
+   }
+ 
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -693,20 +693,39 @@ CompositorOGL::SetLayerProgramProjection
+ 
+ TemporaryRef<CompositingRenderTarget>
+ CompositorOGL::CreateRenderTarget(const IntRect &aRect, SurfaceInitMode aInit)
+ {
+   PROFILER_LABEL("CompositorOGL", "CreateRenderTarget");
+ 
+   GLuint tex = 0;
+   GLuint fbo = 0;
++  {
++    PROFILER_LABEL("CompositorOGL", "CreateRenderTarget 1");
++
+   CreateFBOWithTexture(aRect, false, 0, &fbo, &tex);
+-  RefPtr<CompositingRenderTargetOGL> surface
+-    = new CompositingRenderTargetOGL(this, aRect.TopLeft(), tex, fbo);
++
++  }
++
++  RefPtr<CompositingRenderTargetOGL> surface;
++
++  {
++    PROFILER_LABEL("CompositorOGL", "CreateRenderTarget 2");
++
++  surface = new CompositingRenderTargetOGL(this, aRect.TopLeft(), tex, fbo);
++
++  }
++
++  {
++    PROFILER_LABEL("CompositorOGL", "CreateRenderTarget 3");
++
+   surface->Initialize(aRect.Size(), mFBOTextureTarget, aInit);
++
++  }
++
+   return surface.forget();
+ }
+ 
+ TemporaryRef<CompositingRenderTarget>
+ CompositorOGL::CreateRenderTargetFromSource(const IntRect &aRect,
+                                             const CompositingRenderTarget *aSource,
+                                             const IntPoint &aSourcePoint)
+ {
+diff --git a/widget/gonk/libdisplay/FramebufferSurface.cpp b/widget/gonk/libdisplay/FramebufferSurface.cpp
+--- a/widget/gonk/libdisplay/FramebufferSurface.cpp
++++ b/widget/gonk/libdisplay/FramebufferSurface.cpp
+@@ -32,16 +32,18 @@
+ #if ANDROID_VERSION == 17
+ #include <gui/SurfaceTextureClient.h>
+ #endif
+ #include <ui/GraphicBuffer.h>
+ 
+ #include "FramebufferSurface.h"
+ #include "GraphicBufferAlloc.h"
+ 
++#include "GeckoProfiler.h"
++
+ #ifndef NUM_FRAMEBUFFER_SURFACE_BUFFERS
+ #define NUM_FRAMEBUFFER_SURFACE_BUFFERS (2)
+ #endif
+ 
+ // ----------------------------------------------------------------------------
+ namespace android {
+ // ----------------------------------------------------------------------------
+ 
+@@ -70,28 +72,36 @@ FramebufferSurface::FramebufferSurface(i
+     consumer->setSynchronousMode(true);
+ #endif
+     consumer->setConsumerName(mName);
+     consumer->setConsumerUsageBits(GRALLOC_USAGE_HW_FB |
+                                    GRALLOC_USAGE_HW_RENDER |
+                                    GRALLOC_USAGE_HW_COMPOSER);
+     consumer->setDefaultBufferFormat(format);
+     consumer->setDefaultBufferSize(width, height);
+-    consumer->setDefaultMaxBufferCount(NUM_FRAMEBUFFER_SURFACE_BUFFERS);
++    //consumer->setDefaultMaxBufferCount(NUM_FRAMEBUFFER_SURFACE_BUFFERS);
++    consumer->setDefaultMaxBufferCount(3);
+ }
+ 
+ status_t FramebufferSurface::nextBuffer(sp<GraphicBuffer>& outBuffer, sp<Fence>& outFence) {
++  PROFILER_LABEL("FramebufferSurface", "nextBuffer");
++
++
+     Mutex::Autolock lock(mMutex);
+ 
++    status_t err;
+     BufferQueue::BufferItem item;
++    {
++    PROFILER_LABEL("FramebufferSurface", "acquireBufferLocked");
+ #if ANDROID_VERSION >= 19
+-    status_t err = acquireBufferLocked(&item, 0);
++    err = acquireBufferLocked(&item, 0);
+ #else
+-    status_t err = acquireBufferLocked(&item);
++    err = acquireBufferLocked(&item);
+ #endif
++    }
+     if (err == BufferQueue::NO_BUFFER_AVAILABLE) {
+         outBuffer = mCurrentBuffer;
+         return NO_ERROR;
+     } else if (err != NO_ERROR) {
+         ALOGE("error acquiring buffer: %s (%d)", strerror(-err), err);
+         return err;
+     }
+ 
+@@ -100,16 +110,17 @@ status_t FramebufferSurface::nextBuffer(
+     // our current buffer before we call acquireBuffer then that release call
+     // would have returned STALE_BUFFER_SLOT, and we would have called
+     // freeBufferLocked on that slot.  Because the buffer slot has already
+     // been overwritten with the new buffer all we have to do is skip the
+     // releaseBuffer call and we should be in the same state we'd be in if we
+     // had released the old buffer first.
+     if (mCurrentBufferSlot != BufferQueue::INVALID_BUFFER_SLOT &&
+         item.mBuf != mCurrentBufferSlot) {
++      PROFILER_LABEL("FramebufferSurface", "releaseBufferLocked");
+         // Release the previous buffer.
+ #if ANDROID_VERSION >= 19
+         err = releaseBufferLocked(mCurrentBufferSlot, mCurrentBuffer,
+                 EGL_NO_DISPLAY, EGL_NO_SYNC_KHR);
+ #else
+         err = releaseBufferLocked(mCurrentBufferSlot, EGL_NO_DISPLAY,
+                 EGL_NO_SYNC_KHR);
+ #endif
+@@ -122,16 +133,18 @@ status_t FramebufferSurface::nextBuffer(
+     mCurrentBuffer = mSlots[mCurrentBufferSlot].mGraphicBuffer;
+     outFence = item.mFence;
+     outBuffer = mCurrentBuffer;
+     return NO_ERROR;
+ }
+ 
+ // Overrides ConsumerBase::onFrameAvailable(), does not call base class impl.
+ void FramebufferSurface::onFrameAvailable() {
++  PROFILER_LABEL("FramebufferSurface", "onFrameAvailable");
++
+     sp<GraphicBuffer> buf;
+     sp<Fence> acquireFence;
+     status_t err = nextBuffer(buf, acquireFence);
+     if (err != NO_ERROR) {
+         ALOGE("error latching nnext FramebufferSurface buffer: %s (%d)",
+                 strerror(-err), err);
+         return;
+     }
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -227,20 +227,21 @@ GonkDisplayJB::Post(buffer_handle_t buf,
+     if (!mHwc) {
+         PROFILER_LABEL("GonkDisplayJB::Post", "mFBDevice");
+ 
+         if (fence >= 0)
+             close(fence);
+         return !mFBDevice->post(mFBDevice, buf);
+     }
+ 
+-    PROFILER_LABEL("GonkDisplayJB::Post", "mHwc");
+-
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};
+     const hwc_rect_t r = { 0, 0, mWidth, mHeight };
++    {
++    PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-1");
++
+     displays[HWC_DISPLAY_PRIMARY] = mList;
+     mList->retireFenceFd = -1;
+     mList->numHwLayers = 2;
+     mList->flags = HWC_GEOMETRY_CHANGED;
+     mList->hwLayers[0].compositionType = HWC_BACKGROUND;
+     mList->hwLayers[0].hints = 0;
+     /* Skip this layer so the hwc module doesn't complain about null handles */
+     mList->hwLayers[0].flags = HWC_SKIP_LAYER;
+@@ -266,25 +267,42 @@ GonkDisplayJB::Post(buffer_handle_t buf,
+     }
+ #else
+     mList->hwLayers[1].sourceCrop = r;
+ #endif
+     mList->hwLayers[1].displayFrame = r;
+     mList->hwLayers[1].visibleRegionScreen.numRects = 1;
+     mList->hwLayers[1].visibleRegionScreen.rects = &mList->hwLayers[1].displayFrame;
+     mList->hwLayers[1].acquireFenceFd = fence;
++    //mList->hwLayers[1].acquireFenceFd = -1;
+     mList->hwLayers[1].releaseFenceFd = -1;
+ #if ANDROID_VERSION == 18
+     mList->hwLayers[1].planeAlpha = 0xFF;
+ #endif
+     mHwc->prepare(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+-    int err = mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
++
++    }
++    int err = 0;
++    
++    {
++    PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-2");
++
++    err=mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
++
++    }
++
++    {
++    PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-3");
++
+     mFBSurface->setReleaseFenceFd(mList->hwLayers[1].releaseFenceFd);
+     if (mList->retireFenceFd >= 0)
+         close(mList->retireFenceFd);
++
++    }
++
+     return !err;
+ }
+ 
+ ANativeWindowBuffer*
+ GonkDisplayJB::DequeueBuffer()
+ {
+     return static_cast<ANativeWindowBuffer*>(mBootAnimBuffer.get());
+ }
+diff --git a/widget/gonk/nativewindow/GonkBufferQueue.cpp b/widget/gonk/nativewindow/GonkBufferQueue.cpp
+--- a/widget/gonk/nativewindow/GonkBufferQueue.cpp
++++ b/widget/gonk/nativewindow/GonkBufferQueue.cpp
+@@ -261,16 +261,19 @@ status_t GonkBufferQueue::requestBuffer(
+     }
+     mSlots[slot].mRequestBufferCalled = true;
+     *buf = mSlots[slot].mGraphicBuffer;
+     return NO_ERROR;
+ }
+ 
+ status_t GonkBufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence,
+         uint32_t w, uint32_t h, uint32_t format, uint32_t usage) {
++
++    ST_LOGE("bignose in GonkBufferQueue::dequeueBuffer");
++
+     ST_LOGV("dequeueBuffer: w=%d h=%d fmt=%#x usage=%#x", w, h, format, usage);
+ 
+     if ((w && !h) || (!w && h)) {
+         ST_LOGE("dequeueBuffer: invalid size: w=%u, h=%u", w, h);
+         return BAD_VALUE;
+     }
+ 
+     status_t returnFlags(OK);
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+--- a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
++++ b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+@@ -181,16 +181,18 @@ int GonkNativeWindowClient::setSwapInter
+ 
+     status_t res = mBufferProducer->setSynchronousMode(interval ? true : false);
+ 
+     return res;
+ }
+ 
+ int GonkNativeWindowClient::dequeueBuffer(android_native_buffer_t** buffer,
+         int* fenceFd) {
++    ALOGE("bignose in GonkNativeWindowClient::dequeueBuffer");
++
+     ALOGV("GonkNativeWindowClient::dequeueBuffer");
+     Mutex::Autolock lock(mMutex);
+     int buf = -1;
+     int reqW = mReqWidth ? mReqWidth : mUserWidth;
+     int reqH = mReqHeight ? mReqHeight : mUserHeight;
+     sp<Fence> fence;
+ #if ANDROID_VERSION == 17
+     status_t result = mBufferProducer->dequeueBuffer(&buf, fence,

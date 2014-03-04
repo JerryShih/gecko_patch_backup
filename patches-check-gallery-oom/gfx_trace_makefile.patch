@@ -1,0 +1,167 @@
+# HG changeset patch
+# Parent f694e5d952bdaad3951e0813ccfd4a0d805c15ee
+# User Jerry Shih <hshih@mozilla.com>
+modify gfx build option to -O0
+
+diff --git a/content/media/Makefile.in b/content/media/Makefile.in
+--- a/content/media/Makefile.in
++++ b/content/media/Makefile.in
+@@ -3,8 +3,11 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ CFLAGS   += $(GSTREAMER_CFLAGS)
+ CXXFLAGS += $(GSTREAMER_CFLAGS)
+ 
+ AudioNodeEngineNEON.$(OBJ_SUFFIX): CXXFLAGS += -mfpu=neon
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/dom/base/Makefile.in b/dom/base/Makefile.in
+--- a/dom/base/Makefile.in
++++ b/dom/base/Makefile.in
+@@ -3,8 +3,11 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ ifdef MOZ_X11
+ CXXFLAGS += $(TK_CFLAGS)
+ LDFLAGS += $(TK_LIBS)
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -26,8 +26,10 @@ endif
+ ifdef SOLARIS_SUNPRO_CXX
+ ImageScalingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ BlurSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ FilterProcessingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ endif
+ endif
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -7,8 +7,11 @@ include $(topsrcdir)/config/rules.mk
+ ifeq ($(MOZ_WIDGET_TOOLKIT),gonk)
+ CXXFLAGS += -I$(ANDROID_SOURCE)/hardware/libhardware/include
+ endif
+ 
+ DEFINES := $(filter-out -DUNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -8,8 +8,11 @@ include $(topsrcdir)/config/rules.mk
+ CXXFLAGS += \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright/openmax \
+         -I$(ANDROID_SOURCE)/frameworks/av/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/native/include/media/openmax \
+         $(NULL)
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
+--- a/gfx/src/Makefile.in
++++ b/gfx/src/Makefile.in
+@@ -13,8 +13,10 @@ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
+ CXXFLAGS += $(CAIRO_FT_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(MOZ_QT_CFLAGS)
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -42,8 +42,11 @@ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
+ gfxAlphaRecoverySSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ endif
+ endif
+ 
+ PremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/ipc/chromium/Makefile.in b/ipc/chromium/Makefile.in
+--- a/ipc/chromium/Makefile.in
++++ b/ipc/chromium/Makefile.in
+@@ -68,8 +68,11 @@ ifdef MOZ_NATIVE_LIBEVENT # {
+ export-preqs = \
+   $(call mkdir_deps,$(DIST)/third_party/libevent) \
+   $(NULL)
+ 
+ export:: $(export-preqs)
+ 	echo '#include <event.h>' > $(DIST)/third_party/libevent/event.h
+ 
+ endif # }
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/modules/libpref/src/Makefile.in b/modules/libpref/src/Makefile.in
+--- a/modules/libpref/src/Makefile.in
++++ b/modules/libpref/src/Makefile.in
+@@ -26,8 +26,11 @@ grepref_files += $(topsrcdir)/mobile/and
+ endif
+ endif
+ 
+ greprefs.js: $(grepref_files)
+ 	$(call py_action,preprocessor,$(PREF_PPFLAGS) $(DEFINES) $(ACDEFINES) $(XULPPFLAGS) $^ -o $@)
+ 
+ libs:: greprefs.js
+ 	$(INSTALL) $^ $(DIST)/bin/
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/widget/gonk/Makefile.in b/widget/gonk/Makefile.in
+--- a/widget/gonk/Makefile.in
++++ b/widget/gonk/Makefile.in
+@@ -15,8 +15,10 @@
+ include $(topsrcdir)/config/rules.mk
+ 
+ CXXFLAGS += \
+ 	-I$(ANDROID_SOURCE)/hardware/libhardware/include \
+ 	-I$(ANDROID_SOURCE)/hardware/libhardware_legacy/include \
+ 	-I$(ANDROID_SOURCE)/frameworks/native/opengl/include \
+ 	$(NULL)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/xpcom/base/Makefile.in b/xpcom/base/Makefile.in
+--- a/xpcom/base/Makefile.in
++++ b/xpcom/base/Makefile.in
+@@ -28,8 +28,11 @@ ErrorListCxxDefines.h: ErrorList.h Makef
+ 
+ ErrorListCDefines.h: ErrorList.h Makefile
+ 		sed 's/.*ERROR(\([A-Z_0-9]*\),\( *\)\(.*\))[^)]*/#define \1 \2((nsresult)(\3))/' < $< > $@
+ 
+ GARBAGE += \
+ 	ErrorListCxxDefines.h \
+ 	ErrorListCDefines.h \
+ 	$(NULL)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++

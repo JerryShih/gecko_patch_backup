@@ -1,0 +1,302 @@
+# HG changeset patch
+# Parent a8a87b5771a8f426ebb9935c5e234a8d0849af88
+# User Jerry Shih <hshih@mozilla.com>
+Bug 972799 - Show file-base and memory-base blob-url report in about:memory
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -687,17 +687,18 @@ pref("hal.processPriorityManager.gonk.no
+ // We wait this long before polling the memory-pressure fd after seeing one
+ // memory pressure event.  (When we're not under memory pressure, we sit
+ // blocked on a poll(), and this pref has no effect.)
+ pref("gonk.systemMemoryPressureRecoveryPollMS", 5000);
+ 
+ #ifndef DEBUG
+ // Enable pre-launching content processes for improved startup time
+ // (hiding latency).
+-pref("dom.ipc.processPrelaunch.enabled", true);
++//pref("dom.ipc.processPrelaunch.enabled", true);
++pref("dom.ipc.processPrelaunch.enabled", false);
+ // Wait this long before pre-launching a new subprocess.
+ pref("dom.ipc.processPrelaunch.delayMs", 5000);
+ #endif
+ 
+ // When a process receives a system message, we hold a CPU wake lock on its
+ // behalf for this many seconds, or until it handles the system message,
+ // whichever comes first.
+ pref("dom.ipc.systemMessageCPULockTimeoutSec", 30);
+diff --git a/content/base/public/nsDOMFile.h b/content/base/public/nsDOMFile.h
+--- a/content/base/public/nsDOMFile.h
++++ b/content/base/public/nsDOMFile.h
+@@ -375,16 +375,18 @@ public:
+     : nsDOMFile(aContentType, aLength),
+       mDataOwner(new DataOwner(aMemoryBuffer, aLength))
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
+   }
+ 
+   NS_IMETHOD GetInternalStream(nsIInputStream**) MOZ_OVERRIDE;
+ 
++  NS_IMETHOD_(bool) IsMemoryFile(void) MOZ_OVERRIDE;
++
+ protected:
+   // Create slice
+   nsDOMMemoryFile(const nsDOMMemoryFile* aOther, uint64_t aStart,
+                   uint64_t aLength, const nsAString& aContentType)
+     : nsDOMFile(aContentType, aOther->mStart + aStart, aLength),
+       mDataOwner(aOther->mDataOwner)
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
+diff --git a/content/base/public/nsHostObjectProtocolHandler.h b/content/base/public/nsHostObjectProtocolHandler.h
+--- a/content/base/public/nsHostObjectProtocolHandler.h
++++ b/content/base/public/nsHostObjectProtocolHandler.h
+@@ -49,16 +49,19 @@ public:
+   // AddDataEntry creates the URI with the given scheme and returns it in aUri
+   static nsresult AddDataEntry(const nsACString& aScheme,
+                                nsISupports* aObject,
+                                nsIPrincipal* aPrincipal,
+                                nsACString& aUri);
+   static void RemoveDataEntry(const nsACString& aUri);
+   static nsIPrincipal* GetDataEntryPrincipal(const nsACString& aUri);
+   static void Traverse(const nsACString& aUri, nsCycleCollectionTraversalCallback& aCallback);
++
++private:
++  static void Init(void);
+ };
+ 
+ class nsBlobProtocolHandler : public nsHostObjectProtocolHandler
+ {
+ public:
+   NS_IMETHOD GetScheme(nsACString &result) MOZ_OVERRIDE;
+ };
+ 
+diff --git a/content/base/public/nsIDOMFile.idl b/content/base/public/nsIDOMFile.idl
+--- a/content/base/public/nsIDOMFile.idl
++++ b/content/base/public/nsIDOMFile.idl
+@@ -21,17 +21,17 @@ class FileManager;
+ [ptr] native FileManager(mozilla::dom::indexedDB::FileManager);
+ 
+ interface nsIDOMFileError;
+ interface nsIInputStream;
+ interface nsIURI;
+ interface nsIPrincipal;
+ interface nsIDOMBlob;
+ 
+-[scriptable, builtinclass, uuid(52d22585-7737-460e-9731-c658df03304a)]
++[scriptable, builtinclass, uuid(b1723fac-4814-4429-82cb-dc54ba0d46d6)]
+ interface nsIDOMBlob : nsISupports
+ {
+   readonly attribute unsigned long long size;
+   readonly attribute DOMString type;
+ 
+   [noscript] readonly attribute nsIInputStream internalStream;
+   // The caller is responsible for releasing the internalUrl from the
+   // blob: protocol handler
+@@ -52,19 +52,22 @@ interface nsIDOMBlob : nsISupports
+ 
+   // Called when the blob was successfully stored in a database or when
+   // the blob is initialized from a database. It can be called on any thread.
+   [notxpcom] void addFileInfo(in FileInfo aFileInfo);
+ 
+   // Called before the blob is stored in a database to decide if it can be
+   // shared or needs to be copied. It can be called on any thread.
+   [notxpcom] FileInfo getFileInfo(in FileManager aFileManager);
++
++  // Return true if this blob is a memory file.
++  [noscript, notxpcom] bool isMemoryFile();
+ };
+ 
+-[scriptable, builtinclass, uuid(0acb4135-9f79-4516-ba92-b5fba5203620)]
++[scriptable, builtinclass, uuid(4e7d1a8b-e2d5-4304-a753-4affb731660c)]
+ interface nsIDOMFile : nsIDOMBlob
+ {
+   readonly attribute DOMString name;
+ 
+   readonly attribute DOMString path;
+ 
+   [implicit_jscontext]
+   readonly attribute jsval lastModifiedDate;
+diff --git a/content/base/src/nsDOMFile.cpp b/content/base/src/nsDOMFile.cpp
+--- a/content/base/src/nsDOMFile.cpp
++++ b/content/base/src/nsDOMFile.cpp
+@@ -438,16 +438,22 @@ nsDOMFileBase::SetMutable(bool aMutable)
+     rv = this->GetSize(&dummyInt);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   mImmutable = !aMutable;
+   return rv;
+ }
+ 
++NS_IMETHODIMP_(bool)
++nsDOMFileBase::IsMemoryFile(void)
++{
++  return false;
++}
++
+ ////////////////////////////////////////////////////////////////////////////
+ // nsDOMFile implementation
+ 
+ DOMCI_DATA(File, nsDOMFile)
+ DOMCI_DATA(Blob, nsDOMFile)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsDOMFile)
+   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIDOMFile)
+@@ -631,16 +637,22 @@ NS_IMETHODIMP
+ nsDOMMemoryFile::GetInternalStream(nsIInputStream **aStream)
+ {
+   if (mLength > INT32_MAX)
+     return NS_ERROR_FAILURE;
+ 
+   return DataOwnerAdapter::Create(mDataOwner, mStart, mLength, aStream);
+ }
+ 
++NS_IMETHODIMP_(bool)
++nsDOMMemoryFile::IsMemoryFile(void)
++{
++  return true;
++}
++
+ /* static */ StaticMutex
+ nsDOMMemoryFile::DataOwner::sDataOwnerMutex;
+ 
+ /* static */ StaticAutoPtr<LinkedList<nsDOMMemoryFile::DataOwner> >
+ nsDOMMemoryFile::DataOwner::sDataOwners;
+ 
+ /* static */ bool
+ nsDOMMemoryFile::DataOwner::sMemoryReporterRegistered;
+diff --git a/content/base/src/nsHostObjectProtocolHandler.cpp b/content/base/src/nsHostObjectProtocolHandler.cpp
+--- a/content/base/src/nsHostObjectProtocolHandler.cpp
++++ b/content/base/src/nsHostObjectProtocolHandler.cpp
+@@ -161,29 +161,33 @@ class BlobURLsReporter MOZ_FINAL : publi
+     blob = do_QueryInterface(aInfo->mObject);
+     if (blob) {
+       NS_NAMED_LITERAL_CSTRING
+         (desc, "A blob URL allocated with URL.createObjectURL; the referenced "
+          "blob cannot be freed until all URLs for it have been explicitly "
+          "invalidated with URL.revokeObjectURL.");
+       nsAutoCString path, url, owner, specialDesc;
+       nsCOMPtr<nsIURI> principalURI;
+-      uint64_t size;
++      uint64_t size = 0;
+       uint32_t refCount = 1;
+       DebugOnly<bool> blobWasCounted;
+ 
+       blobWasCounted = envp->mRefCounts.Get(blob, &refCount);
+       MOZ_ASSERT(blobWasCounted);
+       MOZ_ASSERT(refCount > 0);
+ 
+-      if (NS_FAILED(blob->GetSize(&size))) {
+-        size = 0;
++      bool isMemoryFile = blob->IsMemoryFile();
++
++      if (isMemoryFile) {
++        if (NS_FAILED(blob->GetSize(&size))) {
++          size = 0;
++        }
+       }
+ 
+-      path = "blob-urls/";
++      path = isMemoryFile ? "memory-blob-urls/" : "file-blob-urls/";
+       if (NS_SUCCEEDED(aInfo->mPrincipal->GetURI(getter_AddRefs(principalURI))) &&
+           principalURI != nullptr &&
+           NS_SUCCEEDED(principalURI->GetSpec(owner)) &&
+           !owner.IsEmpty()) {
+         owner.ReplaceChar('/', '\\');
+         path += "owner(";
+         path += owner;
+         path += ")";
+@@ -206,56 +210,79 @@ class BlobURLsReporter MOZ_FINAL : publi
+         path += "@";
+         path += addrStr;
+ 
+         specialDesc = desc;
+         specialDesc += "\n\nNOTE: This blob (address ";
+         specialDesc += addrStr;
+         specialDesc += ") has ";
+         specialDesc.AppendInt(refCount);
+-        specialDesc += " URLs; its size is divided ";
+-        specialDesc += refCount > 2 ? "among" : "between";
+-        specialDesc += " them in this report.";
++        specialDesc += " URLs.";
++        if (isMemoryFile) {
++          specialDesc += " Its size is divided ";
++          specialDesc += refCount > 2 ? "among" : "between";
++          specialDesc += " them in this report.";
++        }
+       }
+-      envp->mCallback->Callback(EmptyCString(),
+-                                path,
+-                                KIND_OTHER,
+-                                UNITS_BYTES,
+-                                size / refCount,
+-                                (specialDesc.IsEmpty()
+-                                 ? static_cast<const nsACString&>(desc)
+-                                 : static_cast<const nsACString&>(specialDesc)),
+-                                envp->mData);
++
++      const nsACString& descString = specialDesc.IsEmpty()
++          ? static_cast<const nsACString&>(desc)
++          : static_cast<const nsACString&>(specialDesc);
++      if (isMemoryFile) {
++        envp->mCallback->Callback(EmptyCString(),
++            path,
++            KIND_OTHER,
++            UNITS_BYTES,
++            size / refCount,
++            descString,
++            envp->mData);
++      }
++      else {
++        envp->mCallback->Callback(EmptyCString(),
++            path,
++            KIND_OTHER,
++            UNITS_COUNT,
++            1,
++            descString,
++            envp->mData);
++      }
+     }
+     return PL_DHASH_NEXT;
+   }
+ };
+ 
+ NS_IMPL_ISUPPORTS1(BlobURLsReporter, nsIMemoryReporter)
+ 
+ }
+ 
+-nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++void
++nsHostObjectProtocolHandler::Init(void)
+ {
+   static bool initialized = false;
+ 
+   if (!initialized) {
+     initialized = true;
+     RegisterStrongMemoryReporter(new mozilla::HostObjectURLsReporter());
+     RegisterStrongMemoryReporter(new mozilla::BlobURLsReporter());
+   }
+ }
+ 
++nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++{
++  Init();
++}
+ 
+ nsresult
+ nsHostObjectProtocolHandler::AddDataEntry(const nsACString& aScheme,
+                                           nsISupports* aObject,
+                                           nsIPrincipal* aPrincipal,
+                                           nsACString& aUri)
+ {
++  Init();
++
+   nsresult rv = GenerateURIString(aScheme, aUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (!gDataTable) {
+     gDataTable = new nsClassHashtable<nsCStringHashKey, DataInfo>;
+   }
+ 
+   DataInfo* info = new DataInfo;

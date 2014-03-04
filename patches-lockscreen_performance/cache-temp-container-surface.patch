@@ -1,0 +1,668 @@
+# HG changeset patch
+# User Matt Woodrow <mwoodrow@mozilla.com>
+# Date 1391477781 -46800
+#      Tue Feb 04 14:36:21 2014 +1300
+# Node ID 794fd90ebc69f46219971299a971a1f29df488d6
+# Parent 439b1bd36de5c8a016c92a6c402638dc1ee79b7d
+[mq]: cache-temp-container-surface
+
+diff --git a/gfx/layers/LayerTreeInvalidation.cpp b/gfx/layers/LayerTreeInvalidation.cpp
+--- a/gfx/layers/LayerTreeInvalidation.cpp
++++ b/gfx/layers/LayerTreeInvalidation.cpp
+@@ -79,31 +79,33 @@ TransformRegion(const nsIntRegion& aRegi
+ }
+ 
+ /**
+  * Walks over this layer, and all descendant layers.
+  * If any of these are a ContainerLayer that reports invalidations to a PresShell,
+  * then report that the entire bounds have changed.
+  */
+ static void
+-NotifySubdocumentInvalidationRecursive(Layer* aLayer, NotifySubDocInvalidationFunc aCallback)
++NotifySubdocumentInvalidationRecursive(Layer* aLayer, NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations)
+ {
+-  aLayer->ClearInvalidRect();
++  if (aClearInvalidations) {
++    aLayer->ClearInvalidRect();
++  }
+   ContainerLayer* container = aLayer->AsContainerLayer();
+ 
+   if (aLayer->GetMaskLayer()) {
+-    NotifySubdocumentInvalidationRecursive(aLayer->GetMaskLayer(), aCallback);
++    NotifySubdocumentInvalidationRecursive(aLayer->GetMaskLayer(), aCallback, aClearInvalidations);
+   }
+ 
+   if (!container) {
+     return;
+   }
+ 
+   for (Layer* child = container->GetFirstChild(); child; child = child->GetNextSibling()) {
+-    NotifySubdocumentInvalidationRecursive(child, aCallback);
++    NotifySubdocumentInvalidationRecursive(child, aCallback, aClearInvalidations);
+   }
+ 
+   aCallback(container, container->GetVisibleRegion());
+ }
+ 
+ struct LayerPropertiesBase : public LayerProperties
+ {
+   LayerPropertiesBase(Layer* aLayer)
+@@ -130,21 +132,22 @@ struct LayerPropertiesBase : public Laye
+     MOZ_COUNT_CTOR(LayerPropertiesBase);
+   }
+   ~LayerPropertiesBase()
+   {
+     MOZ_COUNT_DTOR(LayerPropertiesBase);
+   }
+   
+   virtual nsIntRegion ComputeDifferences(Layer* aRoot, 
+-                                         NotifySubDocInvalidationFunc aCallback);
++                                         NotifySubDocInvalidationFunc aCallback,
++                                         bool aClearInvalidations);
+ 
+   virtual void MoveBy(const nsIntPoint& aOffset);
+ 
+-  nsIntRegion ComputeChange(NotifySubDocInvalidationFunc aCallback)
++  nsIntRegion ComputeChange(NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations)
+   {
+     bool transformChanged = !mTransform.FuzzyEqual(mLayer->GetTransform());
+     Layer* otherMask = mLayer->GetMaskLayer();
+     const nsIntRect* otherClip = mLayer->GetClipRect();
+     nsIntRegion result;
+     if ((mMaskLayer ? mMaskLayer->mLayer : nullptr) != otherMask ||
+         (mUseClipRect != !!otherClip) ||
+         mLayer->GetOpacity() != mOpacity ||
+@@ -153,56 +156,65 @@ struct LayerPropertiesBase : public Laye
+       result = OldTransformedBounds();
+       if (transformChanged) {
+         AddRegion(result, NewTransformedBounds());
+       }
+ 
+       // If we don't have to generate invalidations separately for child
+       // layers then we can just stop here since we've already invalidated the entire
+       // old and new bounds.
+-      if (!aCallback) {
++      if (!aCallback && aClearInvalidations) {
+         ClearInvalidations(mLayer);
+         return result;
+       }
+     }
+ 
+     nsIntRegion visible;
+     visible.Xor(mVisibleRegion, mLayer->GetVisibleRegion());
+     AddTransformedRegion(result, visible, mTransform);
++    if (!aClearInvalidations) {
++      mLayer->AddInvalidRect(visible.GetBounds());
++    }
+ 
+-    AddRegion(result, ComputeChangeInternal(aCallback));
++    AddRegion(result, ComputeChangeInternal(aCallback, aClearInvalidations));
+     AddTransformedRegion(result, mLayer->GetInvalidRegion(), mTransform);
+ 
+     if (mMaskLayer && otherMask) {
+-      AddTransformedRegion(result, mMaskLayer->ComputeChange(aCallback), mTransform);
++      nsIntRegion maskInvalid = mMaskLayer->ComputeChange(aCallback, aClearInvalidations);
++      AddTransformedRegion(result, maskInvalid, mTransform);
++      if (!aClearInvalidations) {
++        mLayer->AddInvalidRect(maskInvalid.GetBounds());
++      }
+     }
+ 
+     if (mUseClipRect && otherClip) {
+       if (!mClipRect.IsEqualInterior(*otherClip)) {
+         nsIntRegion tmp; 
+         tmp.Xor(mClipRect, *otherClip); 
+         AddRegion(result, tmp);
+       }
+     }
+ 
+-    mLayer->ClearInvalidRect();
++    if (aClearInvalidations) {
++      mLayer->ClearInvalidRect();
++    }
+     return result;
+   }
+ 
+   nsIntRect NewTransformedBounds()
+   {
+     return TransformRect(mLayer->GetVisibleRegion().GetBounds(), mLayer->GetTransform());
+   }
+ 
+   nsIntRect OldTransformedBounds()
+   {
+     return TransformRect(mVisibleRegion.GetBounds(), mTransform);
+   }
+ 
+-  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback) { return nsIntRect(); }
++  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations) { return nsIntRect(); }
+ 
+   nsRefPtr<Layer> mLayer;
+   nsAutoPtr<LayerPropertiesBase> mMaskLayer;
+   nsIntRegion mVisibleRegion;
+   nsIntRegion mInvalidRegion;
+   gfx3DMatrix mTransform;
+   float mOpacity;
+   nsIntRect mClipRect;
+@@ -214,17 +226,17 @@ struct ContainerLayerProperties : public
+   ContainerLayerProperties(ContainerLayer* aLayer)
+     : LayerPropertiesBase(aLayer)
+   {
+     for (Layer* child = aLayer->GetFirstChild(); child; child = child->GetNextSibling()) {
+       mChildren.AppendElement(CloneLayerTreePropertiesInternal(child));
+     }
+   }
+ 
+-  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback)
++  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations)
+   {
+     ContainerLayer* container = mLayer->AsContainerLayer();
+     nsIntRegion result;
+ 
+     // A low frame rate is especially visible to users when scrolling, so we
+     // particularly want to avoid unnecessary invalidation at that time. For us
+     // here, that means avoiding unnecessary invalidation of child items when
+     // other children are added to or removed from our container layer, since
+@@ -249,17 +261,17 @@ struct ContainerLayerProperties : public
+             // current |child| and the previous |child| that was also in the
+             // old list mChildren (if any of those children have been reordered
+             // rather than removed, we will invalidate their new area when we
+             // encounter them in the new list):
+             for (uint32_t j = i; j < childsOldIndex; ++j) {
+               AddRegion(result, mChildren[j]->OldTransformedBounds());
+             }
+             // Invalidate any regions of the child that have changed: 
+-            AddRegion(result, mChildren[childsOldIndex]->ComputeChange(aCallback));
++            AddRegion(result, mChildren[childsOldIndex]->ComputeChange(aCallback, aClearInvalidations));
+             i = childsOldIndex + 1;
+           } else {
+             // We've already seen this child in mChildren (which means it must
+             // have been reordered) and invalidated its old area. We need to 
+             // invalidate its new area too:
+             invalidateChildsCurrentArea = true;
+           }
+         } else {
+@@ -268,52 +280,59 @@ struct ContainerLayerProperties : public
+         }
+       } else {
+         // |child| is new, or was reordered to a higher index
+         invalidateChildsCurrentArea = true;
+       }
+       if (invalidateChildsCurrentArea) {
+         AddTransformedRegion(result, child->GetVisibleRegion(), child->GetTransform());
+         if (aCallback) {
+-          NotifySubdocumentInvalidationRecursive(child, aCallback);
+-        } else {
++          NotifySubdocumentInvalidationRecursive(child, aCallback, aClearInvalidations);
++        } else if (aClearInvalidations) {
+           ClearInvalidations(child);
+         }
+       }
+     }
+ 
+     // Process remaining removed children.
+     while (i < mChildren.Length()) {
+       AddRegion(result, mChildren[i]->OldTransformedBounds());
+       i++;
+     }
+ 
+     if (aCallback) {
+       aCallback(container, result);
+     }
+ 
++    if (!aClearInvalidations) {
++      container->AddInvalidRect(result.GetBounds());
++    }
++
+     return TransformRegion(result, mLayer->GetTransform());
+   }
+ 
+   // The old list of children:
+   nsAutoTArray<nsAutoPtr<LayerPropertiesBase>,1> mChildren;
+ };
+ 
+ struct ColorLayerProperties : public LayerPropertiesBase
+ {
+   ColorLayerProperties(ColorLayer *aLayer)
+     : LayerPropertiesBase(aLayer)
+     , mColor(aLayer->GetColor())
+   { }
+ 
+-  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback)
++  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations)
+   {
+     ColorLayer* color = static_cast<ColorLayer*>(mLayer.get());
+ 
+     if (mColor != color->GetColor()) {
++      if (!aClearInvalidations) {
++        color->SetInvalidRectToVisibleRegion();
++      }
+       return NewTransformedBounds();
+     }
+ 
+     return nsIntRegion();
+   }
+ 
+   gfxRGBA mColor;
+ };
+@@ -324,30 +343,36 @@ struct ImageLayerProperties : public Lay
+     : LayerPropertiesBase(aImage)
+     , mContainer(aImage->GetContainer())
+     , mFilter(aImage->GetFilter())
+     , mScaleToSize(aImage->GetScaleToSize())
+     , mScaleMode(aImage->GetScaleMode())
+   {
+   }
+ 
+-  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback)
++  virtual nsIntRegion ComputeChangeInternal(NotifySubDocInvalidationFunc aCallback, bool aClearInvalidations)
+   {
+     ImageLayer* imageLayer = static_cast<ImageLayer*>(mLayer.get());
+     
+     if (!imageLayer->GetVisibleRegion().IsEqual(mVisibleRegion)) {
+       nsIntRect result = NewTransformedBounds();
+       result = result.Union(OldTransformedBounds());
++      if (!aClearInvalidations) {
++        imageLayer->SetInvalidRectToVisibleRegion();
++      }
+       return result;
+     }
+ 
+     if (mContainer != imageLayer->GetContainer() ||
+         mFilter != imageLayer->GetFilter() ||
+         mScaleToSize != imageLayer->GetScaleToSize() ||
+         mScaleMode != imageLayer->GetScaleMode()) {
++      if (!aClearInvalidations) {
++        imageLayer->SetInvalidRectToVisibleRegion();
++      }
+       return NewTransformedBounds();
+     }
+ 
+     return nsIntRect();
+   }
+ 
+   nsRefPtr<ImageContainer> mContainer;
+   GraphicsFilter mFilter;
+@@ -392,30 +417,32 @@ LayerProperties::ClearInvalidations(Laye
+   }
+ 
+   for (Layer* child = container->GetFirstChild(); child; child = child->GetNextSibling()) {
+     ClearInvalidations(child);
+   }
+ }
+ 
+ nsIntRegion
+-LayerPropertiesBase::ComputeDifferences(Layer* aRoot, NotifySubDocInvalidationFunc aCallback)
++LayerPropertiesBase::ComputeDifferences(Layer* aRoot,
++                                        NotifySubDocInvalidationFunc aCallback,
++                                        bool aClearInvalidations /* = true */)
+ {
+   NS_ASSERTION(aRoot, "Must have a layer tree to compare against!");
+   if (mLayer != aRoot) {
+     if (aCallback) {
+-      NotifySubdocumentInvalidationRecursive(aRoot, aCallback);
+-    } else {
++      NotifySubdocumentInvalidationRecursive(aRoot, aCallback, aClearInvalidations);
++    } else if (aClearInvalidations) {
+       ClearInvalidations(aRoot);
+     }
+     nsIntRect result = TransformRect(aRoot->GetVisibleRegion().GetBounds(), aRoot->GetTransform());
+     result = result.Union(OldTransformedBounds());
+     return result;
+   } else {
+-    return ComputeChange(aCallback);
++    return ComputeChange(aCallback, aClearInvalidations);
+   }
+ }
+   
+ void 
+ LayerPropertiesBase::MoveBy(const nsIntPoint& aOffset)
+ {
+   mTransform.TranslatePost(gfxPoint3D(aOffset.x, aOffset.y, 0)); 
+ }
+diff --git a/gfx/layers/LayerTreeInvalidation.h b/gfx/layers/LayerTreeInvalidation.h
+--- a/gfx/layers/LayerTreeInvalidation.h
++++ b/gfx/layers/LayerTreeInvalidation.h
+@@ -54,17 +54,18 @@ struct LayerProperties
+    * tree and generates the changed rectangle.
+    *
+    * @param aRoot Root layer of the layer tree to compare against.
+    * @param aCallback If specified, callback to call when ContainerLayers
+    * are invalidated.
+    * @return Painted area changed by the layer tree changes.
+    */
+   virtual nsIntRegion ComputeDifferences(Layer* aRoot, 
+-                                         NotifySubDocInvalidationFunc aCallback) = 0;
++                                         NotifySubDocInvalidationFunc aCallback,
++                                         bool aClearInvalidations  = true) = 0;
+   
+   
+   virtual void MoveBy(const nsIntPoint& aOffset) = 0;
+ };
+ 
+ } // namespace layers
+ } // namespace mozilla
+ 
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -196,35 +196,83 @@ static void DrawVelGraph(const nsIntRect
+   }
+ 
+   compositor->DrawLines(graph, clipRect, gfx::Color(0,1,0,1),
+                         opacity, transform);
+ 
+ }
+ 
+ template<class ContainerT> void
++BlitContainerSurface(ContainerT* aContainer,
++                     LayerManagerComposite* aManager,
++                     const nsIntRect& aClipRect,
++                     const nsIntRect& aVisibleRect,
++                     CompositingRenderTarget* aSource)
++{
++  EffectChain effectChain;
++  LayerManagerComposite::AutoAddMaskEffect autoMaskEffect(aContainer->GetMaskLayer(),
++                                                          effectChain,
++                                                          !aContainer->GetTransform().CanDraw2D());
++
++  effectChain.mPrimaryEffect = new EffectRenderTarget(aSource);
++
++  gfx::Rect rect(aVisibleRect.x, aVisibleRect.y, aVisibleRect.width, aVisibleRect.height);
++  gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
++
++  gfx::Matrix4x4 transform;
++  ToMatrix4x4(aContainer->GetEffectiveTransform(), transform);
++
++  aManager->GetCompositor()->DrawQuad(rect, clipRect, effectChain, aContainer->GetEffectiveOpacity(),
++      transform);
++}
++  
++template<class ContainerT> void
++DrawScrollableDiagnostics(ContainerT* aContainer,
++                          LayerManagerComposite* aManager,
++                          const nsIntRect& aClipRect)
++{
++  if (aContainer->GetFrameMetrics().IsScrollable()) {
++    const FrameMetrics& frame = aContainer->GetFrameMetrics();
++    LayerRect layerBounds = ScreenRect(frame.mCompositionBounds) * ScreenToLayerScale(1.0);
++    gfx::Rect rect(layerBounds.x, layerBounds.y, layerBounds.width, layerBounds.height);
++    gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
++    gfx::Matrix4x4 transform;
++    ToMatrix4x4(aContainer->GetEffectiveTransform(), transform);
++    aManager->GetCompositor()->DrawDiagnostics(DIAGNOSTIC_CONTAINER,
++                                               rect, clipRect,
++                                               transform);
++  }
++}
++
++template<class ContainerT> void
+ ContainerRender(ContainerT* aContainer,
+                 LayerManagerComposite* aManager,
+                 const nsIntRect& aClipRect)
+ {
+   /**
+    * Setup our temporary surface for rendering the contents of this container.
+    */
+   RefPtr<CompositingRenderTarget> surface;
+ 
+   Compositor* compositor = aManager->GetCompositor();
+ 
+   RefPtr<CompositingRenderTarget> previousTarget = compositor->GetCurrentRenderTarget();
+ 
+   nsIntRect visibleRect = aContainer->GetEffectiveVisibleRegion().GetBounds();
+ 
++  if (aContainer->mCachedTarget && aContainer->GetInvalidRegion().IsEmpty()) {
++    MOZ_ASSERT(aContainer->UseIntermediateSurface());
++    BlitContainerSurface(aContainer, aManager, aClipRect,
++                         visibleRect, aContainer->mCachedTarget);
++    DrawScrollableDiagnostics(aContainer, aManager, aClipRect);
++    return;
++  }
++
+   aContainer->mSupportsComponentAlphaChildren = false;
+ 
+-  float opacity = aContainer->GetEffectiveOpacity();
+-
+   bool needsSurface = aContainer->UseIntermediateSurface();
+   if (needsSurface) {
+     SurfaceInitMode mode = INIT_MODE_CLEAR;
+     bool surfaceCopyNeeded = false;
+     gfx::IntRect surfaceRect = gfx::IntRect(visibleRect.x, visibleRect.y,
+                                             visibleRect.width, visibleRect.height);
+     gfx::IntPoint sourcePoint = gfx::IntPoint(visibleRect.x, visibleRect.y);
+     // we're about to create a framebuffer backed by textures to use as an intermediate
+@@ -257,29 +305,37 @@ ContainerRender(ContainerT* aContainer,
+         aContainer->mSupportsComponentAlphaChildren
+           = gfxPlatform::ComponentAlphaEnabled();
+       }
+     }
+ 
+     sourcePoint -= compositor->GetCurrentRenderTarget()->GetOrigin();
+     if (surfaceCopyNeeded) {
+       surface = compositor->CreateRenderTargetFromSource(surfaceRect, previousTarget, sourcePoint);
++      aContainer->mCachedTarget = nullptr;
+     } else {
+-      surface = compositor->CreateRenderTarget(surfaceRect, mode);
++      if (mode == INIT_MODE_NONE && surfaceRect.IsEqualEdges(aContainer->mCachedTargetRect)) {
++        surface = aContainer->mCachedTarget;
++      } else {
++        surface = compositor->CreateRenderTarget(surfaceRect, mode);
++        aContainer->mCachedTarget = surface;
++        aContainer->mCachedTargetRect = surfaceRect;
++      }
+     }
+ 
+     if (!surface) {
+       return;
+     }
+ 
+     compositor->SetRenderTarget(surface);
+   } else {
+     surface = previousTarget;
+     aContainer->mSupportsComponentAlphaChildren = (aContainer->GetContentFlags() & Layer::CONTENT_OPAQUE) ||
+       (aContainer->GetParent() && aContainer->GetParent()->SupportsComponentAlphaChildren());
++    aContainer->mCachedTarget = nullptr;
+   }
+ 
+   nsAutoTArray<Layer*, 12> children;
+   aContainer->SortChildrenBy3DZOrder(children);
+ 
+   /**
+    * Render this container's contents.
+    */
+@@ -340,44 +396,22 @@ ContainerRender(ContainerT* aContainer,
+ #ifdef MOZ_DUMP_PAINTING
+     if (gfxUtils::sDumpPainting) {
+       RefPtr<gfx::DataSourceSurface> surf = surface->Dump(aManager->GetCompositor());
+       WriteSnapshotToDumpFile(aContainer, surf);
+     }
+ #endif
+ 
+     compositor->SetRenderTarget(previousTarget);
+-    EffectChain effectChain;
+-    LayerManagerComposite::AutoAddMaskEffect autoMaskEffect(aContainer->GetMaskLayer(),
+-                                                            effectChain,
+-                                                            !aContainer->GetTransform().CanDraw2D());
+ 
+-    effectChain.mPrimaryEffect = new EffectRenderTarget(surface);
+-
+-    gfx::Matrix4x4 transform;
+-    ToMatrix4x4(aContainer->GetEffectiveTransform(), transform);
+-
+-    gfx::Rect rect(visibleRect.x, visibleRect.y, visibleRect.width, visibleRect.height);
+-    gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
+-    aManager->GetCompositor()->DrawQuad(rect, clipRect, effectChain, opacity,
+-                                        transform);
++    BlitContainerSurface(aContainer, aManager, aClipRect,
++                         visibleRect, surface);
+   }
+ 
+-  if (aContainer->GetFrameMetrics().IsScrollable()) {
+-    gfx::Matrix4x4 transform;
+-    ToMatrix4x4(aContainer->GetEffectiveTransform(), transform);
+-
+-    const FrameMetrics& frame = aContainer->GetFrameMetrics();
+-    LayerRect layerBounds = ScreenRect(frame.mCompositionBounds) * ScreenToLayerScale(1.0);
+-    gfx::Rect rect(layerBounds.x, layerBounds.y, layerBounds.width, layerBounds.height);
+-    gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
+-    aManager->GetCompositor()->DrawDiagnostics(DIAGNOSTIC_CONTAINER,
+-                                               rect, clipRect,
+-                                               transform);
+-  }
++  DrawScrollableDiagnostics(aContainer, aManager, aClipRect);
+ }
+ 
+ ContainerLayerComposite::ContainerLayerComposite(LayerManagerComposite *aManager)
+   : ContainerLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+ {
+   MOZ_COUNT_CTOR(ContainerLayerComposite);
+   mImplData = static_cast<LayerComposite*>(this);
+diff --git a/gfx/layers/composite/ContainerLayerComposite.h b/gfx/layers/composite/ContainerLayerComposite.h
+--- a/gfx/layers/composite/ContainerLayerComposite.h
++++ b/gfx/layers/composite/ContainerLayerComposite.h
+@@ -48,16 +48,20 @@ public:
+   virtual void CleanupResources() MOZ_OVERRIDE;
+ 
+   virtual LayerComposite* AsLayerComposite() MOZ_OVERRIDE { return this; }
+ 
+   // container layers don't use a compositable
+   CompositableHost* GetCompositableHost() MOZ_OVERRIDE { return nullptr; }
+ 
+   virtual const char* Name() const MOZ_OVERRIDE { return "ContainerLayerComposite"; }
++
++private:
++  RefPtr<CompositingRenderTarget> mCachedTarget;
++  gfx::IntRect mCachedTargetRect;
+ };
+ 
+ class RefLayerComposite : public RefLayer,
+                           public LayerComposite
+ {
+   template<class ContainerT>
+   friend void ContainerRender(ContainerT* aContainer,
+                               LayerManagerComposite* aManager,
+@@ -83,14 +87,18 @@ public:
+   virtual void CleanupResources() MOZ_OVERRIDE;
+ 
+   virtual LayerComposite* AsLayerComposite() MOZ_OVERRIDE { return this; }
+ 
+   // ref layers don't use a compositable
+   CompositableHost* GetCompositableHost() MOZ_OVERRIDE { return nullptr; }
+ 
+   virtual const char* Name() const MOZ_OVERRIDE { return "RefLayerComposite"; }
++
++private:
++  RefPtr<CompositingRenderTarget> mCachedTarget;
++  gfx::IntRect mCachedTargetRect;
+ };
+ 
+ } /* layers */
+ } /* mozilla */
+ 
+ #endif /* GFX_ContainerLayerComposite_H */
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -147,19 +147,17 @@ LayerManagerComposite::BeginTransaction(
+   mInTransaction = true;
+   
+   if (!mCompositor->Ready()) {
+     return;
+   }
+   
+   mIsCompositorReady = true;
+ 
+-  if (Compositor::GetBackend() == LAYERS_BASIC) {
+-    mClonedLayerTreeProperties = LayerProperties::CloneFrom(GetRoot());
+-  }
++  mClonedLayerTreeProperties = LayerProperties::CloneFrom(GetRoot());
+ }
+ 
+ void
+ LayerManagerComposite::BeginTransactionWithDrawTarget(DrawTarget* aTarget)
+ {
+   mInTransaction = true;
+   
+   if (!mCompositor->Ready()) {
+@@ -214,17 +212,17 @@ LayerManagerComposite::EndTransaction(Dr
+ #endif
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+   if (mRoot && mClonedLayerTreeProperties) {
+-    nsIntRegion invalid = mClonedLayerTreeProperties->ComputeDifferences(mRoot, nullptr);
++    nsIntRegion invalid = mClonedLayerTreeProperties->ComputeDifferences(mRoot, nullptr, false);
+     mClonedLayerTreeProperties = nullptr;
+ 
+     mInvalidRegion.Or(mInvalidRegion, invalid);
+   } else {
+     mInvalidRegion.Or(mInvalidRegion, mRenderBounds);
+   }
+ 
+   if (mRoot && !(aFlags & END_NO_IMMEDIATE_REDRAW)) {
+@@ -373,19 +371,16 @@ LayerManagerComposite::Render()
+     Rect rect(clipRect.x, clipRect.y, clipRect.width, clipRect.height);
+     mCompositor->BeginFrame(mInvalidRegion, &rect, mWorldMatrix, bounds, nullptr, &actualBounds);
+   } else {
+     gfx::Rect rect;
+     mCompositor->BeginFrame(mInvalidRegion, nullptr, mWorldMatrix, bounds, &rect, &actualBounds);
+     clipRect = nsIntRect(rect.x, rect.y, rect.width, rect.height);
+   }
+ 
+-  // Reset the invalid region now that we've begun compositing.
+-  mInvalidRegion.SetEmpty();
+-
+   if (actualBounds.IsEmpty()) {
+     mCompositor->GetWidget()->PostRender(this);
+     return;
+   }
+ 
+   // Allow widget to render a custom background.
+   mCompositor->GetWidget()->DrawWindowUnderlay(this, nsIntRect(actualBounds.x,
+                                                                actualBounds.y,
+@@ -407,16 +402,20 @@ LayerManagerComposite::Render()
+   {
+     PROFILER_LABEL("LayerManagerComposite", "EndFrame");
+     mCompositor->EndFrame();
+   }
+ 
+   mCompositor->GetWidget()->PostRender(this);
+ 
+   RecordFrame();
++
++  LayerProperties::ClearInvalidations(GetRoot());
++  // Reset the invalid region now that we've begun compositing.
++  mInvalidRegion.SetEmpty();
+ }
+ 
+ void
+ LayerManagerComposite::SetWorldTransform(const gfx::Matrix& aMatrix)
+ {
+   NS_ASSERTION(aMatrix.PreservesAxisAlignedRectangles(),
+                "SetWorldTransform only accepts matrices that satisfy PreservesAxisAlignedRectangles");
+   NS_ASSERTION(!aMatrix.HasNonIntegerScale(),
+diff --git a/gfx/layers/opengl/CompositingRenderTargetOGL.cpp b/gfx/layers/opengl/CompositingRenderTargetOGL.cpp
+--- a/gfx/layers/opengl/CompositingRenderTargetOGL.cpp
++++ b/gfx/layers/opengl/CompositingRenderTargetOGL.cpp
+@@ -10,16 +10,17 @@
+ 
+ using namespace mozilla;
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ using namespace mozilla::layers;
+ 
+ CompositingRenderTargetOGL::~CompositingRenderTargetOGL()
+ {
++  mGL->MakeCurrent();
+   mGL->fDeleteTextures(1, &mTextureHandle);
+   mGL->fDeleteFramebuffers(1, &mFBO);
+ }
+ 
+ void
+ CompositingRenderTargetOGL::BindTexture(GLenum aTextureUnit, GLenum aTextureTarget)
+ {
+   MOZ_ASSERT(mInitParams.mStatus == InitParams::INITIALIZED);

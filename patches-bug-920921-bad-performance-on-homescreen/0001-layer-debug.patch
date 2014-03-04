@@ -1,0 +1,339 @@
+From 0f2da10b6e28cd0242d4775e479afa4f826ca425 Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Fri, 11 Oct 2013 14:25:28 +0800
+Subject: [PATCH] layer debug
+
+---
+ gfx/2d/Makefile.in                               |    1 +
+ gfx/gl/Makefile.in                               |    2 +
+ gfx/layers/LayersTypes.h                         |   11 ++++
+ gfx/layers/Makefile.in                           |    2 +
+ gfx/layers/composite/ContainerLayerComposite.cpp |   67 ++++++++++++++++++++++
+ gfx/layers/composite/LayerManagerComposite.cpp   |    4 ++
+ gfx/layers/composite/LayerManagerComposite.h     |    3 +
+ gfx/layers/composite/TextureHost.cpp             |    4 ++
+ gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp       |   41 +++++++++++++
+ gfx/thebes/Makefile.in                           |    1 +
+ 10 files changed, 136 insertions(+)
+
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+index a8be9b0..7132f63 100644
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -62,3 +62,4 @@ endif
+ endif
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS)
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+index 0871f98..deb995b 100644
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -7,6 +7,8 @@ ifdef MOZ_WEBGL
+ DEFINES += -DMOZ_D3DCOMPILER_DLL=$(MOZ_D3DCOMPILER_DLL)
+ endif
+ endif
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),gonk)
+ LOCAL_INCLUDES = -I$(topsrcdir)/widget/gonk
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+index a3b20e7..7957f69 100644
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -32,6 +32,17 @@ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
++#define MOZ_LAYERS_HAVE_LOG
++#define PR_BEGIN_MACRO  do {
++#define PR_END_MACRO    } while (0)
++
++#define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
++
++#define TMOZ_LAYERS_LOG(args...) \
++  PR_BEGIN_MACRO \
++    __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
++  PR_END_MACRO
++
+ namespace android {
+ class GraphicBuffer;
+ }
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+index 6cb91ac..ccfd031 100644
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -43,3 +43,5 @@ LayerTreeInvalidation.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ Layers.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ endif
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+index 977bc95..772e82f 100644
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -32,6 +32,7 @@
+ #include "nsRegion.h"                   // for nsIntRegion
+ #include "nsTArray.h"                   // for nsAutoTArray
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
++#include "cutils/properties.h"
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -79,6 +80,49 @@ GetOpaqueRect(Layer* aLayer)
+   return result;
+ }
+ 
++static void
++DumpLayerAttribute(Layer* aLayer, const char* pfx, int index)
++{
++  const nsIntRegion& visibleRegion = aLayer->GetEffectiveVisibleRegion();
++  nsIntRect visibleRect = visibleRegion.GetBounds();
++
++  float opacity = aLayer->GetEffectiveOpacity();
++
++
++  LayerRenderState state = aLayer->GetRenderState();
++
++  nsIntSize surfaceSize = {};
++  android::PixelFormat nformat = 0;
++
++  if (state.mSurface.get()) {
++    surfaceSize = state.mSize;
++    nformat = state.mSurface->getNativeBuffer()->format;
++  }
++  //prepare PrepareLayerRects
++
++#if 1
++  //peter dump format from cairo
++  printf_stderr("GPU %s aLayer %p in %3d name %s fmt %d cntflag 0x%x vis(%d %d %d %d) sf(%d %d) opacity %.2f",
++        pfx,
++        aLayer,
++        index,
++        aLayer->Name(),
++        //thost? thost->GetFormat():-1,
++        //layerToRender->GetFormat(),
++        nformat,
++        aLayer->GetContentFlags(),
++        visibleRect.x,
++        visibleRect.y,
++        visibleRect.width,
++        visibleRect.height,
++        surfaceSize.width,
++       surfaceSize.height,
++        //state.mHasOwnOffset ? state.mOffset.x:visibleRect.x,
++        //state.mHasOwnOffset ? state.mOffset.y:visibleRect.y,
++        opacity);
++
++#endif
++}
+ template<class ContainerT> void
+ ContainerRender(ContainerT* aContainer,
+                 const nsIntPoint& aOffset,
+@@ -164,12 +208,35 @@ ContainerRender(ContainerT* aContainer,
+   nsAutoTArray<Layer*, 12> children;
+   aContainer->SortChildrenBy3DZOrder(children);
+ 
++  nsAutoCString prefix;
++  int index = 0;
++  int HadoneContainerBro = 0;
++
++  index += aContainer->GetIndex();
++
++  for (int i = 0; i < index/100; i++) {
++    prefix += "  ";
++  }
++  DumpLayerAttribute(aContainer->GetLayer(), prefix.get(), index);
++
++
+   /**
+    * Render this container's contents.
+    */
+   for (uint32_t i = 0; i < children.Length(); i++) {
+     LayerComposite* layerToRender = static_cast<LayerComposite*>(children.ElementAt(i)->ImplData());
+ 
++    if (layerToRender->GetLayer()->AsContainerLayer()) {
++      int tempindex = ((index+100)/100)*100;
++      tempindex += (25*HadoneContainerBro);
++      layerToRender->setIndex(tempindex);
++      HadoneContainerBro++;
++    } else {
++      index++;
++      DumpLayerAttribute(layerToRender->GetLayer(), prefix.get(), index);
++    }
++
++
+     if (layerToRender->GetLayer()->GetEffectiveVisibleRegion().IsEmpty() &&
+         !layerToRender->GetLayer()->AsContainerLayer()) {
+       continue;
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+index 524228a..3936864 100644
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -356,8 +356,12 @@ LayerManagerComposite::Render()
+   mCompositor->RestoreState();
+ 
+   // Render our layers.
++  RootLayer()->setIndex(1);
++  printf_stderr("GPU composition start");
+   RootLayer()->RenderLayer(nsIntPoint(0, 0), clipRect);
+ 
++  Dump(nullptr,"  ", false);
++
+   // Allow widget to render a custom foreground.
+   mCompositor->SaveState();
+   mCompositor->GetWidget()->DrawWindowOverlay(this, nsIntRect(actualBounds.x,
+diff --git a/gfx/layers/composite/LayerManagerComposite.h b/gfx/layers/composite/LayerManagerComposite.h
+index d3dc14a..4129f62 100644
+--- a/gfx/layers/composite/LayerManagerComposite.h
++++ b/gfx/layers/composite/LayerManagerComposite.h
+@@ -387,6 +387,8 @@ public:
+   const nsIntRegion& GetShadowVisibleRegion() { return mShadowVisibleRegion; }
+   const gfx3DMatrix& GetShadowTransform() { return mShadowTransform; }
+   bool GetShadowTransformSetByAnimation() { return mShadowTransformSetByAnimation; }
++  void setIndex(int index) {mIndex = index;}
++  int GetIndex() {return mIndex;}
+ 
+ protected:
+   gfx3DMatrix mShadowTransform;
+@@ -398,6 +400,7 @@ protected:
+   bool mUseShadowClipRect;
+   bool mShadowTransformSetByAnimation;
+   bool mDestroyed;
++  int mIndex;
+ };
+ 
+ 
+diff --git a/gfx/layers/composite/TextureHost.cpp b/gfx/layers/composite/TextureHost.cpp
+index b2358ab..eb2bb6f 100644
+--- a/gfx/layers/composite/TextureHost.cpp
++++ b/gfx/layers/composite/TextureHost.cpp
+@@ -18,6 +18,7 @@
+ #include "nsAString.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsPrintfCString.h"            // for nsPrintfCString
++#include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ 
+ struct nsIntPoint;
+ 
+@@ -256,6 +257,9 @@ DeprecatedTextureHost::PrintInfo(nsACString& aTo, const char* aPrefix)
+   AppendToString(aTo, GetSize(), " [size=", "]");
+   AppendToString(aTo, GetFormat(), " [format=", "]");
+   AppendToString(aTo, mFlags, " [flags=", "]");
++  //AppendToString(aTo, GrallocBufferActor::GetFrom(*GetBuffer()).get(), " [buffer=", "]");
++
++  aTo += nsPrintfCString("buffer=0x%p", GrallocBufferActor::GetFrom(*GetBuffer()).get());
+ }
+ #endif // MOZ_LAYERS_HAVE_LOG
+ 
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+index 750c213..b854aad 100644
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -235,6 +235,9 @@ GrallocBufferActor::~GrallocBufferActor()
+   if (mAllocBytes > 0) {
+     GrallocReporter::sAmount -= mAllocBytes;
+   }
++
++  printf_stderr("GrallocBufferActor::~GrallocBufferActor this %p buffer %p size %d\n", this, this->mGraphicBuffer.get(), this->mAllocBytes);
++
+ }
+ 
+ /*static*/ PGrallocBufferParent*
+@@ -265,6 +268,8 @@ GrallocBufferActor::Create(const gfxIntSize& aSize,
+   actor->mGraphicBuffer = buffer;
+   *aOutHandle = MagicGrallocBufferHandle(buffer);
+ 
++  printf_stderr("GrallocBufferActor::Create %p buffer %p w%d h%d size %d\n", actor, buffer.get(), aSize.width, aSize.height, actor->mAllocBytes);
++
+   return actor;
+ }
+ 
+@@ -342,6 +347,36 @@ ISurfaceAllocator::PlatformDestroySharedSurface(SurfaceDescriptor* aSurface)
+ //-----------------------------------------------------------------------------
+ // Child process
+ 
++class MyTime
++{
++public:
++  MyTime(int nLine = 0, int w = 0, int h = 0) {
++    mLine = nLine;
++    mbegin = systemTime();
++    mwidth = w;
++    mheight = h;
++  };
++
++  int64_t systemTime(void) {
++    struct timespec t;
++    t.tv_sec = t.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (int64_t)(t.tv_sec)*1000000000LL + t.tv_nsec;
++  }
++
++  ~MyTime() {
++    mend = systemTime();
++    printf_stderr("time(%d) takes %0.3fms w %d h %d\n", mLine, (mend-mbegin) / 1000000.0, mwidth, mheight);
++  };
++
++private:
++  int64_t mbegin;
++  int64_t mend;
++  int mLine;
++  int mwidth;
++  int mheight;
++};
++
+ /*static*/ PGrallocBufferChild*
+ GrallocBufferActor::Create()
+ {
+@@ -403,6 +438,8 @@ ISurfaceAllocator::PlatformAllocSurfaceDescriptor(const gfxIntSize& aSize,
+   // width < 64.  There's not much point in gralloc'ing buffers that
+   // small anyway, so fall back on shared memory plus a texture
+   // upload.
++
++  MyTime mytime(__LINE__, aSize.width, aSize.height);
+   if (aSize.width < 64) {
+     return false;
+   }
+@@ -450,6 +487,8 @@ ISurfaceAllocator::PlatformAllocSurfaceDescriptor(const gfxIntSize& aSize,
+   *aBuffer = SurfaceDescriptorGralloc(nullptr, gc, aSize,
+                                       /* external */ false,
+                                       defaultRBSwap);
++  if (gba->mGraphicBuffer.get())
++  printf_stderr("buffer created %p\n", gba->mGraphicBuffer.get());
+   return true;
+ }
+ 
+@@ -570,6 +609,7 @@ ShadowLayerForwarder::PlatformDestroySharedSurface(SurfaceDescriptor* aSurface)
+ /*static*/ bool
+ ShadowLayerForwarder::PlatformCloseDescriptor(const SurfaceDescriptor& aDescriptor)
+ {
++  MyTime mytime(__LINE__);
+   PROFILER_LABEL("ShadowLayerForwarder", "PlatformCloseDescriptor");
+   if (SurfaceDescriptor::TSurfaceDescriptorGralloc != aDescriptor.type()) {
+     return false;
+@@ -577,6 +617,7 @@ ShadowLayerForwarder::PlatformCloseDescriptor(const SurfaceDescriptor& aDescript
+ 
+   sp<GraphicBuffer> buffer = GrallocBufferActor::GetFrom(aDescriptor);
+   DebugOnly<status_t> status = buffer->unlock();
++  printf_stderr("PlatformCloseDescriptor buffer %p w %d h %d", buffer.get(), buffer->width, buffer->height);
+   // If we fail to unlock, we'll subsequently fail to lock and end up aborting anyway.
+   MOZ_ASSERT(status == OK);
+   return true;
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+index 24e724c..8adbc85 100644
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -14,6 +14,7 @@ SHARED_LIBRARY_LIBS += \
+ 	../layers/$(LIB_PREFIX)layers.$(LIB_SUFFIX) \
+ 	$(NULL)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),windows)
+ 
+-- 
+1.7.9.5
+

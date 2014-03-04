@@ -1,0 +1,70 @@
+# HG changeset patch
+# Parent 9f2e7df455b8894a8bd0bf2bba630976038b83a1
+# User Jerry Shih <hshih@mozilla.com>
+debug hwc
+
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -52,37 +52,41 @@ GonkDisplayJB::GonkDisplayJB()
+     ALOGW_IF(err, "%s module not found", GRALLOC_HARDWARE_MODULE_ID);
+     if (!err) {
+         err = framebuffer_open(mFBModule, &mFBDevice);
+         ALOGW_IF(err, "could not open framebuffer");
+     }
+ 
+     if (!err && mFBDevice) {
+         mWidth = mFBDevice->width;
+-	 mHeight = mFBDevice->height;
+-	 xdpi = mFBDevice->xdpi;
++        mHeight = mFBDevice->height;
++        xdpi = mFBDevice->xdpi;
+         /* The emulator actually reports RGBA_8888, but EGL doesn't return
+          * any matching configuration. We force RGBX here to fix it. */
+         surfaceformat = HAL_PIXEL_FORMAT_RGBX_8888;
+     }
+ 
++
+     err = hw_get_module(HWC_HARDWARE_MODULE_ID, &mModule);
+     ALOGW_IF(err, "%s module not found", HWC_HARDWARE_MODULE_ID);
+     if (!err) {
+         err = hwc_open_1(mModule, &mHwc);
+         ALOGE_IF(err, "%s device failed to initialize (%s)",
+                  HWC_HARDWARE_COMPOSER, strerror(-err));
+     }
+ 
++
+     /* Fallback on the FB rendering path instead of trying to support HWC 1.0 */
++
+     if (!err && mHwc->common.version == HWC_DEVICE_API_VERSION_1_0) {
+         hwc_close_1(mHwc);
+         mHwc = nullptr;
+     }
+ 
++
+     if (!err && mHwc) {
+         if (mFBDevice) {
+             framebuffer_close(mFBDevice);
+             mFBDevice = nullptr;
+         }
+ 
+         int32_t values[3];
+         const uint32_t attrs[] = {
+@@ -220,16 +224,17 @@ GonkDisplayJB::SwapBuffers(EGLDisplay dp
+     eglSwapBuffers(dpy, sur);
+     return Post(mFBSurface->lastHandle, mFBSurface->lastFenceFD);
+ }
+ 
+ bool
+ GonkDisplayJB::Post(buffer_handle_t buf, int fence)
+ {
+     if (!mHwc) {
++    //if (true) {
+         PROFILER_LABEL("GonkDisplayJB::Post", "mFBDevice");
+ 
+         if (fence >= 0)
+             close(fence);
+         return !mFBDevice->post(mFBDevice, buf);
+     }
+ 
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};

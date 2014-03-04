@@ -1,0 +1,7 @@
+gfx_trace_makefile.patch
+debug_homescreen_glitche.patch
+force-enable-hwcomposer
+message_io_working.patch
+texture_size.patch
+texture_size_temp.patch
+compositor_debug.patch

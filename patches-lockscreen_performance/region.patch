@@ -1,0 +1,102 @@
+# HG changeset patch
+# Parent 1e866f568eeb8f4ce27363433a07c60d20d38d69
+# User Jerry Shih <hshih@mozilla.com>
+Bug 945082 - lockscreen fade-out animation is still < 60fps
+Check container layer's children overlap region.
+
+diff --git a/gfx/layers/Layers.cpp b/gfx/layers/Layers.cpp
+--- a/gfx/layers/Layers.cpp
++++ b/gfx/layers/Layers.cpp
+@@ -852,16 +852,47 @@ ContainerLayer::HasMultipleChildren()
+     ++count;
+     if (count > 1)
+       return true;
+   }
+ 
+   return false;
+ }
+ 
++bool
++ContainerLayer::HasOverlapChildrenRegion()
++{
++  typedef nsAutoTArray<Rect, 8> RectArray;
++  RectArray rectArray;
++
++  for (Layer* child = GetFirstChild(); child; child = child->GetNextSibling()) {
++    const nsIntRect *clipRect = child->GetEffectiveClipRect();
++    if (clipRect && clipRect->IsEmpty())
++      continue;
++    if (child->GetVisibleRegion().IsEmpty())
++      continue;
++
++    rectArray.AppendElement(
++        child->GetLocalTransform().As2D().TransformBounds(
++            ToRect(child->GetVisibleRegion().GetBounds())));
++  }
++
++  RectArray::size_type rectNum = rectArray.Length();
++
++  for(RectArray::size_type i = 0; i < rectNum; ++i){
++    for(RectArray::size_type j = i+1 ; j < rectNum; ++j){
++      if(rectArray[i].Intersects(rectArray[j])){
++        return true;
++      }
++    }
++  }
++
++  return false;
++}
++
+ void
+ ContainerLayer::SortChildrenBy3DZOrder(nsTArray<Layer*>& aArray)
+ {
+   nsAutoTArray<Layer*, 10> toSort;
+ 
+   for (Layer* l = GetFirstChild(); l; l = l->GetNextSibling()) {
+     ContainerLayer* container = l->AsContainerLayer();
+     if (container && container->GetContentFlags() & CONTENT_PRESERVE_3D) {
+@@ -892,17 +923,18 @@ ContainerLayer::DefaultComputeEffectiveT
+   if (GetMaskLayer()) {
+     useIntermediateSurface = true;
+ #ifdef MOZ_DUMP_PAINTING
+   } else if (gfxUtils::sDumpPainting) {
+     useIntermediateSurface = true;
+ #endif
+   } else {
+     float opacity = GetEffectiveOpacity();
+-    if (opacity != 1.0f && HasMultipleChildren()) {
++    //if (opacity != 1.0f && HasMultipleChildren()) {
++    if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
+       useIntermediateSurface = true;
+     } else {
+       useIntermediateSurface = false;
+       gfx::Matrix contTransform;
+       if (!mEffectiveTransform.Is2D(&contTransform) ||
+ #ifdef MOZ_GFX_OPTIMIZE_MOBILE
+         !contTransform.PreservesAxisAlignedRectangles()) {
+ #else
+diff --git a/gfx/layers/Layers.h b/gfx/layers/Layers.h
+--- a/gfx/layers/Layers.h
++++ b/gfx/layers/Layers.h
+@@ -1660,16 +1660,21 @@ public:
+   }
+ 
+   /**
+    * Returns true if this container has more than one non-empty child
+    */
+   bool HasMultipleChildren();
+ 
+   /**
++   * Returns true if this container's visible region is overlap
++   */
++  bool HasOverlapChildrenRegion();
++
++  /**
+    * Returns true if this container supports children with component alpha.
+    * Should only be called while painting a child of this layer.
+    */
+   bool SupportsComponentAlphaChildren() { return mSupportsComponentAlphaChildren; }
+ 
+ protected:
+   friend class ReadbackProcessor;
+ 

@@ -1,0 +1,6 @@
+# HG changeset patch
+# Parent 47bc48fa925665b1c52f01a7f08203e4ac10013a
+# User Jerry Shih <hshih@mozilla.com>
+try: -b do -p all -u all -t none
+
+

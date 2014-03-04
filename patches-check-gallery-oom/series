@@ -1,0 +1,6 @@
+hwc_4.2.2_fix.patch
+timer.patch
+gfx_trace_makefile.patch
+fix_blob_report.patch
+check_image_loader.patch
+dump_layer.patch

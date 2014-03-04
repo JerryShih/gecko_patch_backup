@@ -1,0 +1,174 @@
+# HG changeset patch
+# Parent 4ad74e131b3cf860fd2190a5c535e71ad459781a
+# User Jerry Shih <hshih@mozilla.com>
+debug Bug 919410 - [LockScreen] Fix the glitches among the sliders when user is pulling the handle
+
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -6,17 +6,17 @@
+ #ifndef GFX_LAYERSTYPES_H
+ #define GFX_LAYERSTYPES_H
+ 
+ #include <stdint.h>                     // for uint32_t
+ #include "nsPoint.h"                    // for nsIntPoint
+ 
+ // Debugging define.
+ // To dump a layer tree call LayerManager::Dump()
+-// #define MOZ_LAYERS_HAVE_LOG
++#define MOZ_LAYERS_HAVE_LOG
+ 
+ #ifdef MOZ_WIDGET_GONK
+ #include <ui/GraphicBuffer.h>
+ #endif
+ #if defined(DEBUG) || defined(PR_LOGGING)
+ #  include <stdio.h>            // FILE
+ #  include "prlog.h"            // for PR_LOG
+ #  ifndef MOZ_LAYERS_HAVE_LOG
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -487,16 +487,18 @@ CompositorParent::ScheduleComposition()
+   } else {
+     ScheduleTask(mCurrentCompositeTask, 0);
+   }
+ }
+ 
+ void
+ CompositorParent::Composite()
+ {
++  printf_stderr("bignose CompositorParent::Composite() begin");
++
+   PROFILER_LABEL("CompositorParent", "Composite");
+   NS_ABORT_IF_FALSE(CompositorThreadID() == PlatformThread::CurrentId(),
+                     "Composite can only be called on the compositor thread");
+   mCurrentCompositeTask = nullptr;
+ 
+   mLastCompose = TimeStamp::Now();
+ 
+   if (!CanComposite()) {
+@@ -518,31 +520,35 @@ CompositorParent::Composite()
+   if (requestNextFrame) {
+     ScheduleComposition();
+   }
+ 
+   RenderTraceLayers(mLayerManager->GetRoot(), "0000");
+ 
+   mCompositionManager->ComputeRotation();
+ 
++  mLayerManager->Dump(nullptr, "bignose layer:", false);
++
+ #ifdef MOZ_DUMP_PAINTING
+   static bool gDumpCompositorTree = false;
+   if (gDumpCompositorTree) {
+     fprintf(stdout, "Painting --- compositing layer tree:\n");
+     mLayerManager->Dump(stdout, "", false);
+   }
+ #endif
+   mLayerManager->EndEmptyTransaction();
+ 
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+   if (mExpectedComposeTime + TimeDuration::FromMilliseconds(15) < TimeStamp::Now()) {
+     printf_stderr("Compositor: Composite took %i ms.\n",
+                   15 + (int)(TimeStamp::Now() - mExpectedComposeTime).ToMilliseconds());
+   }
+ #endif
++
++  printf_stderr("bignose CompositorParent::Composite() end");
+ }
+ 
+ void
+ CompositorParent::ComposeToTarget(gfxContext* aTarget)
+ {
+   PROFILER_LABEL("CompositorParent", "ComposeToTarget");
+   AutoRestore<bool> override(mOverrideComposeReadiness);
+   mOverrideComposeReadiness = true;
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -978,16 +978,20 @@ private:
+ };
+ 
+ void
+ CompositorOGL::DrawQuad(const Rect& aRect, const Rect& aClipRect,
+                         const EffectChain &aEffectChain,
+                         Float aOpacity, const gfx::Matrix4x4 &aTransform,
+                         const Point& aOffset)
+ {
++  if(aRect.width * aRect.height>900*500){
++    return;
++  }
++
+   PROFILER_LABEL("CompositorOGL", "DrawQuad");
+   MOZ_ASSERT(mFrameInProgress, "frame not started");
+ 
+   IntRect intClipRect;
+   aClipRect.ToIntRect(&intClipRect);
+   mGLContext->PushScissorRect(nsIntRect(intClipRect.x, intClipRect.y,
+                                         intClipRect.width, intClipRect.height));
+ 
+@@ -1031,21 +1035,41 @@ CompositorOGL::DrawQuad(const Rect& aRec
+   program->Activate();
+   if (programType == RGBARectLayerProgramType ||
+       programType == RGBXRectLayerProgramType) {
+     TexturedEffect* texturedEffect =
+         static_cast<TexturedEffect*>(aEffectChain.mPrimaryEffect.get());
+     TextureSourceOGL* source = texturedEffect->mTexture->AsSourceOGL();
+     // This is used by IOSurface that use 0,0...w,h coordinate rather then 0,0..1,1.
+     program->SetTexCoordMultiplier(source->GetSize().width, source->GetSize().height);
++
++    printf_stderr("bignose texture size:(%d,%d)",source->GetSize().width,source->GetSize().height);
++    printf_stderr("bignose texture wrap:%d",source->GetWrapMode());
++
+   }
+   program->SetLayerQuadRect(aRect);
+   program->SetLayerTransform(aTransform);
+   program->SetRenderOffset(aOffset.x, aOffset.y);
+ 
++  gfx3DMatrix test_matrix;
++  gfxRect test_rect(aRect.x,aRect.y,aRect.width,aRect.height);
++  To3DMatrix(aTransform,test_matrix);
++  test_rect=test_matrix.TransformBounds(test_rect);
++
++  printf_stderr("bignose print pos: rect pos:(%f,%f), (%f,%f)",aRect.x,aRect.y,aRect.x+aRect.width,aRect.y+aRect.height);
++//  printf_stderr("bignose print pos: matrix (%f,%f,%f,%f)",test_matrix._11,test_matrix._12,test_matrix._13,test_matrix._14);
++//  printf_stderr("bignose print pos: matrix (%f,%f,%f,%f)",test_matrix._21,test_matrix._22,test_matrix._23,test_matrix._24);
++//  printf_stderr("bignose print pos: matrix (%f,%f,%f,%f)",test_matrix._31,test_matrix._32,test_matrix._33,test_matrix._34);
++//  printf_stderr("bignose print pos: matrix (%f,%f,%f,%f)",test_matrix._41,test_matrix._42,test_matrix._43,test_matrix._44);
++  printf_stderr("bignose print pos: offset:(%f,%f)",aOffset.x, aOffset.y);
++
++  printf_stderr("bignose print pos: transformed pos:(%f,%f), (%f,%f)",test_rect.x+aOffset.x,test_rect.y+aOffset.y,test_rect.x+aOffset.x+test_rect.width,test_rect.y+aOffset.y+test_rect.height);
++
++
++
+   switch (aEffectChain.mPrimaryEffect->mType) {
+     case EFFECT_SOLID_COLOR: {
+       EffectSolidColor* effectSolidColor =
+         static_cast<EffectSolidColor*>(aEffectChain.mPrimaryEffect.get());
+ 
+       Color color = effectSolidColor->mColor;
+       /* Multiply color by the layer opacity, as the shader
+        * ignores layer opacity and expects a final color to
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -344,16 +344,19 @@ nsLayoutUtils::AreAsyncAnimationsEnabled
+   static bool sAsyncPrefCached = false;
+ 
+   if (!sAsyncPrefCached) {
+     sAsyncPrefCached = true;
+     Preferences::AddBoolVarCache(&sAreAsyncAnimationsEnabled,
+                                  "layers.offmainthreadcomposition.async-animations");
+   }
+ 
++  //bignose
++  return false;
++
+   return sAreAsyncAnimationsEnabled &&
+     gfxPlatform::OffMainThreadCompositingEnabled();
+ }
+ 
+ bool
+ nsLayoutUtils::IsAnimationLoggingEnabled()
+ {
+   static bool sShouldLog;

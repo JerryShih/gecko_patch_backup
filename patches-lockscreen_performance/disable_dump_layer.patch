@@ -1,0 +1,227 @@
+# HG changeset patch
+# Parent 3af0168f0793e4b9e6845d2b253021d2747be57e
+# User Jerry Shih <hshih@mozilla.com>
+disable dump layer
+
+
+diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
+--- a/gfx/layers/client/CanvasClient.cpp
++++ b/gfx/layers/client/CanvasClient.cpp
+@@ -20,16 +20,18 @@
+ #include "mozilla/layers/TextureClientOGL.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsDebug.h"                    // for printf_stderr, NS_ASSERTION
+ #include "nsXULAppAPI.h"                // for XRE_GetProcessType, etc
+ #ifdef MOZ_WIDGET_GONK
+ #include "SharedSurfaceGralloc.h"
+ #endif
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ /* static */ TemporaryRef<CanvasClient>
+ CanvasClient::CreateCanvasClient(CanvasClientType aType,
+@@ -107,19 +109,31 @@ CanvasClient2D::CreateBufferTextureClien
+ }
+ 
+ CanvasClientSurfaceStream::CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder,
+                                                      TextureFlags aFlags)
+   : CanvasClient(aLayerForwarder, aFlags)
+ {
+ }
+ 
++CanvasClientSurfaceStream::~CanvasClientSurfaceStream()
++{
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.test_canvas", propValue, "0");
++  if(atoi(propValue) == 1){
++    int test;
++    test=10;
++  }
++}
++
+ void
+ CanvasClientSurfaceStream::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
+ {
++  printf_stderr("bignose in CanvasClientSurfaceStream::Update");
++
+   GLScreenBuffer* screen = aLayer->mGLContext->Screen();
+   SurfaceStream* stream = screen->Stream();
+ 
+   bool isCrossProcess = !(XRE_GetProcessType() == GeckoProcessType_Default);
+   bool bufferCreated = false;
+   if (isCrossProcess) {
+ #ifdef MOZ_WIDGET_GONK
+     SharedSurface* surf = stream->SwapConsumer();
+@@ -138,20 +152,24 @@ CanvasClientSurfaceStream::Update(gfx::I
+ 
+     RefPtr<GrallocTextureClientOGL> grallocTextureClient =
+       static_cast<GrallocTextureClientOGL*>(grallocSurf->GetTextureClient());
+ 
+     // If IPDLActor is null means this TextureClient didn't AddTextureClient yet
+     if (!grallocTextureClient->GetIPDLActor()) {
+       grallocTextureClient->SetTextureFlags(mTextureInfo.mTextureFlags);
+       AddTextureClient(grallocTextureClient);
++
++      printf_stderr("bignose in CanvasClientSurfaceStream::Update AddTextureClient");
+     }
+ 
+     if (grallocTextureClient->GetIPDLActor()) {
+       GetForwarder()->UseTexture(this, grallocTextureClient);
++
++      printf_stderr("bignose in CanvasClientSurfaceStream::Update UseTexture");
+     }
+ #else
+     printf_stderr("isCrossProcess, but not MOZ_WIDGET_GONK! Someone needs to write some code!");
+     MOZ_ASSERT(false);
+ #endif
+   } else {
+     if (!mBuffer) {
+       StreamTextureClientOGL* textureClient =
+diff --git a/gfx/layers/client/CanvasClient.h b/gfx/layers/client/CanvasClient.h
+--- a/gfx/layers/client/CanvasClient.h
++++ b/gfx/layers/client/CanvasClient.h
+@@ -102,16 +102,17 @@ private:
+ };
+ 
+ // Used for GL canvases where we don't need to do any readback, i.e., with a
+ // GL backend.
+ class CanvasClientSurfaceStream : public CanvasClient
+ {
+ public:
+   CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder, TextureFlags aFlags);
++  virtual ~CanvasClientSurfaceStream();
+ 
+   TextureInfo GetTextureInfo() const
+   {
+     return TextureInfo(COMPOSITABLE_IMAGE);
+   }
+ 
+   virtual void Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer) MOZ_OVERRIDE;
+ 
+diff --git a/gfx/layers/composite/CanvasLayerComposite.cpp b/gfx/layers/composite/CanvasLayerComposite.cpp
+--- a/gfx/layers/composite/CanvasLayerComposite.cpp
++++ b/gfx/layers/composite/CanvasLayerComposite.cpp
+@@ -15,34 +15,47 @@
+ #include "mozilla/layers/Effects.h"     // for EffectChain
+ #include "mozilla/mozalloc.h"           // for operator delete
+ #include "nsAString.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsString.h"                   // for nsAutoCString
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla;
+ using namespace mozilla::layers;
+ using namespace mozilla::gfx;
+ 
+ CanvasLayerComposite::CanvasLayerComposite(LayerManagerComposite* aManager)
+   : CanvasLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+   , mImageHost(nullptr)
+ {
+   MOZ_COUNT_CTOR(CanvasLayerComposite);
+   mImplData = static_cast<LayerComposite*>(this);
++
++  printf_stderr("bignose CanvasLayerComposite::CanvasLayerComposite");
+ }
+ 
+ CanvasLayerComposite::~CanvasLayerComposite()
+ {
+   MOZ_COUNT_DTOR(CanvasLayerComposite);
+ 
+   CleanupResources();
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.test_canvas", propValue, "0");
++  if(atoi(propValue) == 1){
++    int test;
++    test=10;
++  }
++
++  printf_stderr("bignose CanvasLayerComposite::~CanvasLayerComposite");
+ }
+ 
+ bool
+ CanvasLayerComposite::SetCompositableHost(CompositableHost* aHost)
+ {
+   switch (aHost->GetType()) {
+     case BUFFER_IMAGE_SINGLE:
+     case BUFFER_IMAGE_BUFFERED:
+@@ -68,17 +81,20 @@ CanvasLayerComposite::GetRenderState()
+     return LayerRenderState();
+   }
+   return mImageHost->GetRenderState();
+ }
+ 
+ void
+ CanvasLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  printf_stderr("bignose CanvasLayerComposite::RenderLayer");
++
+   if (!mImageHost || !mImageHost->IsAttached()) {
++    printf_stderr("bignose CanvasLayerComposite::RenderLayer, no mImageHost");
+     return;
+   }
+ 
+   mCompositor->MakeCurrent();
+ 
+ #ifdef MOZ_DUMP_PAINTING
+   if (gfxUtils::sDumpPainting) {
+     RefPtr<gfx::DataSourceSurface> surf = mImageHost->GetAsSurface();
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -205,18 +205,18 @@ LayerManagerComposite::EndTransaction(Dr
+   mInTransaction = false;
+ 
+   if (!mIsCompositorReady) {
+     return;
+   }
+   mIsCompositorReady = false;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+-  Log();
++  //MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
++  //Log();
+ #endif
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+   if (mRoot && mClonedLayerTreeProperties) {
+@@ -239,21 +239,21 @@ LayerManagerComposite::EndTransaction(Dr
+     // so we don't need to pass any global transform here.
+     mRoot->ComputeEffectiveTransforms(gfx::Matrix4x4());
+ 
+     Render();
+   }
+ 
+   mCompositor->SetTargetContext(nullptr);
+ 
+-  Dump(nullptr,"bignose layer:",false);
++  //Dump(nullptr,"bignose layer:",false);
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  Log();
+-  MOZ_LAYERS_LOG(("]----- EndTransaction"));
++  //Log();
++  //MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ }
+ 
+ already_AddRefed<gfxASurface>
+ LayerManagerComposite::CreateOptimalMaskSurface(const IntSize &aSize)
+ {
+   NS_RUNTIMEABORT("Should only be called on the drawing side");
+   return nullptr;

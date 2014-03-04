@@ -1,0 +1,619 @@
+# HG changeset patch
+# User Benoit Girard <b56girard@gmail.com>
+# Date 1381353704 14400
+#      Wed Oct 09 17:21:44 2013 -0400
+# Node ID 537d79ab3ea3643b6830bf463516e4214f5215bd
+# Parent c4ee3247be284e3053cd4add257f6406144b6f9d
+try: -b o -p all -u all -t none
+
+diff --git a/gfx/2d/2D.h b/gfx/2d/2D.h
+--- a/gfx/2d/2D.h
++++ b/gfx/2d/2D.h
+@@ -568,16 +568,23 @@ public:
+   /**
+    * Returns a SourceSurface which is a snapshot of the current contents of the DrawTarget.
+    * Multiple calls to Snapshot() without any drawing operations in between will
+    * normally return the same SourceSurface object.
+    */
+   virtual TemporaryRef<SourceSurface> Snapshot() = 0;
+   virtual IntSize GetSize() = 0;
+ 
++  /**
++   * Returns a live source surface to the contents of the DrawTarget if possible.
++   * This is used for direct manipulation of underlying DrawTarget.
++   */
++  virtual TemporaryRef<SourceSurface> GetLiveSourceSurface() { return nullptr; };
++  virtual void ReleaseLiveSourceSurface() {};
++
+   /* Ensure that the DrawTarget backend has flushed all drawing operations to
+    * this draw target. This must be called before using the backing surface of
+    * this draw target outside of GFX 2D code.
+    */
+   virtual void Flush() = 0;
+ 
+   /*
+    * Draw a surface to the draw target. Possibly doing partial drawing or
+diff --git a/gfx/2d/DrawTargetCairo.cpp b/gfx/2d/DrawTargetCairo.cpp
+--- a/gfx/2d/DrawTargetCairo.cpp
++++ b/gfx/2d/DrawTargetCairo.cpp
+@@ -409,16 +409,39 @@ DrawTargetCairo::Snapshot()
+   cairo_content_t content = cairo_surface_get_content(mSurface);
+   mSnapshot = new SourceSurfaceCairo(mSurface,
+                                      size,
+                                      CairoContentToGfxFormat(content),
+                                      this);
+   return mSnapshot;
+ }
+ 
++TemporaryRef<SourceSurface>
++DrawTargetCairo::GetLiveSourceSurface()
++{
++  WillChange();
++
++  IntSize size = GetSize();
++
++  cairo_content_t content = cairo_surface_get_content(mSurface);
++  mLiveSurface = new SourceSurfaceCairo(mSurface,
++                                        size,
++                                        CairoContentToGfxFormat(content),
++                                        this);
++
++  return mLiveSurface;
++}
++
++void
++DrawTargetCairo::ReleaseLiveSourceSurface()
++{
++  // Ideally this will release the last reference but we don't check it.
++  mLiveSurface = nullptr;
++}
++
+ void
+ DrawTargetCairo::Flush()
+ {
+   cairo_surface_t* surf = cairo_get_target(mContext);
+   cairo_surface_flush(surf);
+ }
+ 
+ void
+@@ -1074,16 +1097,23 @@ DrawTargetCairo::MarkSnapshotIndependent
+     mSnapshot = nullptr;
+   }
+ }
+ 
+ void
+ DrawTargetCairo::WillChange(const Path* aPath /* = nullptr */)
+ {
+   MarkSnapshotIndependent();
++
++#ifdef DEBUG
++  if (mLiveSurface) {
++    // Must be released before changing
++    abort();
++  }
++#endif
+ }
+ 
+ void
+ DrawTargetCairo::SetTransform(const Matrix& aTransform)
+ {
+   mTransform = aTransform;
+ 
+   cairo_matrix_t mat;
+diff --git a/gfx/2d/DrawTargetCairo.h b/gfx/2d/DrawTargetCairo.h
+--- a/gfx/2d/DrawTargetCairo.h
++++ b/gfx/2d/DrawTargetCairo.h
+@@ -55,16 +55,19 @@ public:
+ 
+   DrawTargetCairo();
+   virtual ~DrawTargetCairo();
+ 
+   virtual BackendType GetType() const { return BACKEND_CAIRO; }
+   virtual TemporaryRef<SourceSurface> Snapshot();
+   virtual IntSize GetSize();
+ 
++  virtual TemporaryRef<SourceSurface> GetLiveSourceSurface();
++  virtual void ReleaseLiveSourceSurface();
++
+   virtual void Flush();
+   virtual void DrawSurface(SourceSurface *aSurface,
+                            const Rect &aDest,
+                            const Rect &aSource,
+                            const DrawSurfaceOptions &aSurfOptions = DrawSurfaceOptions(),
+                            const DrawOptions &aOptions = DrawOptions());
+   virtual void DrawSurfaceWithShadow(SourceSurface *aSurface,
+                                      const Point &aDest,
+@@ -173,16 +176,19 @@ private: // methods
+   // If the current operator is "source" then clear the destination before we
+   // draw into it, to simulate the effect of an unbounded source operator.
+   void ClearSurfaceForUnboundedSource(const CompositionOp &aOperator);
+ private: // data
+   cairo_t* mContext;
+   cairo_surface_t* mSurface;
+   IntSize mSize;
+ 
++  // The active live surface used currently to modifying the underlying surface.
++  RefPtr<SourceSurfaceCairo> mLiveSurface;
++
+   // The latest snapshot of this surface. This needs to be told when this
+   // target is modified. We keep it alive as a cache.
+   RefPtr<SourceSurfaceCairo> mSnapshot;
+   static cairo_surface_t *mDummySurface;
+ };
+ 
+ }
+ }
+diff --git a/gfx/layers/BufferUnrotate.cpp b/gfx/layers/BufferUnrotate.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/BufferUnrotate.cpp
+@@ -0,0 +1,80 @@
++/* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include <algorithm>    // std::swap
++#include <cstdlib>
++#include <stdint.h>
++#include <stdio.h>
++
++template <class T> static
++void SwapLine(T* a, T* b, int width)
++{
++  for (int i = 0; i < width; i++) {
++    std::swap(a[i], b[i]);
++  }
++}
++
++template <class T> static
++void InplaceBufferUnrotateInternal(T* aBuffer, int aByteWidth, int aHeight,
++                                  int aByteStride, int aXBoundary, int aYBoundary)
++{
++  if (aXBoundary != 0) {
++    for (int y = 0; y < aHeight; y++) {
++      int pivot = 0;
++      int remaining = aXBoundary/sizeof(T);
++      int nextStart = pivot;
++      int size = aByteWidth/sizeof(T);
++
++      while (pivot < size) {
++        // Pre Condition:
++        //   0..pivot is in the right place
++        //   remaining..size is in increasing order
++        //   pivot..remaining is rotated about nextStart
++        std::swap(aBuffer[y*aByteStride/sizeof(T) + pivot], aBuffer[y*aByteStride/sizeof(T) + remaining]);
++        if (nextStart == pivot) {
++          nextStart = remaining;
++        }
++        pivot++;
++        remaining++;
++        if (remaining == size) {
++          remaining = nextStart;
++        }
++      }
++    }
++  }
++
++  if (aYBoundary != 0) {
++    int pivot = 0;
++    int remaining = aYBoundary;
++    int nextStart = pivot;
++    int size = aHeight;
++
++    while (pivot < size) {
++      // Swap a line at a time for cache friendliness
++      SwapLine(&aBuffer[pivot*aByteStride/sizeof(T)], &aBuffer[remaining*aByteStride/sizeof(T)], aByteWidth/sizeof(T));
++      if (nextStart == pivot) {
++        nextStart = remaining;
++      }
++      pivot++;
++      remaining++;
++      if (remaining == size) {
++        remaining = nextStart;
++      }
++    }
++  }
++}
++
++void InplaceBufferUnrotate(unsigned char* aBuffer, int aByteWidth, int aHeight,
++                           int aByteStride, int aXBoundary, int aYBoundary)
++{
++  // NOTE: The uint64_t path is slightly slower on OSX64 so we don't use it
++  if ((aByteWidth%4) == 0 && (aByteStride%4) == 0 && (aXBoundary%4) == 0) {
++    InplaceBufferUnrotateInternal(reinterpret_cast<uint32_t*>(aBuffer), aByteWidth, aHeight, aByteStride, aXBoundary, aYBoundary);
++  } else {
++    InplaceBufferUnrotateInternal(reinterpret_cast<uint16_t*>(aBuffer), aByteWidth, aHeight, aByteStride, aXBoundary, aYBoundary);
++  }
++}
++
++
+diff --git a/gfx/layers/BufferUnrotate.h b/gfx/layers/BufferUnrotate.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/BufferUnrotate.h
+@@ -0,0 +1,52 @@
++/* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * Unrotate the buffer. This is a 2D extension of the following problem:
++ * Given a sorted array that has been shifted to the right, sort it. Example:
++ *
++ * Array =  5 6 7 8 0 1 2 3 4
++ *
++ * Note that we can divide the array into 3 sections:
++ *   0..pivot: In place.
++ *   pivot..remaining: sorted but rotated about nextStart.
++ *   remaining..size: in increasing order
++ *
++ * Here's an example f the algorithm:
++ *   Test buffer of size 9, with middle of 5
++ *  4,5,6,7,8,0,1,2,3,
++ * ^*         !
++ *  pivot 0, nextStart 0(4), remaining 5
++ *  0,5,6,7,8,4,1,2,3,
++ *    ^       * !
++ *  pivot 1, nextStart 5(4), remaining 6
++ *  0,1,6,7,8,4,5,2,3,
++ *      ^     *   !
++ *  pivot 2, nextStart 5(4), remaining 7
++ *  0,1,2,7,8,4,5,6,3,
++ *        ^   *     !
++ *  pivot 3, nextStart 5(4), remaining 8
++ *  0,1,2,3,8,4,5,6,7,
++ *          ^ *!
++ *  pivot 4, nextStart 5(4), remaining 5
++ *  0,1,2,3,4,8,5,6,7,
++ *           ^* !
++ *  pivot 5, nextStart 5(8), remaining 6
++ *  0,1,2,3,4,5,8,6,7,
++ *             ^* !
++ *  pivot 6, nextStart 6(8), remaining 7
++ *  0,1,2,3,4,5,6,8,7,
++ *               ^* !
++ *  pivot 7, nextStart 7(8), remaining 8
++ *  0,1,2,3,4,5,6,7,8,
++ *                  ^*!
++ *  pivot 8, nextStart 8(8), remaining 8
++ *
++ * XXX: Width/Stride/X Boundary are in bytes but height is
++ *      in lines. This function is format independant.
++ */
++void InplaceBufferUnrotate(unsigned char* aBuffer, int aByteWidth, int aHeight,
++                           int aByteStride, int aXByteBoundary, int aYBoundary);
++
+diff --git a/gfx/layers/ThebesLayerBuffer.cpp b/gfx/layers/ThebesLayerBuffer.cpp
+--- a/gfx/layers/ThebesLayerBuffer.cpp
++++ b/gfx/layers/ThebesLayerBuffer.cpp
+@@ -3,16 +3,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "ThebesLayerBuffer.h"
+ #include <sys/types.h>                  // for int32_t
+ #include <algorithm>                    // for max
+ #include "BasicImplData.h"              // for BasicImplData
+ #include "BasicLayersImpl.h"            // for ToData
++#include "BufferUnrotate.h"             // for InplaceBufferUnrotate
+ #include "GeckoProfiler.h"              // for PROFILER_LABEL
+ #include "Layers.h"                     // for ThebesLayer, Layer, etc
+ #include "gfxColor.h"                   // for gfxRGBA
+ #include "gfxContext.h"                 // for gfxContext, etc
+ #include "gfxMatrix.h"                  // for gfxMatrix
+ #include "gfxPattern.h"                 // for gfxPattern
+ #include "gfxPlatform.h"                // for gfxPlatform
+ #include "gfxPoint.h"                   // for gfxPoint
+@@ -674,28 +675,64 @@ ThebesLayerBuffer::BeginPaint(ThebesLaye
+             mBuffer->MovePixels(srcRect, dest);
+             if (mode == Layer::SURFACE_COMPONENT_ALPHA) {
+               EnsureBufferOnWhite();
+               MOZ_ASSERT(mBufferOnWhite);
+               mBufferOnWhite->MovePixels(srcRect, dest);
+             }
+           }
+           result.mDidSelfCopy = true;
++          mDidSelfCopy = true;
+           // Don't set destBuffer; we special-case self-copies, and
+           // just did the necessary work above.
+           mBufferRect = destBufferRect;
+         } else {
+-          // We can't do a real self-copy because the buffer is rotated.
+-          // So allocate a new buffer for the destination.
+-          destBufferRect = ComputeBufferRect(neededRegion.GetBounds());
+-          CreateBuffer(contentType, destBufferRect, bufferFlags,
+-                       getter_AddRefs(destBuffer), getter_AddRefs(destBufferOnWhite),
+-                       &destDTBuffer, &destDTBufferOnWhite);
+-          if (!destBuffer && !destDTBuffer)
+-            return result;
++          // With azure and a data surface perform an inplace buffer unrotate
++          // (SelfCopy).
++          if (IsAzureBuffer()) {
++            RefPtr<SourceSurface> liveSurface = mDTBuffer->GetLiveSourceSurface();
++            if (liveSurface) {
++              RefPtr<DataSourceSurface> dataSource = liveSurface->GetDataSurface();
++              if (dataSource.get()) {
++                uint8_t bytesPerPixel = BytesPerPixel(dataSource->GetFormat());
++                InplaceBufferUnrotate(dataSource->GetData(),
++                                      dataSource->GetSize().width * bytesPerPixel,
++                                      dataSource->GetSize().height,
++                                      dataSource->Stride(),
++                                      newRotation.x*bytesPerPixel, newRotation.y);
++                mDTBuffer->ReleaseLiveSourceSurface();
++                if (mode == Layer::SURFACE_COMPONENT_ALPHA) {
++                  MOZ_ASSERT(mDTBufferOnWhite);
++                  liveSurface = mDTBufferOnWhite->Snapshot();
++                  dataSource = liveSurface->GetDataSurface();
++                  uint8_t bytesPerPixel = BytesPerPixel(dataSource->GetFormat());
++                  InplaceBufferUnrotate(dataSource->GetData(),
++                                        dataSource->GetSize().width * bytesPerPixel,
++                                        dataSource->GetSize().height,
++                                        dataSource->Stride(),
++                                        newRotation.x*bytesPerPixel, newRotation.y);
++                  mDTBufferOnWhite->ReleaseLiveSourceSurface();
++                }
++                // Buffer unrotate moves all the pixels, note that
++                // we self copied for SyncBackToFrontBuffer
++                result.mDidSelfCopy = true;
++                mDidSelfCopy = true;
++                mBufferRect = destBufferRect;
++                mBufferRotation = nsIntPoint(0, 0);
++              }
++            }
++          }
++          if (!result.mDidSelfCopy) {
++            destBufferRect = ComputeBufferRect(neededRegion.GetBounds());
++            CreateBuffer(contentType, destBufferRect, bufferFlags,
++                         getter_AddRefs(destBuffer), getter_AddRefs(destBufferOnWhite),
++                         &destDTBuffer, &destDTBufferOnWhite);
++            if (!destBuffer && !destDTBuffer)
++              return result;
++          }
+         }
+       } else {
+         mBufferRect = destBufferRect;
+         mBufferRotation = newRotation;
+       }
+     } else {
+       // No pixels are going to be kept. The whole visible region
+       // will be redrawn, so we don't need to copy anything, so we don't
+diff --git a/gfx/layers/ThebesLayerBuffer.h b/gfx/layers/ThebesLayerBuffer.h
+--- a/gfx/layers/ThebesLayerBuffer.h
++++ b/gfx/layers/ThebesLayerBuffer.h
+@@ -141,16 +141,19 @@ protected:
+    * is tiled to fill the plane, and the result is clipped to mBufferRect.
+    * So the pixel at mBufferRotation within the buffer is what gets painted at
+    * mBufferRect.TopLeft().
+    * This is "rotation" in the sense of rotating items in a linear buffer,
+    * where items falling off the end of the buffer are returned to the
+    * buffer at the other end, not 2D rotation!
+    */
+   nsIntPoint            mBufferRotation;
++  // When this is true it means that all pixels have moved inside the buffer.
++  // It's not possible to sync with another buffer without a full copy.
++  bool                  mDidSelfCopy;
+ };
+ 
+ /**
+  * This class encapsulates the buffer used to retain ThebesLayer contents,
+  * i.e., the contents of the layer's GetVisibleRegion().
+  */
+ class ThebesLayerBuffer : public RotatedBuffer {
+ public:
+diff --git a/gfx/layers/client/ContentClient.cpp b/gfx/layers/client/ContentClient.cpp
+--- a/gfx/layers/client/ContentClient.cpp
++++ b/gfx/layers/client/ContentClient.cpp
+@@ -474,31 +474,23 @@ ContentClientDoubleBuffered::SyncFrontBu
+                   this,
+                   mFrontUpdatedRegion.GetBounds().x,
+                   mFrontUpdatedRegion.GetBounds().y,
+                   mFrontUpdatedRegion.GetBounds().width,
+                   mFrontUpdatedRegion.GetBounds().height));
+ 
+   nsIntRegion updateRegion = mFrontUpdatedRegion;
+ 
+-  int32_t xBoundary = mBufferRect.XMost() - mBufferRotation.x;
+-  int32_t yBoundary = mBufferRect.YMost() - mBufferRotation.y;
+-
+-  // Figure out whether the area we want to copy wraps the edges of our buffer.
+-  bool needFullCopy = (xBoundary < updateRegion.GetBounds().XMost() &&
+-                       xBoundary > updateRegion.GetBounds().x) ||
+-                      (yBoundary < updateRegion.GetBounds().YMost() &&
+-                       yBoundary > updateRegion.GetBounds().y);
+-  
+   // This is a tricky trade off, we're going to get stuff out of our
+   // frontbuffer now, but the next PaintThebes might throw it all (or mostly)
+   // away if the visible region has changed. This is why in reality we want
+   // this code integrated with PaintThebes to always do the optimal thing.
+ 
+-  if (needFullCopy) {
++  if (mDidSelfCopy) {
++    mDidSelfCopy = false;
+     // We can't easily draw our front buffer into us, since we're going to be
+     // copying stuff around anyway it's easiest if we just move our situation
+     // to non-rotated while we're at it. If this situation occurs we'll have
+     // hit a self-copy path in PaintThebes before as well anyway.
+     mBufferRect.MoveTo(mFrontBufferRect.TopLeft());
+     mBufferRotation = nsIntPoint();
+     updateRegion = mBufferRect;
+   } else {
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -189,16 +189,17 @@ CPP_SOURCES += [
+     'basic/BasicColorLayer.cpp',
+     'basic/BasicCompositor.cpp',
+     'basic/BasicContainerLayer.cpp',
+     'basic/BasicImageLayer.cpp',
+     'basic/BasicImages.cpp',
+     'basic/BasicLayerManager.cpp',
+     'basic/BasicLayersImpl.cpp',
+     'basic/BasicThebesLayer.cpp',
++    'BufferUnrotate.cpp',
+     'client/CanvasClient.cpp',
+     'composite/CanvasLayerComposite.cpp',
+     'opengl/CanvasLayerOGL.cpp',
+     'client/ClientCanvasLayer.cpp',
+     'client/ClientColorLayer.cpp',
+     'client/ClientContainerLayer.cpp',
+     'client/ClientImageLayer.cpp',
+     'client/ClientLayerManager.cpp',
+diff --git a/gfx/tests/gtest/TestBufferRotation.cpp b/gfx/tests/gtest/TestBufferRotation.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/tests/gtest/TestBufferRotation.cpp
+@@ -0,0 +1,131 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "gtest/gtest.h"
++
++#include "BufferUnrotate.h"
++
++static unsigned char* GenerateBuffer(int bytesPerPixel,
++                                     int width, int height,
++                                     int stride, int xBoundary, int yBoundary)
++{
++  unsigned char* buffer = new unsigned char[stride*height];
++  for (int y = 0; y < height; y++) {
++    for (int x = 0; x < width; x++) {
++     int pos = ((yBoundary+y) % height) * stride + ((xBoundary+x) % width) * bytesPerPixel;
++     for (int i = 0; i < bytesPerPixel; i++) {
++        buffer[pos+i] = (x+y+i*2)%256;
++      }
++    }
++  }
++  return buffer;
++}
++
++static bool CheckBuffer(unsigned char* buffer, int bytesPerPixel,
++                        int width, int height, int stride)
++{
++  int xBoundary = 0;
++  int yBoundary = 0;
++  for (int y = 0; y < height; y++) {
++    for (int x = 0; x < width; x++) {
++     int pos = ((yBoundary+y) % height) * stride + ((xBoundary+x) % width) * bytesPerPixel;
++     for (int i = 0; i < bytesPerPixel; i++) {
++        if (buffer[pos+i] != (x+y+i*2)%256) {
++          printf("Buffer differs at %i, %i, is %i\n", x, y, (int)buffer[pos+i]);
++          return false;
++        }
++      }
++    }
++  }
++  return true;
++}
++
++TEST(Gfx, BufferUnrotateHorizontal) {
++  const int NUM_OF_TESTS = 8;
++  int bytesPerPixelList[2] = {2,4};
++  int width[NUM_OF_TESTS] = {100, 100, 99, 99, 100, 100, 99, 99};
++  int height[NUM_OF_TESTS] = {100, 99, 100, 99, 100, 99, 100, 99};
++  int xBoundary[NUM_OF_TESTS] = {30, 30, 30, 30, 31, 31, 31, 31};
++  int yBoundary[NUM_OF_TESTS] = {0, 0, 0, 0};
++
++  for (int bytesPerId = 0; bytesPerId < 2; bytesPerId++) {
++    int bytesPerPixel = bytesPerPixelList[bytesPerId];
++    int stride = 256 * bytesPerPixel;
++    for (int testId = 0; testId < NUM_OF_TESTS; testId++) {
++      unsigned char* buffer = GenerateBuffer(bytesPerPixel, width[testId], height[testId], stride, xBoundary[testId], yBoundary[testId]);
++      for (int i = 0; i < 1000; i++)
++      InplaceBufferUnrotate(buffer, width[testId]*bytesPerPixel, height[testId], stride, xBoundary[testId]*bytesPerPixel, yBoundary[testId]);
++
++      EXPECT_TRUE(CheckBuffer(buffer, bytesPerPixel, width[testId], height[testId], stride));
++      delete[] buffer;
++    }
++  }
++}
++
++TEST(Gfx, BufferUnrotateVertical) {
++  const int NUM_OF_TESTS = 8;
++  int bytesPerPixelList[2] = {2,4};
++  int width[NUM_OF_TESTS] = {100, 100, 99, 99, 100, 100, 99, 99};
++  int height[NUM_OF_TESTS] = {100, 99, 100, 99, 100, 99, 100, 99};
++  int xBoundary[NUM_OF_TESTS] = {0, 0, 0, 0};
++  int yBoundary[NUM_OF_TESTS] = {30, 30, 30, 30, 31, 31, 31, 31};
++
++  for (int bytesPerId = 0; bytesPerId < 2; bytesPerId++) {
++    int bytesPerPixel = bytesPerPixelList[bytesPerId];
++    int stride = 256 * bytesPerPixel;
++    for (int testId = 0; testId < NUM_OF_TESTS; testId++) {
++      unsigned char* buffer = GenerateBuffer(bytesPerPixel, width[testId], height[testId], stride, xBoundary[testId], yBoundary[testId]);
++      InplaceBufferUnrotate(buffer, width[testId]*bytesPerPixel, height[testId], stride, xBoundary[testId]*bytesPerPixel, yBoundary[testId]);
++
++      EXPECT_TRUE(CheckBuffer(buffer, bytesPerPixel, width[testId], height[testId], stride));
++      delete[] buffer;
++    }
++  }
++}
++
++
++TEST(Gfx, BufferUnrotateBoth) {
++  const int NUM_OF_TESTS = 16;
++  int bytesPerPixelList[2] = {2,4};
++  int width[NUM_OF_TESTS] = {100, 100, 99, 99, 100, 100, 99, 99, 100, 100, 99, 99, 100, 100, 99, 99};
++  int height[NUM_OF_TESTS] = {100, 99, 100, 99, 100, 99, 100, 99, 100, 99, 100, 99, 100, 99, 100, 99};
++  int xBoundary[NUM_OF_TESTS] = {30, 30, 30, 30, 31, 31, 31, 31, 30, 30, 30, 30, 31, 31, 31, 31};
++  int yBoundary[NUM_OF_TESTS] = {30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31, 31, 31};
++
++  for (int bytesPerId = 0; bytesPerId < 2; bytesPerId++) {
++    int bytesPerPixel = bytesPerPixelList[bytesPerId];
++    int stride = 256 * bytesPerPixel;
++    for (int testId = 0; testId < NUM_OF_TESTS; testId++) {
++      unsigned char* buffer = GenerateBuffer(bytesPerPixel, width[testId], height[testId], stride, xBoundary[testId], yBoundary[testId]);
++      InplaceBufferUnrotate(buffer, width[testId]*bytesPerPixel, height[testId], stride, xBoundary[testId]*bytesPerPixel, yBoundary[testId]);
++
++      EXPECT_TRUE(CheckBuffer(buffer, bytesPerPixel, width[testId], height[testId], stride));
++      delete[] buffer;
++    }
++  }
++}
++
++TEST(Gfx, BufferUnrotateUneven) {
++  const int NUM_OF_TESTS = 16;
++  int bytesPerPixelList[2] = {2,4};
++  int width[NUM_OF_TESTS] = {10, 100, 99, 39, 100, 40, 99, 39, 100, 50, 39, 99, 74, 60, 99, 39};
++  int height[NUM_OF_TESTS] = {100, 39, 10, 99, 10, 99, 40, 99, 73, 39, 100, 39, 67, 99, 84, 99};
++  int xBoundary[NUM_OF_TESTS] = {0, 0, 30, 30, 99, 31, 0, 31, 30, 30, 30, 30, 31, 31, 31, 38};
++  int yBoundary[NUM_OF_TESTS] = {30, 30, 0, 30, 0, 30, 0, 30, 31, 31, 31, 31, 31, 31, 31, 98};
++
++  for (int bytesPerId = 0; bytesPerId < 2; bytesPerId++) {
++    int bytesPerPixel = bytesPerPixelList[bytesPerId];
++    int stride = 256 * bytesPerPixel;
++    for (int testId = 0; testId < NUM_OF_TESTS; testId++) {
++      unsigned char* buffer = GenerateBuffer(bytesPerPixel, width[testId], height[testId], stride, xBoundary[testId], yBoundary[testId]);
++      InplaceBufferUnrotate(buffer, width[testId]*bytesPerPixel, height[testId], stride, xBoundary[testId]*bytesPerPixel, yBoundary[testId]);
++
++      EXPECT_TRUE(CheckBuffer(buffer, bytesPerPixel, width[testId], height[testId], stride));
++      delete[] buffer;
++    }
++  }
++}
++
++
+diff --git a/gfx/tests/gtest/moz.build b/gfx/tests/gtest/moz.build
+--- a/gfx/tests/gtest/moz.build
++++ b/gfx/tests/gtest/moz.build
+@@ -16,16 +16,17 @@ GTEST_CPP_SOURCES += [
+     #'gfxTextRunPerfTest.cpp',
+     'gfxWordCacheTest.cpp',
+     'TestAsyncPanZoomController.cpp',
+     'TestLayers.cpp',
+     'TestTiledLayerBuffer.cpp',
+     'TestRegion.cpp',
+     'TestColorNames.cpp',
+     'TestTextures.cpp',
++    'TestBufferRotation.cpp',
+ ]
+ 
+ # Because of gkmedia on windows we wont find these
+ # symbols in xul.dll.
+ if CONFIG['MOZ_WIDGET_TOOLKIT'] != 'windows':
+     GTEST_CPP_SOURCES += [
+         'TestBase.cpp',
+         'TestMoz2D.cpp',

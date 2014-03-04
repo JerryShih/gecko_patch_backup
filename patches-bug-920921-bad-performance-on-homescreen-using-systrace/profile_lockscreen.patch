@@ -1,0 +1,28 @@
+# HG changeset patch
+# Parent ca900cbe83c997588cbc888e4f31887c8401b72a
+# User Jerry Shih <hshih@mozilla.com>
+test lock screen performance
+
+
+diff --git a/gfx/layers/composite/AsyncCompositionManager.cpp b/gfx/layers/composite/AsyncCompositionManager.cpp
+--- a/gfx/layers/composite/AsyncCompositionManager.cpp
++++ b/gfx/layers/composite/AsyncCompositionManager.cpp
+@@ -456,16 +456,18 @@ SampleAnimations(Layer* aLayer, TimeStam
+   return activeAnimations;
+ }
+ 
+ bool
+ AsyncCompositionManager::ApplyAsyncContentTransformToTree(TimeStamp aCurrentFrame,
+                                                           Layer *aLayer,
+                                                           bool* aWantNextFrame)
+ {
++  PROFILER_LABEL("AsyncCompositionManager", "ApplyAsyncContentTransformToTree");
++
+   bool appliedTransform = false;
+   for (Layer* child = aLayer->GetFirstChild();
+       child; child = child->GetNextSibling()) {
+     appliedTransform |=
+       ApplyAsyncContentTransformToTree(aCurrentFrame, child, aWantNextFrame);
+   }
+ 
+   ContainerLayer* container = aLayer->AsContainerLayer();

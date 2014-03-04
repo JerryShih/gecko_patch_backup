@@ -1,0 +1,1023 @@
+# HG changeset patch
+# Parent a4961df068db219a2c1ba94fe76aca4621742276
+# User Jerry Shih <hshih@mozilla.com>
+check function elapsed time
+
+diff --git a/gfx/layers/CopyableCanvasLayer.cpp b/gfx/layers/CopyableCanvasLayer.cpp
+--- a/gfx/layers/CopyableCanvasLayer.cpp
++++ b/gfx/layers/CopyableCanvasLayer.cpp
+@@ -13,16 +13,18 @@
+ #include "mozilla/Preferences.h"
+ #include "SurfaceStream.h"
+ #include "SharedSurfaceGL.h"
+ #include "SharedSurfaceEGL.h"
+ #include "GeckoProfiler.h"
+ 
+ #include "nsXULAppAPI.h"
+ 
++#include "ElapsedTimer.h"
++
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ void
+ CopyableCanvasLayer::Initialize(const Data& aData)
+@@ -51,16 +53,19 @@ CopyableCanvasLayer::Initialize(const Da
+   }
+ 
+   mBounds.SetRect(0, 0, aData.mSize.width, aData.mSize.height);
+ }
+ 
+ void
+ CopyableCanvasLayer::UpdateSurface(gfxASurface* aDestSurface, Layer* aMaskLayer)
+ {
++  static ElapsedTimer test_timer("CopyableCanvasLayer::UpdateSurface","canvas.render");
++  test_timer.TimerStart();
++
+   if (!IsDirty())
+     return;
+   Painted();
+ 
+   if (mDrawTarget) {
+     mDrawTarget->Flush();
+     mSurface =
+       gfxPlatform::GetPlatform()->CreateThebesSurfaceAliasForDrawTarget_hack(mDrawTarget);
+@@ -134,16 +139,18 @@ CopyableCanvasLayer::UpdateSurface(gfxAS
+     }
+ 
+     // If !aDestSurface then we will end up painting using mSurface, so
+     // stick our surface into mSurface, so that the Paint() path is the same.
+     if (!aDestSurface) {
+       mSurface = resultSurf;
+     }
+   }
++
++  test_timer.TimerEnd();
+ }
+ 
+ void
+ CopyableCanvasLayer::PaintWithOpacity(gfxContext* aContext,
+                                       float aOpacity,
+                                       Layer* aMaskLayer,
+                                       gfxContext::GraphicsOperator aOperator)
+ {
+diff --git a/gfx/layers/ElapsedTimer.cpp b/gfx/layers/ElapsedTimer.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ElapsedTimer.cpp
+@@ -0,0 +1,3 @@
++#include <ElapsedTimer.h>
++
++
+diff --git a/gfx/layers/ElapsedTimer.h b/gfx/layers/ElapsedTimer.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ElapsedTimer.h
+@@ -0,0 +1,79 @@
++#ifndef ELAPSED_TIMER
++#define ELAPSED_TIMER
++
++#include <string>
++
++#include <nsDebug.h>
++#include <prinrval.h>
++
++#include "cutils/properties.h"
++
++class ElapsedTimer
++{
++	public:
++		ElapsedTimer(const char *tag,const char *property)
++			:mTag(tag),mEnable(false)
++		{
++		  /*
++		  char prop[PROPERTY_VALUE_MAX];
++		  property_get(property,prop,"0");
++		  if(atoi(prop)==1){
++		    mEnable=true;
++		  }
++		  */
++
++			mStart=PR_IntervalNow();
++
++			mTotal=0;
++	    mMax=0;
++	    mCount=0;
++		}
++
++		~ElapsedTimer()
++		{
++			PRUint32 delta=PR_IntervalNow()-mStart;
++
++			//if(mEnable){
++			  printf_stderr("bignose timer %s, e_t: %u ms",mTag.c_str(),delta);
++			//}
++		}
++
++		void TimerStart()
++		{
++		  mStart=PR_IntervalNow();
++		}
++
++		void TimerEnd()
++		{
++		  PRUint32 delta=PR_IntervalNow()-mStart;
++		  if(delta>mMax){
++		    mMax=delta;
++		  }
++
++		  mTotal+=delta;
++		  ++mCount;
++
++		  if(mCount>100){
++	      //if(mEnable){
++	        printf_stderr("bignose timer %s, avg: %u ms, max: %u ms",mTag.c_str(),mTotal/mCount,mMax);
++	      //}
++	      mTotal=0;
++	      mMax=0;
++	      mCount=0;
++		  }
++		}
++
++	private:
++		PRUint32 mStart;
++
++		PRUint32 mTotal;
++		PRUint32 mMax;
++
++		unsigned int mCount;
++
++		std::string mTag;
++
++		bool mEnable;
++};
++
++#endif	//ELAPSED_TIMER
+diff --git a/gfx/layers/ThebesLayerBuffer.cpp b/gfx/layers/ThebesLayerBuffer.cpp
+--- a/gfx/layers/ThebesLayerBuffer.cpp
++++ b/gfx/layers/ThebesLayerBuffer.cpp
+@@ -12,16 +12,18 @@
+ #include "gfxPlatform.h"
+ #include "gfxTeeSurface.h"
+ #include "gfxUtils.h"
+ #include "ipc/AutoOpenSurface.h"
+ #include "nsDeviceContext.h"
+ #include "GeckoProfiler.h"
+ #include <algorithm>
+ 
++#include "ElapsedTimer.h"
++
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
+ nsIntRect
+ RotatedBuffer::GetQuadrantRectangle(XSide aXSide, YSide aYSide) const
+@@ -193,39 +195,49 @@ RotatedBuffer::DrawBufferQuadrant(gfx::D
+ }
+ 
+ void
+ RotatedBuffer::DrawBufferWithRotation(gfxContext* aTarget, ContextSource aSource,
+                                       float aOpacity,
+                                       gfxASurface* aMask,
+                                       const gfxMatrix* aMaskTransform) const
+ {
++  static ElapsedTimer test_timer("RotatedBuffer::DrawBufferWithRotation 1","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   PROFILER_LABEL("RotatedBuffer", "DrawBufferWithRotation");
+   // Draw four quadrants. We could use REPEAT_, but it's probably better
+   // not to, to be performance-safe.
+   DrawBufferQuadrant(aTarget, LEFT, TOP, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, RIGHT, TOP, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, LEFT, BOTTOM, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, RIGHT, BOTTOM, aSource, aOpacity, aMask, aMaskTransform);
++
++  test_timer.TimerEnd();
+ }
+ 
+ void
+ RotatedBuffer::DrawBufferWithRotation(gfx::DrawTarget *aTarget, ContextSource aSource,
+                                       float aOpacity,
+                                       gfx::SourceSurface* aMask,
+                                       const gfx::Matrix* aMaskTransform) const
+ {
++  static ElapsedTimer test_timer("RotatedBuffer::DrawBufferWithRotation 2","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   PROFILER_LABEL("RotatedBuffer", "DrawBufferWithRotation");
+   // See above, in Azure Repeat should always be a safe, even faster choice
+   // though! Particularly on D2D Repeat should be a lot faster, need to look
+   // into that. TODO[Bas]
+   DrawBufferQuadrant(aTarget, LEFT, TOP, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, RIGHT, TOP, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, LEFT, BOTTOM, aSource, aOpacity, aMask, aMaskTransform);
+   DrawBufferQuadrant(aTarget, RIGHT, BOTTOM, aSource, aOpacity, aMask, aMaskTransform);
++
++  test_timer.TimerEnd();
+ }
+ 
+ /* static */ bool
+ ThebesLayerBuffer::IsClippingCheap(gfxContext* aTarget, const nsIntRegion& aRegion)
+ {
+   // Assume clipping is cheap if the context just has an integer
+   // translation, and the visible region is simple.
+   return !aTarget->CurrentMatrix().HasNonIntegerTranslation() &&
+@@ -461,16 +473,18 @@ ComputeBufferRect(const nsIntRect& aRequ
+   rect.width = std::max(aRequestedRect.width, 64);
+   return rect;
+ }
+ 
+ ThebesLayerBuffer::PaintState
+ ThebesLayerBuffer::BeginPaint(ThebesLayer* aLayer, ContentType aContentType,
+                               uint32_t aFlags)
+ {
++  //ElapsedTimer test_timer("ThebesLayerBuffer::BeginPaint","bignose.thebes.paint");
++
+   PaintState result;
+   // We need to disable rotation if we're going to be resampled when
+   // drawing, because we might sample across the rotation boundary.
+   bool canHaveRotation = gfxPlatform::BufferRotationEnabled() &&
+                          !(aFlags & (PAINT_WILL_RESAMPLE | PAINT_NO_ROTATION));
+ 
+   nsIntRegion validRegion = aLayer->GetValidRegion();
+ 
+diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
+--- a/gfx/layers/client/CanvasClient.cpp
++++ b/gfx/layers/client/CanvasClient.cpp
+@@ -11,16 +11,18 @@
+ #include "nsXULAppAPI.h"
+ #include "GLContext.h"
+ #include "SurfaceStream.h"
+ #include "SharedSurface.h"
+ #ifdef MOZ_WIDGET_GONK
+ #include "SharedSurfaceGralloc.h"
+ #endif
+ 
++#include "ElapsedTimer.h"
++
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ /* static */ TemporaryRef<CanvasClient>
+ CanvasClient::CreateCanvasClient(CanvasClientType aType,
+                                  CompositableForwarder* aForwarder,
+@@ -95,30 +97,49 @@ DeprecatedCanvasClient2D::DeprecatedCanv
+ : CanvasClient(aFwd, aFlags)
+ {
+   mTextureInfo.mCompositableType = BUFFER_IMAGE_SINGLE;
+ }
+ 
+ void
+ DeprecatedCanvasClient2D::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
+ {
++  static ElapsedTimer test_timer1("DeprecatedCanvasClient2D::Update","bignose.canvas.render");
++
++  test_timer1.TimerStart();
++
+   if (!mDeprecatedTextureClient) {
+     mDeprecatedTextureClient = CreateDeprecatedTextureClient(TEXTURE_CONTENT);
+     MOZ_ASSERT(mDeprecatedTextureClient, "Failed to create texture client");
+   }
+ 
+   bool isOpaque = (aLayer->GetContentFlags() & Layer::CONTENT_OPAQUE);
+   gfxASurface::gfxContentType contentType = isOpaque
+                                               ? gfxASurface::CONTENT_COLOR
+                                               : gfxASurface::CONTENT_COLOR_ALPHA;
+   mDeprecatedTextureClient->EnsureAllocated(aSize, contentType);
+ 
++  static ElapsedTimer test_timer2("DeprecatedCanvasClient2D::Update.lock","bignose.canvas.render");
++  test_timer2.TimerStart();
++
+   gfxASurface* surface = mDeprecatedTextureClient->LockSurface();
++
++  test_timer2.TimerEnd();
++
+   aLayer->UpdateSurface(surface);
++
++  static ElapsedTimer test_timer3("DeprecatedCanvasClient2D::Update::unlock","bignose.canvas.render");
++
++  test_timer3.TimerStart();
++
+   mDeprecatedTextureClient->Unlock();
++
++  test_timer3.TimerEnd();
++
++  test_timer1.TimerEnd();
+ }
+ 
+ void
+ DeprecatedCanvasClientSurfaceStream::Updated()
+ {
+   if (mNeedsUpdate) {
+     mForwarder->UpdateTextureNoSwap(this, 1, mDeprecatedTextureClient->GetDescriptor());
+     mNeedsUpdate = false;
+diff --git a/gfx/layers/client/ClientCanvasLayer.cpp b/gfx/layers/client/ClientCanvasLayer.cpp
+--- a/gfx/layers/client/ClientCanvasLayer.cpp
++++ b/gfx/layers/client/ClientCanvasLayer.cpp
+@@ -10,16 +10,18 @@
+ #include "SharedSurfaceEGL.h"
+ #ifdef MOZ_WIDGET_GONK
+ #include "SharedSurfaceGralloc.h"
+ #endif
+ #ifdef XP_MACOSX
+ #include "SharedSurfaceIO.h"
+ #endif
+ 
++#include "ElapsedTimer.h"
++
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ void
+ ClientCanvasLayer::Initialize(const Data& aData)
+ {
+@@ -66,16 +68,19 @@ ClientCanvasLayer::Initialize(const Data
+       screen->Morph(factory, streamType);
+     }
+   }
+ }
+ 
+ void
+ ClientCanvasLayer::RenderLayer()
+ {
++  static ElapsedTimer test_timer("ClientCanvasLayer::RenderLayer","bignose.canvas.render");
++  test_timer.TimerStart();
++
+   PROFILER_LABEL("ClientCanvasLayer", "Paint");
+   if (!IsDirty()) {
+     return;
+   }
+ 
+   if (GetMaskLayer()) {
+     ToClientLayer(GetMaskLayer())->RenderLayer();
+   }
+@@ -108,16 +113,18 @@ ClientCanvasLayer::RenderLayer()
+   FirePreTransactionCallback();
+   mCanvasClient->Update(gfx::IntSize(mBounds.width, mBounds.height), this);
+ 
+   FireDidTransactionCallback();
+ 
+   ClientManager()->Hold(this);
+   mCanvasClient->Updated();
+   mCanvasClient->OnTransaction();
++
++  test_timer.TimerEnd();
+ }
+ 
+ already_AddRefed<CanvasLayer>
+ ClientLayerManager::CreateCanvasLayer()
+ {
+   NS_ASSERTION(InConstruction(), "Only allowed in construction phase");
+   nsRefPtr<ClientCanvasLayer> layer =
+     new ClientCanvasLayer(this);
+diff --git a/gfx/layers/client/ClientLayerManager.cpp b/gfx/layers/client/ClientLayerManager.cpp
+--- a/gfx/layers/client/ClientLayerManager.cpp
++++ b/gfx/layers/client/ClientLayerManager.cpp
+@@ -15,16 +15,18 @@
+ #include "ipc/ShadowLayerChild.h"
+ #include "mozilla/layers/CompositableClient.h"
+ #include "mozilla/layers/ContentClient.h"
+ 
+ #ifdef MOZ_WIDGET_ANDROID
+ #include "AndroidBridge.h"
+ #endif
+ 
++#include "ElapsedTimer.h"
++
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ ClientLayerManager::ClientLayerManager(nsIWidget* aWidget)
+   : mPhase(PHASE_NONE)
+@@ -188,31 +190,41 @@ ClientLayerManager::EndTransactionIntern
+   return !mTransactionIncomplete;
+ }
+ 
+ void
+ ClientLayerManager::EndTransaction(DrawThebesLayerCallback aCallback,
+                                    void* aCallbackData,
+                                    EndTransactionFlags aFlags)
+ {
++  static ElapsedTimer test_timer1("ClientLayerManager::EndTransaction","bignose.end_transaction");
++  test_timer1.TimerStart();
++
+   if (mWidget) {
+     mWidget->PrepareWindowEffects();
+   }
+   EndTransactionInternal(aCallback, aCallbackData, aFlags);
++
++  static ElapsedTimer test_timer2("ClientLayerManager::EndTransaction.ForwardTransaction","bignose.end_transaction");
++  test_timer2.TimerStart();
++
+   ForwardTransaction();
+ 
+   if (mRepeatTransaction) {
+     mRepeatTransaction = false;
+     mIsRepeatTransaction = true;
+     BeginTransaction();
+     ClientLayerManager::EndTransaction(aCallback, aCallbackData, aFlags);
+     mIsRepeatTransaction = false;
+   } else {
+     MakeSnapshotIfRequired();
+   }
++
++  test_timer2.TimerEnd();
++  test_timer1.TimerEnd();
+ }
+ 
+ bool
+ ClientLayerManager::EndEmptyTransaction(EndTransactionFlags aFlags)
+ {
+   mInTransaction = false;
+ 
+   if (!mRoot) {
+@@ -281,54 +293,67 @@ ClientLayerManager::FlushRendering()
+       remoteRenderer->SendFlushRendering();
+     }
+   }
+ }
+ 
+ void
+ ClientLayerManager::ForwardTransaction()
+ {
++  static ElapsedTimer test_timer("ClientLayerManager::ForwardTransaction","bignose.forward");
++  test_timer.TimerStart();
++
+   mPhase = PHASE_FORWARD;
+ 
+   // forward this transaction's changeset to our LayerManagerComposite
+   AutoInfallibleTArray<EditReply, 10> replies;
+   if (HasShadowManager() && ShadowLayerForwarder::EndTransaction(&replies)) {
+     for (nsTArray<EditReply>::size_type i = 0; i < replies.Length(); ++i) {
+       const EditReply& reply = replies[i];
+ 
+       switch (reply.type()) {
+       case EditReply::TOpContentBufferSwap: {
++        //ElapsedTimer test_timer("ClientLayerManager::ForwardTransaction::TOpContentBufferSwap","bignose.timer.ClientLayerManager.ForwardTransaction.TOpContentBufferSwap");
++
++
+         MOZ_LAYERS_LOG(("[LayersForwarder] DoubleBufferSwap"));
+ 
+         const OpContentBufferSwap& obs = reply.get_OpContentBufferSwap();
+ 
+         CompositableChild* compositableChild =
+           static_cast<CompositableChild*>(obs.compositableChild());
+         ContentClientRemote* contentClient =
+           static_cast<ContentClientRemote*>(compositableChild->GetCompositableClient());
+         MOZ_ASSERT(contentClient);
+ 
+         contentClient->SwapBuffers(obs.frontUpdatedRegion());
+ 
+         break;
+       }
+       case EditReply::TOpTextureSwap: {
++        //ElapsedTimer test_timer("ClientLayerManager::ForwardTransaction::TOpTextureSwap","bignose.timer.ClientLayerManager.ForwardTransaction.TOpTextureSwap");
++
++
++
+         MOZ_LAYERS_LOG(("[LayersForwarder] TextureSwap"));
+ 
+         const OpTextureSwap& ots = reply.get_OpTextureSwap();
+ 
+         CompositableChild* compositableChild =
+           static_cast<CompositableChild*>(ots.compositableChild());
+         MOZ_ASSERT(compositableChild);
+ 
+         compositableChild->GetCompositableClient()
+           ->SetDescriptorFromReply(ots.textureId(), ots.image());
+         break;
+       }
+       case EditReply::TReplyTextureRemoved: {
++        //ElapsedTimer test_timer("ClientLayerManager::ForwardTransaction::TReplyTextureRemoved","bignose.timer.ClientLayerManager.ForwardTransaction.TReplyTextureRemoved");
++
++
+         // XXX - to manage reuse of gralloc buffers, we'll need to add some
+         // glue code here to find the TextureClient and invoke a callback to
+         // let the camera know that the gralloc buffer is not used anymore on
+         // the compositor side and that it can reuse it.
+         break;
+       }
+ 
+       default:
+@@ -339,16 +364,18 @@ ClientLayerManager::ForwardTransaction()
+     NS_WARNING("failed to forward Layers transaction");
+   }
+ 
+   mPhase = PHASE_NONE;
+ 
+   // this may result in Layers being deleted, which results in
+   // PLayer::Send__delete__() and DeallocShmem()
+   mKeepAlive.Clear();
++
++  test_timer.TimerEnd();
+ }
+ 
+ ShadowableLayer*
+ ClientLayerManager::Hold(Layer* aLayer)
+ {
+   NS_ABORT_IF_FALSE(HasShadowManager(),
+                     "top-level tree, no shadow tree to remote to");
+ 
+diff --git a/gfx/layers/client/ClientThebesLayer.cpp b/gfx/layers/client/ClientThebesLayer.cpp
+--- a/gfx/layers/client/ClientThebesLayer.cpp
++++ b/gfx/layers/client/ClientThebesLayer.cpp
+@@ -1,16 +1,18 @@
+ /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+  * This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "ClientThebesLayer.h"
+ #include "ClientTiledThebesLayer.h"
+ 
++#include "ElapsedTimer.h"
++
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ static void
+ SetAntialiasingFlags(Layer* aLayer, gfxContext* aTarget)
+ {
+@@ -42,16 +44,19 @@ SetAntialiasingFlags(Layer* aLayer, gfxC
+         surface->GetOpaqueRect().Contains(
+           aTarget->UserToDevice(gfxRect(bounds.x, bounds.y, bounds.width, bounds.height))));
+   }
+ }
+ 
+ void
+ ClientThebesLayer::PaintThebes()
+ {
++  static ElapsedTimer test_timer("ClientThebesLayer::PaintThebes","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   PROFILER_LABEL("ClientThebesLayer", "PaintThebes");
+   NS_ASSERTION(ClientManager()->InDrawing(),
+                "Can only draw in drawing phase");
+   
+   //TODO: This is going to copy back pixels that we might end up
+   // drawing over anyway. It would be nice if we could avoid
+   // this duplication.
+   mContentClient->SyncFrontBufferToBackBuffer();
+@@ -95,47 +100,70 @@ ClientThebesLayer::PaintThebes()
+     } else {
+       // It's possible that state.mRegionToInvalidate is nonempty here,
+       // if we are shrinking the valid region to nothing. So use mRegionToDraw
+       // instead.
+       NS_WARN_IF_FALSE(state.mRegionToDraw.IsEmpty(),
+                        "No context when we have something to draw, resource exhaustion?");
+     }
+   }
++
++  test_timer.TimerEnd();
+ }
+ 
+ void
+ ClientThebesLayer::RenderLayer()
+ {
++  static ElapsedTimer test_timer1("ClientThebesLayer::RenderLayer","bignose.thebes.render");
++  test_timer1.TimerStart();
++
+   if (GetMaskLayer()) {
+     ToClientLayer(GetMaskLayer())->RenderLayer();
+   }
+   
+   if (!mContentClient) {
+     mContentClient = ContentClient::CreateContentClient(ClientManager());
+     if (!mContentClient) {
+       return;
+     }
+     mContentClient->Connect();
+     ClientManager()->Attach(mContentClient, this);
+     MOZ_ASSERT(mContentClient->GetForwarder());
+   }
+ 
++
++  static ElapsedTimer test_timer2("ClientThebesLayer::RenderLayer.BeginPaint","bignose.thebes.render");
++  test_timer2.TimerStart();
++
+   mContentClient->BeginPaint();
++
++  test_timer2.TimerEnd();
++
+   PaintThebes();
++
++  static ElapsedTimer test_timer3("ClientThebesLayer::RenderLayer.EndPaint","bignose.thebes.render");
++  test_timer3.TimerStart();
++
+   mContentClient->EndPaint();
++
++  test_timer3.TimerEnd();
++
++  test_timer1.TimerEnd();
+ }
+ 
+ void
+ ClientThebesLayer::PaintBuffer(gfxContext* aContext,
+                                const nsIntRegion& aRegionToDraw,
+                                const nsIntRegion& aExtendedRegionToDraw,
+                                const nsIntRegion& aRegionToInvalidate,
+                                bool aDidSelfCopy)
+ {
++  static ElapsedTimer test_timer("ClientThebesLayer::PaintBuffer","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   ContentClientRemote* contentClientRemote = static_cast<ContentClientRemote*>(mContentClient.get());
+   MOZ_ASSERT(contentClientRemote->GetIPDLActor());
+ 
+   // NB: this just throws away the entire valid region if there are
+   // too many rects.
+   mValidRegion.SimplifyInward(8);
+ 
+   if (!ClientManager()->GetThebesLayerCallback()) {
+@@ -158,16 +186,18 @@ ClientThebesLayer::PaintBuffer(gfxContex
+ 
+   // Hold(this) ensures this layer is kept alive through the current transaction
+   // The ContentClient assumes this layer is kept alive (e.g., in CreateBuffer,
+   // DestroyThebesBuffer), so deleting this Hold for whatever reason will break things.
+   ClientManager()->Hold(this);
+   contentClientRemote->Updated(aRegionToDraw,
+                                mVisibleRegion,
+                                aDidSelfCopy);
++
++  test_timer.TimerEnd();
+ }
+ 
+ already_AddRefed<ThebesLayer>
+ ClientLayerManager::CreateThebesLayer()
+ {
+   NS_ASSERTION(InConstruction(), "Only allowed in construction phase");
+ #ifdef FORCE_BASICTILEDTHEBESLAYER
+   if (GetCompositorBackendType() == LAYERS_OPENGL) {
+diff --git a/gfx/layers/client/ContentClient.cpp b/gfx/layers/client/ContentClient.cpp
+--- a/gfx/layers/client/ContentClient.cpp
++++ b/gfx/layers/client/ContentClient.cpp
+@@ -10,16 +10,18 @@
+ #include "gfxUtils.h"
+ #include "gfxPlatform.h"
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "gfxTeeSurface.h"
+ #ifdef XP_WIN
+ #include "gfxWindowsPlatform.h"
+ #endif
+ 
++#include "ElapsedTimer.h"
++
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
+ /* static */ TemporaryRef<ContentClient>
+ ContentClient::CreateContentClient(CompositableForwarder* aForwarder)
+@@ -267,30 +269,35 @@ ContentClientRemoteBuffer::GetUpdatedReg
+   return updatedRegion;
+ }
+ 
+ void
+ ContentClientRemoteBuffer::Updated(const nsIntRegion& aRegionToDraw,
+                                    const nsIntRegion& aVisibleRegion,
+                                    bool aDidSelfCopy)
+ {
++  static ElapsedTimer test_timer("ContentClientRemoteBuffer::Updated","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   nsIntRegion updatedRegion = GetUpdatedRegion(aRegionToDraw,
+                                                aVisibleRegion,
+                                                aDidSelfCopy);
+ 
+   MOZ_ASSERT(mDeprecatedTextureClient);
+   mDeprecatedTextureClient->SetAccessMode(DeprecatedTextureClient::ACCESS_NONE);
+   if (mDeprecatedTextureClientOnWhite) {
+     mDeprecatedTextureClientOnWhite->SetAccessMode(DeprecatedTextureClient::ACCESS_NONE);
+   }
+   LockFrontBuffer();
+   mForwarder->UpdateTextureRegion(this,
+                                   ThebesBufferData(BufferRect(),
+                                                    BufferRotation()),
+                                   updatedRegion);
++
++  test_timer.TimerEnd();
+ }
+ 
+ void
+ ContentClientRemoteBuffer::SwapBuffers(const nsIntRegion& aFrontUpdatedRegion)
+ {
+   MOZ_ASSERT(mDeprecatedTextureClient->GetAccessMode() == DeprecatedTextureClient::ACCESS_NONE);
+   MOZ_ASSERT(!mDeprecatedTextureClientOnWhite || mDeprecatedTextureClientOnWhite->GetAccessMode() == DeprecatedTextureClient::ACCESS_NONE);
+   MOZ_ASSERT(mDeprecatedTextureClient);
+@@ -420,16 +427,18 @@ struct AutoDeprecatedTextureClient {
+   }
+ private:
+   DeprecatedTextureClient* mTexture;
+ };
+ 
+ void
+ ContentClientDoubleBuffered::SyncFrontBufferToBackBuffer()
+ {
++  //ElapsedTimer test_timer("ContentClientDoubleBuffered::SyncFrontBufferToBackBuffer","bignose.thebes.paint");
++
+   if (!mFrontAndBackBufferDiffer) {
+     return;
+   }
+   MOZ_ASSERT(mFrontClient);
+   MOZ_ASSERT(mFrontClient->GetAccessMode() == DeprecatedTextureClient::ACCESS_READ_ONLY);
+   MOZ_ASSERT(!mFrontClientOnWhite ||
+              mFrontClientOnWhite->GetAccessMode() == DeprecatedTextureClient::ACCESS_READ_ONLY);
+ 
+@@ -452,65 +461,81 @@ ContentClientDoubleBuffered::SyncFrontBu
+                        yBoundary > updateRegion.GetBounds().y);
+   
+   // This is a tricky trade off, we're going to get stuff out of our
+   // frontbuffer now, but the next PaintThebes might throw it all (or mostly)
+   // away if the visible region has changed. This is why in reality we want
+   // this code integrated with PaintThebes to always do the optimal thing.
+ 
+   if (needFullCopy) {
++    //ElapsedTimer test_timer("ContentClientDoubleBuffered::SyncFrontBufferToBackBuffer needFullCopy","bignose.thebes.paint");
++
++
+     // We can't easily draw our front buffer into us, since we're going to be
+     // copying stuff around anyway it's easiest if we just move our situation
+     // to non-rotated while we're at it. If this situation occurs we'll have
+     // hit a self-copy path in PaintThebes before as well anyway.
+     mBufferRect.MoveTo(mFrontBufferRect.TopLeft());
+     mBufferRotation = nsIntPoint();
+     updateRegion = mBufferRect;
+   } else {
+     mBufferRect = mFrontBufferRect;
+     mBufferRotation = mFrontBufferRotation;
+   }
+  
+   AutoDeprecatedTextureClient autoTextureFront;
+   AutoDeprecatedTextureClient autoTextureFrontOnWhite;
+   if (SupportsAzureContent()) {
++    static ElapsedTimer test_timer("ContentClientDoubleBuffered::SyncFrontBufferToBackBuffer SupportsAzureContent","bignose.thebes.paint");
++    test_timer.TimerStart();
+     RotatedBuffer frontBuffer(autoTextureFront.GetDrawTarget(mFrontClient),
+                               autoTextureFrontOnWhite.GetDrawTarget(mFrontClientOnWhite),
+                               mFrontBufferRect,
+                               mFrontBufferRotation);
++    test_timer.TimerEnd();
++
+     UpdateDestinationFrom(frontBuffer, updateRegion);
+   } else {
++    static ElapsedTimer test_timer("ContentClientDoubleBuffered::SyncFrontBufferToBackBuffer GetSurface","bignose.thebes.paint");
++    test_timer.TimerStart();
+     RotatedBuffer frontBuffer(autoTextureFront.GetSurface(mFrontClient),
+-                              autoTextureFrontOnWhite.GetSurface(mFrontClientOnWhite),
++        autoTextureFrontOnWhite.GetSurface(mFrontClientOnWhite),
+                               mFrontBufferRect,
+                               mFrontBufferRotation);
++    test_timer.TimerEnd();
++
+     UpdateDestinationFrom(frontBuffer, updateRegion);
+   }
+ 
+   mIsNewBuffer = false;
+   mFrontAndBackBufferDiffer = false;
+ }
+ 
+ void
+ ContentClientDoubleBuffered::UpdateDestinationFrom(const RotatedBuffer& aSource,
+                                                    const nsIntRegion& aUpdateRegion)
+ {
++  static ElapsedTimer test_timer("ContentClientDoubleBuffered::UpdateDestinationFrom","bignose.thebes.paint");
++  test_timer.TimerStart();
++
+   nsRefPtr<gfxContext> destCtx =
+     GetContextForQuadrantUpdate(aUpdateRegion.GetBounds(), BUFFER_BLACK);
+   destCtx->SetOperator(gfxContext::OPERATOR_SOURCE);
+ 
+   bool isClippingCheap = IsClippingCheap(destCtx, aUpdateRegion);
+   if (isClippingCheap) {
+     gfxUtils::ClipToRegion(destCtx, aUpdateRegion);
+   }
+ 
+   if (SupportsAzureContent()) {
+     MOZ_ASSERT(!destCtx->IsCairo());
+ 
+     if (destCtx->GetDrawTarget()->GetFormat() == FORMAT_B8G8R8A8) {
++      //ElapsedTimer test_timer("destCtx->GetDrawTarget()->ClearRect FORMAT_B8G8R8A8","bignose.thebes.paint");
++
+       destCtx->GetDrawTarget()->ClearRect(Rect(0, 0, mFrontBufferRect.width, mFrontBufferRect.height));
+     }
+     aSource.DrawBufferWithRotation(destCtx->GetDrawTarget(), BUFFER_BLACK);
+   } else {
+     aSource.DrawBufferWithRotation(destCtx, BUFFER_BLACK);
+   }
+ 
+   if (aSource.HaveBufferOnWhite()) {
+@@ -523,23 +548,27 @@ ContentClientDoubleBuffered::UpdateDesti
+     if (isClippingCheap) {
+       gfxUtils::ClipToRegion(destCtx, aUpdateRegion);
+     }
+ 
+     if (SupportsAzureContent()) {
+       MOZ_ASSERT(!destCtx->IsCairo());
+ 
+       if (destCtx->GetDrawTarget()->GetFormat() == FORMAT_B8G8R8A8) {
++        //ElapsedTimer test_timer("destCtx->GetDrawTarget()->ClearRect FORMAT_B8G8R8A8","bignose.thebes.paint");
++
+         destCtx->GetDrawTarget()->ClearRect(Rect(0, 0, mFrontBufferRect.width, mFrontBufferRect.height));
+       }
+       aSource.DrawBufferWithRotation(destCtx->GetDrawTarget(), BUFFER_WHITE);
+     } else {
+       aSource.DrawBufferWithRotation(destCtx, BUFFER_WHITE);
+     }
+   }
++
++  test_timer.TimerEnd();
+ }
+ 
+ ContentClientSingleBuffered::~ContentClientSingleBuffered()
+ {
+   if (mDeprecatedTextureClient) {
+     mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor());
+   }
+   if (mDeprecatedTextureClientOnWhite) {
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -39,16 +39,19 @@
+ #include "gfxCrashReporterUtils.h"
+ 
+ #include "GeckoProfiler.h"
+ 
+ #ifdef MOZ_WIDGET_ANDROID
+ #include <android/log.h>
+ #endif
+ 
++#include "ElapsedTimer.h"
++
++
+ namespace mozilla {
+ namespace layers {
+ 
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ 
+ static LayerComposite*
+ ToLayerComposite(Layer* aLayer)
+@@ -303,16 +306,19 @@ LayerManagerComposite::Render()
+     return;
+   }
+ 
+   if (mComposer2D && mComposer2D->TryRender(mRoot, mWorldMatrix)) {
+     mCompositor->EndFrameForExternalComposition(mWorldMatrix);
+     return;
+   }
+ 
++
++  static ElapsedTimer test_timer("LayerManagerComposite::Render","bignose.compose");
++  test_timer.TimerStart();
+   
+   mCompositor->GetWidget()->PreRender(this);
+ 
+   nsIntRect clipRect;
+   Rect bounds(mRenderBounds.x, mRenderBounds.y, mRenderBounds.width, mRenderBounds.height);
+   Rect actualBounds;
+   if (mRoot->GetClipRect()) {
+     clipRect = *mRoot->GetClipRect();
+@@ -343,16 +349,18 @@ LayerManagerComposite::Render()
+                                                               actualBounds.y,
+                                                               actualBounds.width,
+                                                               actualBounds.height));
+ 
+   // Debugging
+   RenderDebugOverlay(actualBounds);
+ 
+   mCompositor->EndFrame();
++
++  test_timer.TimerEnd();
+ }
+ 
+ void
+ LayerManagerComposite::SetWorldTransform(const gfxMatrix& aMatrix)
+ {
+   NS_ASSERTION(aMatrix.PreservesAxisAlignedRectangles(),
+                "SetWorldTransform only accepts matrices that satisfy PreservesAxisAlignedRectangles");
+   NS_ASSERTION(!aMatrix.HasNonIntegerScale(),
+diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent.h
+--- a/gfx/layers/ipc/CompositorParent.h
++++ b/gfx/layers/ipc/CompositorParent.h
+@@ -8,17 +8,17 @@
+ #define mozilla_layers_CompositorParent_h
+ 
+ // Enable this pref to turn on compositor performance warning.
+ // This will print warnings if the compositor isn't meeting
+ // its responsiveness objectives:
+ //    1) Compose a frame within 15ms of receiving a ScheduleCompositeCall
+ //    2) Unless a frame was composited within the throttle threshold in
+ //       which the deadline will be 15ms + throttle threshold
+-//#define COMPOSITOR_PERFORMANCE_WARNING
++#define COMPOSITOR_PERFORMANCE_WARNING
+ 
+ #include "mozilla/layers/PCompositorParent.h"
+ #include "mozilla/layers/PLayerTransactionParent.h"
+ #include "mozilla/layers/APZCTreeManager.h"
+ #include "base/thread.h"
+ #include "mozilla/Monitor.h"
+ #include "mozilla/TimeStamp.h"
+ #include "ShadowLayersManager.h"
+diff --git a/gfx/layers/ipc/ISurfaceAllocator.cpp b/gfx/layers/ipc/ISurfaceAllocator.cpp
+--- a/gfx/layers/ipc/ISurfaceAllocator.cpp
++++ b/gfx/layers/ipc/ISurfaceAllocator.cpp
+@@ -72,17 +72,19 @@ ISurfaceAllocator::AllocSurfaceDescripto
+ }
+ 
+ bool
+ ISurfaceAllocator::AllocSurfaceDescriptorWithCaps(const gfxIntSize& aSize,
+                                                   gfxASurface::gfxContentType aContent,
+                                                   uint32_t aCaps,
+                                                   SurfaceDescriptor* aBuffer)
+ {
+-  bool tryPlatformSurface = true;
++  //bool tryPlatformSurface = true;
++  bool tryPlatformSurface = false;
++
+ #ifdef DEBUG
+   tryPlatformSurface = !PR_GetEnv("MOZ_LAYERS_FORCE_SHMEM_SURFACES");
+ #endif
+   if (tryPlatformSurface &&
+       PlatformAllocSurfaceDescriptor(aSize, aContent, aCaps, aBuffer)) {
+     return true;
+   }
+ 
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -340,16 +340,19 @@ ShadowLayerForwarder::AllocGrallocBuffer
+ }
+ 
+ bool
+ ISurfaceAllocator::PlatformAllocSurfaceDescriptor(const gfxIntSize& aSize,
+                                                   gfxASurface::gfxContentType aContent,
+                                                   uint32_t aCaps,
+                                                   SurfaceDescriptor* aBuffer)
+ {
++  //debug all use shmem
++  //return false;
++
+ 
+   // Check for devices that have problems with gralloc. We only check for
+   // this on ICS or earlier, in hopes that JB will work.
+ #if ANDROID_VERSION <= 15
+   static bool checkedDevice = false;
+   static bool disableGralloc = false;
+ 
+   if (!checkedDevice) {
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -4,16 +4,17 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ MODULE = 'thebes'
+ 
+ EXPORTS += [
+     'CopyableCanvasLayer.h',
+     'D3D9SurfaceImage.h',
++	'ElapsedTimer.h',
+     'FrameMetrics.h',
+     'GrallocImages.h',
+     'ImageContainer.h',
+     'ImageLayers.h',
+     'ImageTypes.h',
+     'LayerSorter.h',
+     'LayerTreeInvalidation.h',
+     'Layers.h',
+@@ -211,16 +212,17 @@ CPP_SOURCES += [
+     'CompositorOGL.cpp',
+     'CompositorParent.cpp',
+     'ContainerLayerComposite.cpp',
+     'ContainerLayerOGL.cpp',
+     'ContentClient.cpp',
+     'ContentHost.cpp',
+     'CopyableCanvasLayer.cpp',
+     'Effects.cpp',
++	'ElapsedTimer.cpp',
+     'GestureEventListener.cpp',
+     'ISurfaceAllocator.cpp',
+     'ImageBridgeChild.cpp',
+     'ImageBridgeParent.cpp',
+     'ImageClient.cpp',
+     'ImageContainer.cpp',
+     'ImageDataSerializer.cpp',
+     'ImageHost.cpp',

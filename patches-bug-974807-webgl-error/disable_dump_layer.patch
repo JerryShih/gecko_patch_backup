@@ -1,0 +1,384 @@
+# HG changeset patch
+# Parent cb9afa9ba777127d50de88ca641ee0e40bd474be
+# User Jerry Shih <hshih@mozilla.com>
+disable dump layer
+
+diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLContext.cpp
+--- a/content/canvas/src/WebGLContext.cpp
++++ b/content/canvas/src/WebGLContext.cpp
+@@ -893,28 +893,32 @@ private:
+ 
+ } // end namespace mozilla
+ 
+ already_AddRefed<layers::CanvasLayer>
+ WebGLContext::GetCanvasLayer(nsDisplayListBuilder* aBuilder,
+                              CanvasLayer *aOldLayer,
+                              LayerManager *aManager)
+ {
+-    if (IsContextLost())
++    if (IsContextLost()){
++        printf_stderr("bignose WebGLContext::GetCanvasLayer IsContextLost()");
+         return nullptr;
++    }
+ 
+     if (!mResetLayer && aOldLayer &&
+         aOldLayer->HasUserData(&gWebGLLayerUserData)) {
+         nsRefPtr<layers::CanvasLayer> ret = aOldLayer;
+         return ret.forget();
+     }
+ 
+     nsRefPtr<CanvasLayer> canvasLayer = aManager->CreateCanvasLayer();
+     if (!canvasLayer) {
+         NS_WARNING("CreateCanvasLayer returned null!");
++        printf_stderr("bignose WebGLContext::GetCanvasLayer CreateCanvasLayer returned null");
++
+         return nullptr;
+     }
+     WebGLContextUserData *userData = nullptr;
+     if (aBuilder->IsPaintingToWindow()) {
+       // Make the layer tell us whenever a transaction finishes (including
+       // the current transaction), so we can clear our invalidation state and
+       // start invalidating again. We need to do this for the layer that is
+       // being painted to a window (there shouldn't be more than one at a time,
+@@ -1247,16 +1251,18 @@ WebGLContext::RobustnessTimerCallback(ns
+         // the canvas is gone. That happens when the page was closed before we got
+         // this timer event. In this case, there's nothing to do here, just don't crash.
+         return;
+     }
+ 
+     // If the context has been lost and we're waiting for it to be restored, do
+     // that now.
+     if (mContextStatus == ContextLostAwaitingEvent) {
++        printf_stderr("bignose WebGLContext::RobustnessTimerCallback ContextLostAwaitingEvent");
++
+         bool defaultAction;
+         nsContentUtils::DispatchTrustedEvent(mCanvasElement->OwnerDoc(),
+                                              static_cast<nsIDOMHTMLCanvasElement*>(mCanvasElement),
+                                              NS_LITERAL_STRING("webglcontextlost"),
+                                              true,
+                                              true,
+                                              &defaultAction);
+ 
+@@ -1269,24 +1275,30 @@ WebGLContext::RobustnessTimerCallback(ns
+         // (unusable).
+         if (!defaultAction && mAllowRestore) {
+             ForceRestoreContext();
+             // Restart the timer so that it will be restored on the next
+             // callback.
+             SetupContextLossTimer();
+         } else {
+             mContextStatus = ContextLost;
++
++            printf_stderr("bignose WebGLContext::RobustnessTimerCallback ContextLost");
+         }
+     } else if (mContextStatus == ContextLostAwaitingRestore) {
++        printf_stderr("bignose WebGLContext::RobustnessTimerCallback ContextLostAwaitingRestore");
++
+         // Try to restore the context. If it fails, try again later.
+         if (NS_FAILED(SetDimensions(mWidth, mHeight))) {
+             SetupContextLossTimer();
++            printf_stderr("bignose WebGLContext::RobustnessTimerCallback restore the context failed");
+             return;
+         }
+         mContextStatus = ContextNotLost;
++        printf_stderr("bignose WebGLContext::RobustnessTimerCallback ContextNotLost");
+         nsContentUtils::DispatchTrustedEvent(mCanvasElement->OwnerDoc(),
+                                              static_cast<nsIDOMHTMLCanvasElement*>(mCanvasElement),
+                                              NS_LITERAL_STRING("webglcontextrestored"),
+                                              true,
+                                              true);
+         // Set all flags back to the state they were in before the context was
+         // lost.
+         mContextLostErrorSet = false;
+diff --git a/content/html/content/src/HTMLCanvasElement.cpp b/content/html/content/src/HTMLCanvasElement.cpp
+--- a/content/html/content/src/HTMLCanvasElement.cpp
++++ b/content/html/content/src/HTMLCanvasElement.cpp
+@@ -905,18 +905,20 @@ HTMLCanvasElement::GetIsOpaque()
+   return HasAttr(kNameSpaceID_None, nsGkAtoms::moz_opaque);
+ }
+ 
+ already_AddRefed<CanvasLayer>
+ HTMLCanvasElement::GetCanvasLayer(nsDisplayListBuilder* aBuilder,
+                                   CanvasLayer *aOldLayer,
+                                   LayerManager *aManager)
+ {
+-  if (!mCurrentContext)
++  if (!mCurrentContext){
++    printf_stderr("bignose HTMLCanvasElement::GetCanvasLayer, context is null");
+     return nullptr;
++  }
+ 
+   return mCurrentContext->GetCanvasLayer(aBuilder, aOldLayer, aManager);
+ }
+ 
+ bool
+ HTMLCanvasElement::ShouldForceInactiveLayer(LayerManager *aManager)
+ {
+   return !mCurrentContext || mCurrentContext->ShouldForceInactiveLayer(aManager);
+diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
+--- a/gfx/layers/client/CanvasClient.cpp
++++ b/gfx/layers/client/CanvasClient.cpp
+@@ -20,16 +20,18 @@
+ #include "mozilla/layers/TextureClientOGL.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsDebug.h"                    // for printf_stderr, NS_ASSERTION
+ #include "nsXULAppAPI.h"                // for XRE_GetProcessType, etc
+ #ifdef MOZ_WIDGET_GONK
+ #include "SharedSurfaceGralloc.h"
+ #endif
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ /* static */ TemporaryRef<CanvasClient>
+ CanvasClient::CreateCanvasClient(CanvasClientType aType,
+@@ -107,19 +109,31 @@ CanvasClient2D::CreateBufferTextureClien
+ }
+ 
+ CanvasClientSurfaceStream::CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder,
+                                                      TextureFlags aFlags)
+   : CanvasClient(aLayerForwarder, aFlags)
+ {
+ }
+ 
++CanvasClientSurfaceStream::~CanvasClientSurfaceStream()
++{
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.test_canvas", propValue, "0");
++  if(atoi(propValue) == 1){
++    int test;
++    test=10;
++  }
++}
++
+ void
+ CanvasClientSurfaceStream::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
+ {
++  printf_stderr("bignose in CanvasClientSurfaceStream::Update");
++
+   GLScreenBuffer* screen = aLayer->mGLContext->Screen();
+   SurfaceStream* stream = screen->Stream();
+ 
+   bool isCrossProcess = !(XRE_GetProcessType() == GeckoProcessType_Default);
+   bool bufferCreated = false;
+   if (isCrossProcess) {
+ #ifdef MOZ_WIDGET_GONK
+     SharedSurface* surf = stream->SwapConsumer();
+@@ -138,20 +152,24 @@ CanvasClientSurfaceStream::Update(gfx::I
+ 
+     RefPtr<GrallocTextureClientOGL> grallocTextureClient =
+       static_cast<GrallocTextureClientOGL*>(grallocSurf->GetTextureClient());
+ 
+     // If IPDLActor is null means this TextureClient didn't AddTextureClient yet
+     if (!grallocTextureClient->GetIPDLActor()) {
+       grallocTextureClient->SetTextureFlags(mTextureInfo.mTextureFlags);
+       AddTextureClient(grallocTextureClient);
++
++      printf_stderr("bignose in CanvasClientSurfaceStream::Update AddTextureClient");
+     }
+ 
+     if (grallocTextureClient->GetIPDLActor()) {
+       GetForwarder()->UseTexture(this, grallocTextureClient);
++
++      printf_stderr("bignose in CanvasClientSurfaceStream::Update UseTexture");
+     }
+ #else
+     printf_stderr("isCrossProcess, but not MOZ_WIDGET_GONK! Someone needs to write some code!");
+     MOZ_ASSERT(false);
+ #endif
+   } else {
+     if (!mBuffer) {
+       StreamTextureClientOGL* textureClient =
+diff --git a/gfx/layers/client/CanvasClient.h b/gfx/layers/client/CanvasClient.h
+--- a/gfx/layers/client/CanvasClient.h
++++ b/gfx/layers/client/CanvasClient.h
+@@ -102,16 +102,17 @@ private:
+ };
+ 
+ // Used for GL canvases where we don't need to do any readback, i.e., with a
+ // GL backend.
+ class CanvasClientSurfaceStream : public CanvasClient
+ {
+ public:
+   CanvasClientSurfaceStream(CompositableForwarder* aLayerForwarder, TextureFlags aFlags);
++  virtual ~CanvasClientSurfaceStream();
+ 
+   TextureInfo GetTextureInfo() const
+   {
+     return TextureInfo(COMPOSITABLE_IMAGE);
+   }
+ 
+   virtual void Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer) MOZ_OVERRIDE;
+ 
+diff --git a/gfx/layers/composite/CanvasLayerComposite.cpp b/gfx/layers/composite/CanvasLayerComposite.cpp
+--- a/gfx/layers/composite/CanvasLayerComposite.cpp
++++ b/gfx/layers/composite/CanvasLayerComposite.cpp
+@@ -15,34 +15,47 @@
+ #include "mozilla/layers/Effects.h"     // for EffectChain
+ #include "mozilla/mozalloc.h"           // for operator delete
+ #include "nsAString.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsString.h"                   // for nsAutoCString
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla;
+ using namespace mozilla::layers;
+ using namespace mozilla::gfx;
+ 
+ CanvasLayerComposite::CanvasLayerComposite(LayerManagerComposite* aManager)
+   : CanvasLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+   , mImageHost(nullptr)
+ {
+   MOZ_COUNT_CTOR(CanvasLayerComposite);
+   mImplData = static_cast<LayerComposite*>(this);
++
++  printf_stderr("bignose CanvasLayerComposite::CanvasLayerComposite");
+ }
+ 
+ CanvasLayerComposite::~CanvasLayerComposite()
+ {
+   MOZ_COUNT_DTOR(CanvasLayerComposite);
+ 
+   CleanupResources();
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.test_canvas", propValue, "0");
++  if(atoi(propValue) == 1){
++    int test;
++    test=10;
++  }
++
++  printf_stderr("bignose CanvasLayerComposite::~CanvasLayerComposite");
+ }
+ 
+ bool
+ CanvasLayerComposite::SetCompositableHost(CompositableHost* aHost)
+ {
+   switch (aHost->GetType()) {
+     case BUFFER_IMAGE_SINGLE:
+     case BUFFER_IMAGE_BUFFERED:
+@@ -68,17 +81,20 @@ CanvasLayerComposite::GetRenderState()
+     return LayerRenderState();
+   }
+   return mImageHost->GetRenderState();
+ }
+ 
+ void
+ CanvasLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  printf_stderr("bignose CanvasLayerComposite::RenderLayer");
++
+   if (!mImageHost || !mImageHost->IsAttached()) {
++    printf_stderr("bignose CanvasLayerComposite::RenderLayer, no mImageHost");
+     return;
+   }
+ 
+   mCompositor->MakeCurrent();
+ 
+ #ifdef MOZ_DUMP_PAINTING
+   if (gfxUtils::sDumpPainting) {
+     RefPtr<gfx::DataSourceSurface> surf = mImageHost->GetAsSurface();
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -205,18 +205,18 @@ LayerManagerComposite::EndTransaction(Dr
+   mInTransaction = false;
+ 
+   if (!mIsCompositorReady) {
+     return;
+   }
+   mIsCompositorReady = false;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+-  Log();
++  //MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
++  //Log();
+ #endif
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+   if (mRoot && mClonedLayerTreeProperties) {
+@@ -239,21 +239,21 @@ LayerManagerComposite::EndTransaction(Dr
+     // so we don't need to pass any global transform here.
+     mRoot->ComputeEffectiveTransforms(gfx::Matrix4x4());
+ 
+     Render();
+   }
+ 
+   mCompositor->SetTargetContext(nullptr);
+ 
+-  Dump(nullptr,"bignose layer:",false);
++  //Dump(nullptr,"bignose layer:",false);
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  Log();
+-  MOZ_LAYERS_LOG(("]----- EndTransaction"));
++  //Log();
++  //MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ }
+ 
+ already_AddRefed<gfxASurface>
+ LayerManagerComposite::CreateOptimalMaskSurface(const IntSize &aSize)
+ {
+   NS_RUNTIMEABORT("Should only be called on the drawing side");
+   return nullptr;
+diff --git a/layout/generic/nsHTMLCanvasFrame.cpp b/layout/generic/nsHTMLCanvasFrame.cpp
+--- a/layout/generic/nsHTMLCanvasFrame.cpp
++++ b/layout/generic/nsHTMLCanvasFrame.cpp
+@@ -239,31 +239,40 @@ nsHTMLCanvasFrame::GetInnerArea() const
+ }
+ 
+ already_AddRefed<Layer>
+ nsHTMLCanvasFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
+                               LayerManager* aManager,
+                               nsDisplayItem* aItem,
+                               const ContainerLayerParameters& aContainerParameters)
+ {
++  printf_stderr("bignose nsHTMLCanvasFrame::BuildLayer");
++
+   nsRect area = GetContentRect() - GetPosition() + aItem->ToReferenceFrame();
+   HTMLCanvasElement* element = static_cast<HTMLCanvasElement*>(GetContent());
+   nsIntSize canvasSize = GetCanvasSize();
+ 
+   nsPresContext* presContext = PresContext();
+   element->HandlePrintCallback(presContext->Type());
+ 
+-  if (canvasSize.width <= 0 || canvasSize.height <= 0 || area.IsEmpty())
++  if (canvasSize.width <= 0 || canvasSize.height <= 0 || area.IsEmpty()){
++    printf_stderr("bignose nsHTMLCanvasFrame::BuildLayer canvasSize.width <= 0 || canvasSize.height <= 0 || area.IsEmpty()");
+     return nullptr;
++  }
+ 
+   CanvasLayer* oldLayer = static_cast<CanvasLayer*>
+     (aManager->GetLayerBuilder()->GetLeafLayerFor(aBuilder, aItem));
++
++  printf_stderr("bignose nsHTMLCanvasFrame::BuildLayer oldlayer:%p",oldLayer);
++
+   nsRefPtr<CanvasLayer> layer = element->GetCanvasLayer(aBuilder, oldLayer, aManager);
+-  if (!layer)
++  if (!layer){
++    printf_stderr("bignose nsHTMLCanvasFrame::BuildLayer GetCanvasLayer() is null ");
+     return nullptr;
++  }
+ 
+   gfxRect r = gfxRect(presContext->AppUnitsToGfxUnits(area.x),
+                       presContext->AppUnitsToGfxUnits(area.y),
+                       presContext->AppUnitsToGfxUnits(area.width),
+                       presContext->AppUnitsToGfxUnits(area.height));
+ 
+   // Transform the canvas into the right place
+   gfx::Matrix transform;

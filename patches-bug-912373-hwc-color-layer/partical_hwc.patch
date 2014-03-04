@@ -1,0 +1,294 @@
+From 0760c38c54a046ee1daf87e6f6001d6ec054c1fd Mon Sep 17 00:00:00 2001
+From: Sushil Chauhan <sushilchauhan@codeaurora.org>
+Date: Thu, 19 Sep 2013 17:23:44 -0700
+Subject: [PATCH] Add support for partial HWC Composition.
+
+If all the layers in frame cannot be composed using HWC, try for
+partial HWC Composition. Skip GPU rendering for the layers marked
+with OVERLAY during partial HWC composition. These layers will be
+composed by HWC. Layers marked with GPU get composed on FB layer.
+Eventually, OVERLAY layers & FB layer are being drawn in HWC set.
+
+Change-Id: I157e309b17f9236f60f6111aa1a656e289f4fa0f
+---
+ gfx/layers/Layers.cpp                            |   15 ++++++++++++-
+ gfx/layers/Layers.h                              |    5 ++++
+ gfx/layers/composite/ContainerLayerComposite.cpp |    6 ++++-
+ widget/gonk/HwcComposer2D.cpp                    |   24 ++++++++++++++++++---
+ widget/gonk/HwcComposer2D.h                      |    3 +-
+ 5 files changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/gfx/layers/Layers.cpp b/gfx/layers/Layers.cpp
+--- a/gfx/layers/Layers.cpp
++++ b/gfx/layers/Layers.cpp
+@@ -185,17 +185,18 @@ Layer::Layer(LayerManager* aManager, voi
+   mForceIsolatedGroup(false),
+   mContentFlags(0),
+   mUseClipRect(false),
+   mUseTileSourceRect(false),
+   mIsFixedPosition(false),
+   mMargins(0, 0, 0, 0),
+   mStickyPositionData(nullptr),
+   mDebugColorIndex(0),
+-  mAnimationGeneration(0)
++  mAnimationGeneration(0),
++  mSkipGpuRender(false)
+ {}
+ 
+ Layer::~Layer()
+ {}
+ 
+ Animation*
+ Layer::AddAnimation(TimeStamp aStart, TimeDuration aDuration, float aIterations,
+                     int aDirection, nsCSSProperty aProperty, const AnimationData& aData)
+@@ -707,16 +708,28 @@ Layer::ComputeEffectiveTransformForMaskL
+     gfxMatrix maskTranslation;
+     bool maskIs2D = mMaskLayer->GetTransform().CanDraw2D(&maskTranslation);
+     NS_ASSERTION(maskIs2D, "How did we end up with a 3D transform here?!");
+ #endif
+     mMaskLayer->mEffectiveTransform.PreMultiply(mMaskLayer->GetTransform());
+   }
+ }
+ 
++void
++Layer::SetSkipGPU(bool value)
++{
++  mSkipGpuRender = value;
++}
++
++bool
++Layer::GetSkipGPU()
++{
++  return mSkipGpuRender;
++}
++
+ ContainerLayer::ContainerLayer(LayerManager* aManager, void* aImplData)
+   : Layer(aManager, aImplData),
+     mFirstChild(nullptr),
+     mLastChild(nullptr),
+     mPreXScale(1.0f),
+     mPreYScale(1.0f),
+     mInheritedXScale(1.0f),
+     mInheritedYScale(1.0f),
+diff --git a/gfx/layers/Layers.h b/gfx/layers/Layers.h
+--- a/gfx/layers/Layers.h
++++ b/gfx/layers/Layers.h
+@@ -1247,16 +1247,20 @@ public:
+ 
+ #ifdef DEBUG
+   void SetDebugColorIndex(uint32_t aIndex) { mDebugColorIndex = aIndex; }
+   uint32_t GetDebugColorIndex() { return mDebugColorIndex; }
+ #endif
+ 
+   virtual LayerRenderState GetRenderState() { return LayerRenderState(); }
+ 
++  void SetSkipGPU(bool value);
++
++  bool GetSkipGPU();
++
+ protected:
+   Layer(LayerManager* aManager, void* aImplData);
+ 
+   void Mutated()
+   {
+     mManager->Mutated(this);
+   }
+ 
+@@ -1352,16 +1356,17 @@ protected:
+     LayerRect mOuter;
+     LayerRect mInner;
+   };
+   nsAutoPtr<StickyPositionData> mStickyPositionData;
+   DebugOnly<uint32_t> mDebugColorIndex;
+   // If this layer is used for OMTA, then this counter is used to ensure we
+   // stay in sync with the animation manager
+   uint64_t mAnimationGeneration;
++  bool mSkipGpuRender;
+ };
+ 
+ /**
+  * A Layer which we can draw into using Thebes. It is a conceptually
+  * infinite surface, but each ThebesLayer has an associated "valid region"
+  * of contents that it is currently storing, which is finite. ThebesLayer
+  * implementations can store content between paints.
+  *
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -193,17 +193,21 @@ ContainerRender(ContainerT* aContainer,
+     }
+ 
+     nsIntRect clipRect = layerToRender->GetLayer()->
+         CalculateScissorRect(aClipRect, &aManager->GetWorldTransform());
+     if (clipRect.IsEmpty()) {
+       continue;
+     }
+ 
+-    layerToRender->RenderLayer(childOffset, clipRect);
++    if (!layerToRender->GetLayer()->GetSkipGPU()) {
++      layerToRender->RenderLayer(childOffset, clipRect);
++    } else {
++      layerToRender->GetLayer()->SetSkipGPU(false);
++    }
+     // invariant: our GL context should be current here, I don't think we can
+     // assert it though
+   }
+ 
+   if (needsSurface) {
+     // Unbind the current surface and rebind the previous one.
+ #ifdef MOZ_DUMP_PAINTING
+     if (gfxUtils::sDumpPainting) {
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -32,17 +32,17 @@
+ #endif
+ 
+ #define LOG_TAG "HWComposer"
+ 
+ /*
+  * By default the debug message of hwcomposer (LOG_DEBUG level) are undefined,
+  * but can be enabled by uncommenting HWC_DEBUG below.
+  */
+-//#define HWC_DEBUG
++#define HWC_DEBUG
+ 
+ #ifdef HWC_DEBUG
+ #define LOGD(args...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, ## args)
+ #else
+ #define LOGD(args...) ((void)0)
+ #endif
+ 
+ #define LOGI(args...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, ## args)
+@@ -212,16 +212,22 @@ HwcComposer2D::PrepareLayerList(Layer* a
+         LOGD("%s Layer has a rotated buffer", aLayer->Name());
+         return false;
+     }
+ 
+ 
+     // OK!  We can compose this layer with hwc.
+ 
+     int current = mList ? mList->numHwLayers : 0;
++
++    if (current >= MAX_HWC_LAYERS) {
++        LOGD("Maximum HWC layers count reached!");
++        return false;
++    }
++
+     if (!mList || current >= mMaxLayerCount) {
+         if (!ReallocLayerList() || current >= mMaxLayerCount) {
+             LOGE("PrepareLayerList failed! Could not increase the maximum layer count");
+             return false;
+         }
+     }
+ 
+     nsIntRect visibleRect = visibleRegion.GetBounds();
+@@ -412,16 +418,17 @@ HwcComposer2D::PrepareLayerList(Layer* a
+         ColorLayer* colorLayer = aLayer->AsColorLayer();
+         if (colorLayer->GetColor().a < 1.0) {
+             LOGD("Color layer has semitransparency which is unsupported");
+             return false;
+         }
+         hwcLayer.transform = colorLayer->GetColor().Packed();
+     }
+ 
++    mLeafLayerMap[current] = aLayer;
+     mList->numHwLayers++;
+     return true;
+ }
+ 
+ 
+ #if ANDROID_VERSION >= 18
+ bool
+ HwcComposer2D::TryHwComposition()
+@@ -431,16 +438,17 @@ HwcComposer2D::TryHwComposition()
+     if (!fbsurface) {
+         LOGE("H/W Composition failed. FBSurface not initialized.");
+         return false;
+     }
+ 
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};
+     const hwc_rect_t r = {0, 0, mScreenRect.width, mScreenRect.height};
+     int idx = mList->numHwLayers;
++    bool fullHwcComp = true;
+ 
+     displays[HWC_DISPLAY_PRIMARY] = mList;
+     mList->flags = HWC_GEOMETRY_CHANGED;
+     mList->retireFenceFd = -1;
+ 
+     mList->hwLayers[idx].hints = 0;
+     mList->hwLayers[idx].flags = 0;
+     mList->hwLayers[idx].transform = 0;
+@@ -455,21 +463,33 @@ HwcComposer2D::TryHwComposition()
+     mList->hwLayers[idx].releaseFenceFd = -1;
+     mList->hwLayers[idx].planeAlpha = 0xFF;
+     mList->numHwLayers++;
+ 
+     mHwc->prepare(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+ 
+     for (int j = 0; j < idx; j++) {
+         if (mList->hwLayers[j].compositionType == HWC_FRAMEBUFFER) {
+-            LOGD("GPU or Partial MDP Composition");
+-            return false;
++            LOGD("GPU for layer:%d",j);
++            fullHwcComp = false;
++            break;
+         }
+     }
+ 
++    if (!fullHwcComp) {
++        // For partial HWC Comp, skip GPU rendering of OVERLAY layers
++        for (int k=0; k < idx; k++) {
++            if (mList->hwLayers[k].compositionType == HWC_OVERLAY){
++                mLeafLayerMap[k]->SetSkipGPU(true);
++                LOGD("MDP Composition for layer:%d",k);
++            }
++        }
++        return false;
++    }
++
+     // Full MDP Composition
+     mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+ 
+     for (int i = 0; i <= MAX_HWC_LAYERS; i++) {
+         if (mPrevRelFd[i] <= 0) {
+             break;
+         }
+         if (!i) {
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -19,17 +19,17 @@
+ 
+ #include "Composer2D.h"
+ #include "Layers.h"
+ #include <vector>
+ #include <list>
+ 
+ #include <hardware/hwcomposer.h>
+ 
+-#define MAX_HWC_LAYERS 15
++#define MAX_HWC_LAYERS 32
+ 
+ namespace mozilla {
+ 
+ namespace layers {
+ class ContainerLayer;
+ class Layer;
+ }
+ 
+@@ -74,13 +74,14 @@ private:
+     hwc_surface_t           mSur;
+     nsIntRect               mScreenRect;
+     int                     mMaxLayerCount;
+     bool                    mColorFill;
+     //Holds all the dynamically allocated RectVectors needed
+     //to render the current frame
+     std::list<RectVector>   mVisibleRegions;
+     int                     mPrevRelFd[MAX_HWC_LAYERS + 1];
++    layers::Layer*          mLeafLayerMap[MAX_HWC_LAYERS];
+ };
+ 
+ } // namespace mozilla
+ 
+ #endif // mozilla_HwcComposer2D

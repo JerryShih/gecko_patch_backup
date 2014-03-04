@@ -1,0 +1,1216 @@
+# HG changeset patch
+# Parent 564bd37e5e7fc0b653c68d3a04db45740673758f
+# User Jerry Shih <hshih@mozilla.com>
+debug lockscreen
+
+diff --git a/gfx/layers/Compositor.cpp b/gfx/layers/Compositor.cpp
+--- a/gfx/layers/Compositor.cpp
++++ b/gfx/layers/Compositor.cpp
+@@ -124,16 +124,18 @@ Compositor::DrawDiagnosticsInternal(Diag
+       color = gfx::Color(0.0f, 1.0f, 1.0f, 1.0f); // greenish blue
+     }
+   } else if (aFlags & DIAGNOSTIC_IMAGE) {
+     color = gfx::Color(1.0f, 0.0f, 0.0f, 1.0f); // red
+   } else if (aFlags & DIAGNOSTIC_COLOR) {
+     color = gfx::Color(0.0f, 0.0f, 1.0f, 1.0f); // blue
+   } else if (aFlags & DIAGNOSTIC_CONTAINER) {
+     color = gfx::Color(0.8f, 0.0f, 0.8f, 1.0f); // purple
++  } else if (aFlags & DIAGNOSTIC_INTERMEDIATE_SURFACE) {
++    color = gfx::Color(1.0f, 1.0f, 0.0f, 1.0f); // purple
+   }
+ 
+   // make tile borders a bit more transparent to keep layer borders readable.
+   if (aFlags & DIAGNOSTIC_TILE ||
+       aFlags & DIAGNOSTIC_BIGIMAGE ||
+       aFlags & DIAGNOSTIC_REGION_RECT) {
+     lWidth = 1;
+     opacity = 0.5f;
+diff --git a/gfx/layers/CompositorTypes.h b/gfx/layers/CompositorTypes.h
+--- a/gfx/layers/CompositorTypes.h
++++ b/gfx/layers/CompositorTypes.h
+@@ -111,16 +111,17 @@ const DiagnosticFlags DIAGNOSTIC_IMAGE  
+ const DiagnosticFlags DIAGNOSTIC_CONTENT    = 1 << 1;
+ const DiagnosticFlags DIAGNOSTIC_CANVAS     = 1 << 2;
+ const DiagnosticFlags DIAGNOSTIC_COLOR      = 1 << 3;
+ const DiagnosticFlags DIAGNOSTIC_CONTAINER  = 1 << 4;
+ const DiagnosticFlags DIAGNOSTIC_TILE       = 1 << 5;
+ const DiagnosticFlags DIAGNOSTIC_BIGIMAGE   = 1 << 6;
+ const DiagnosticFlags DIAGNOSTIC_COMPONENT_ALPHA = 1 << 7;
+ const DiagnosticFlags DIAGNOSTIC_REGION_RECT = 1 << 8;
++const DiagnosticFlags DIAGNOSTIC_INTERMEDIATE_SURFACE = 1 << 9;
+ 
+ /**
+  * See gfx/layers/Effects.h
+  */
+ enum EffectTypes
+ {
+   EFFECT_MASK,
+   EFFECT_MAX_SECONDARY, // sentinel for the count of secondary effect types
+diff --git a/gfx/layers/Layers.cpp b/gfx/layers/Layers.cpp
+--- a/gfx/layers/Layers.cpp
++++ b/gfx/layers/Layers.cpp
+@@ -885,16 +885,47 @@ ContainerLayer::HasMultipleChildren()
+     ++count;
+     if (count > 1)
+       return true;
+   }
+ 
+   return false;
+ }
+ 
++bool
++ContainerLayer::HasOverlapChildrenRegion()
++{
++  typedef nsAutoTArray<Rect, 8> RectArray;
++  RectArray rectArray;
++
++  for (Layer* child = GetFirstChild(); child; child = child->GetNextSibling()) {
++    const nsIntRect *clipRect = child->GetEffectiveClipRect();
++    if (clipRect && clipRect->IsEmpty())
++      continue;
++    if (child->GetVisibleRegion().IsEmpty())
++      continue;
++
++      rectArray.AppendElement(
++          child->GetLocalTransform().As2D().TransformBounds(
++              ToRect(child->GetVisibleRegion().GetBounds())));
++  }
++
++  RectArray::size_type rectNum = rectArray.Length();
++
++  for(RectArray::size_type i = 0; i < rectNum; ++i){
++    for(RectArray::size_type j = i+1 ; j < rectNum; ++j){
++      if(rectArray[i].Intersects(rectArray[j])){
++        return true;
++      }
++    }
++  }
++
++  return false;
++}
++
+ void
+ ContainerLayer::SortChildrenBy3DZOrder(nsTArray<Layer*>& aArray)
+ {
+   nsAutoTArray<Layer*, 10> toSort;
+ 
+   for (Layer* l = GetFirstChild(); l; l = l->GetNextSibling()) {
+     ContainerLayer* container = l->AsContainerLayer();
+     if (container && container->GetContentFlags() & CONTENT_PRESERVE_3D) {
+@@ -925,16 +956,17 @@ ContainerLayer::DefaultComputeEffectiveT
+   if (GetMaskLayer()) {
+     useIntermediateSurface = true;
+ #ifdef MOZ_DUMP_PAINTING
+   } else if (gfxUtils::sDumpPainting) {
+     useIntermediateSurface = true;
+ #endif
+   } else {
+     float opacity = GetEffectiveOpacity();
++    //if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
+     if (opacity != 1.0f && HasMultipleChildren()) {
+       useIntermediateSurface = true;
+     } else {
+       useIntermediateSurface = false;
+       gfx::Matrix contTransform;
+       if (!mEffectiveTransform.Is2D(&contTransform) ||
+ #ifdef MOZ_GFX_OPTIMIZE_MOBILE
+         !contTransform.PreservesAxisAlignedRectangles()) {
+diff --git a/gfx/layers/Layers.h b/gfx/layers/Layers.h
+--- a/gfx/layers/Layers.h
++++ b/gfx/layers/Layers.h
+@@ -1667,16 +1667,21 @@ public:
+   }
+ 
+   /**
+    * Returns true if this container has more than one non-empty child
+    */
+   bool HasMultipleChildren();
+ 
+   /**
++   * Returns true if this container's visible region is overlap
++   */
++  bool HasOverlapChildrenRegion();
++
++  /**
+    * Returns true if this container supports children with component alpha.
+    * Should only be called while painting a child of this layer.
+    */
+   bool SupportsComponentAlphaChildren() { return mSupportsComponentAlphaChildren; }
+ 
+ protected:
+   friend class ReadbackProcessor;
+ 
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -26,16 +26,30 @@
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)         \
+   do { if (layer->AsShadowableLayer()) { PR_LOG(LayerManager::GetLog(), PR_LOG_DEBUG, _args); } } while (0)
+ #else
+ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG(_args)
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
++/*
++#define MOZ_LAYERS_HAVE_LOG
++#define PR_BEGIN_MACRO  do {
++#define PR_END_MACRO    } while (0)
++
++#define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
++
++#define TMOZ_LAYERS_LOG(args...) \
++  PR_BEGIN_MACRO \
++    __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
++  PR_END_MACRO
++*/
++
++
+ namespace android {
+ class GraphicBuffer;
+ }
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ 
+diff --git a/gfx/layers/client/ClientImageLayer.cpp b/gfx/layers/client/ClientImageLayer.cpp
+--- a/gfx/layers/client/ClientImageLayer.cpp
++++ b/gfx/layers/client/ClientImageLayer.cpp
+@@ -15,16 +15,18 @@
+ #include "mozilla/mozalloc.h"           // for operator delete, etc
+ #include "nsAutoPtr.h"                  // for nsRefPtr, getter_AddRefs, etc
+ #include "nsCOMPtr.h"                   // for already_AddRefed
+ #include "nsDebug.h"                    // for NS_ASSERTION
+ #include "nsISupportsImpl.h"            // for Layer::AddRef, etc
+ #include "nsRegion.h"                   // for nsIntRegion
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "GeckoProfiler.h"
++
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ class ClientImageLayer : public ImageLayer, 
+                          public ClientLayer {
+ public:
+@@ -122,16 +124,18 @@ protected:
+ 
+   RefPtr<ImageClient> mImageClient;
+   CompositableType mImageClientTypeContainer;
+ };
+ 
+ void
+ ClientImageLayer::RenderLayer()
+ {
++  PROFILER_LABEL("ClientImageLayer", "Paint");
++
+   if (GetMaskLayer()) {
+     ToClientLayer(GetMaskLayer())->RenderLayer();
+   }
+ 
+   if (!mContainer) {
+      return;
+   }
+ 
+diff --git a/gfx/layers/client/ClientThebesLayer.cpp b/gfx/layers/client/ClientThebesLayer.cpp
+--- a/gfx/layers/client/ClientThebesLayer.cpp
++++ b/gfx/layers/client/ClientThebesLayer.cpp
+@@ -79,16 +79,18 @@ ClientThebesLayer::PaintThebes()
+                        "No context when we have something to draw, resource exhaustion?");
+     }
+   }
+ }
+ 
+ void
+ ClientThebesLayer::RenderLayer()
+ {
++  PROFILER_LABEL("ClientThebesLayer", "Paint");
++
+   if (GetMaskLayer()) {
+     ToClientLayer(GetMaskLayer())->RenderLayer();
+   }
+   
+   if (!mContentClient) {
+     mContentClient = ContentClient::CreateContentClient(ClientManager()->AsShadowForwarder());
+     if (!mContentClient) {
+       return;
+diff --git a/gfx/layers/client/ClientTiledThebesLayer.cpp b/gfx/layers/client/ClientTiledThebesLayer.cpp
+--- a/gfx/layers/client/ClientTiledThebesLayer.cpp
++++ b/gfx/layers/client/ClientTiledThebesLayer.cpp
+@@ -12,16 +12,18 @@
+ #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
+ #include "mozilla/gfx/BaseSize.h"       // for BaseSize
+ #include "mozilla/gfx/Rect.h"           // for Rect, RectTyped
+ #include "mozilla/layers/LayersMessages.h"
+ #include "mozilla/mozalloc.h"           // for operator delete, etc
+ #include "nsRect.h"                     // for nsIntRect
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "GeckoProfiler.h"
++
+ namespace mozilla {
+ namespace layers {
+ 
+ 
+ ClientTiledThebesLayer::ClientTiledThebesLayer(ClientLayerManager* const aManager)
+   : ThebesLayer(aManager,
+                 static_cast<ClientLayer*>(MOZ_THIS_IN_INITIALIZER_LIST()))
+   , mContentClient()
+@@ -136,16 +138,18 @@ ClientTiledThebesLayer::EndPaint(bool aF
+   mPaintData.mLastScrollOffset = mPaintData.mScrollOffset;
+   mPaintData.mPaintFinished = true;
+   mPaintData.mFirstPaint = false;
+ }
+ 
+ void
+ ClientTiledThebesLayer::RenderLayer()
+ {
++  PROFILER_LABEL("ClientTiledThebesLayer", "Paint");
++
+   LayerManager::DrawThebesLayerCallback callback =
+     ClientManager()->GetThebesLayerCallback();
+   void *data = ClientManager()->GetThebesLayerCallbackData();
+   if (!callback) {
+     ClientManager()->SetTransactionIncomplete();
+     return;
+   }
+ 
+diff --git a/gfx/layers/composite/AsyncCompositionManager.cpp b/gfx/layers/composite/AsyncCompositionManager.cpp
+--- a/gfx/layers/composite/AsyncCompositionManager.cpp
++++ b/gfx/layers/composite/AsyncCompositionManager.cpp
+@@ -771,16 +771,21 @@ bool
+ AsyncCompositionManager::TransformShadowTree(TimeStamp aCurrentFrame)
+ {
+   PROFILER_LABEL("AsyncCompositionManager", "TransformShadowTree");
+   Layer* root = mLayerManager->GetRoot();
+   if (!root) {
+     return false;
+   }
+ 
++  {
++
++
++  PROFILER_LABEL("AsyncCompositionManager", "TransformShadowTree start use");
++
+   // NB: we must sample animations *before* sampling pan/zoom
+   // transforms.
+   bool wantNextFrame = SampleAnimations(root, aCurrentFrame);
+ 
+   // FIXME/bug 775437: unify this interface with the ~native-fennec
+   // derived code
+   //
+   // Attempt to apply an async content transform to any layer that has
+@@ -802,16 +807,19 @@ AsyncCompositionManager::TransformShadow
+     for (uint32_t i = 0; i < scrollableLayers.Length(); i++) {
+       if (scrollableLayers[i]) {
+         TransformScrollableLayer(scrollableLayers[i]);
+       }
+     }
+   }
+ 
+   return wantNextFrame;
++
++
++  }
+ }
+ 
+ void
+ AsyncCompositionManager::SetFirstPaintViewport(const LayerIntPoint& aOffset,
+                                                const CSSToLayerScale& aZoom,
+                                                const CSSRect& aCssPageRect)
+ {
+ #ifdef MOZ_WIDGET_ANDROID
+diff --git a/gfx/layers/composite/CanvasLayerComposite.cpp b/gfx/layers/composite/CanvasLayerComposite.cpp
+--- a/gfx/layers/composite/CanvasLayerComposite.cpp
++++ b/gfx/layers/composite/CanvasLayerComposite.cpp
+@@ -15,16 +15,18 @@
+ #include "mozilla/layers/Effects.h"     // for EffectChain
+ #include "mozilla/mozalloc.h"           // for operator delete
+ #include "nsAString.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsString.h"                   // for nsAutoCString
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "GeckoProfiler.h"
++
+ using namespace mozilla;
+ using namespace mozilla::layers;
+ using namespace mozilla::gfx;
+ 
+ CanvasLayerComposite::CanvasLayerComposite(LayerManagerComposite* aManager)
+   : CanvasLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+   , mImageHost(nullptr)
+@@ -68,16 +70,18 @@ CanvasLayerComposite::GetRenderState()
+     return LayerRenderState();
+   }
+   return mImageHost->GetRenderState();
+ }
+ 
+ void
+ CanvasLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("CanvasLayerComposite", "RenderLayer");
++
+   if (!mImageHost || !mImageHost->IsAttached()) {
+     return;
+   }
+ 
+   mCompositor->MakeCurrent();
+ 
+ #ifdef MOZ_DUMP_PAINTING
+   if (gfxUtils::sDumpPainting) {
+diff --git a/gfx/layers/composite/ColorLayerComposite.cpp b/gfx/layers/composite/ColorLayerComposite.cpp
+--- a/gfx/layers/composite/ColorLayerComposite.cpp
++++ b/gfx/layers/composite/ColorLayerComposite.cpp
+@@ -12,22 +12,26 @@
+ #include "mozilla/gfx/Types.h"          // for Color
+ #include "mozilla/layers/Compositor.h"  // for Compositor
+ #include "mozilla/layers/CompositorTypes.h"  // for DIAGNOSTIC_COLOR
+ #include "mozilla/layers/Effects.h"     // for Effect, EffectChain, etc
+ #include "mozilla/mozalloc.h"           // for operator delete, etc
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsRect.h"                     // for nsIntRect
+ 
++#include "GeckoProfiler.h"
++
+ namespace mozilla {
+ namespace layers {
+ 
+ void
+ ColorLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("ColorLayerComposite", "RenderLayer");
++
+   EffectChain effects;
+   gfxRGBA color(GetColor());
+   effects.mPrimaryEffect = new EffectSolidColor(gfx::Color(color.r,
+                                                            color.g,
+                                                            color.b,
+                                                            color.a));
+   nsIntRect boundRect = GetBounds();
+ 
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -28,16 +28,19 @@
+ #include "nsISupportsUtils.h"           // for NS_ADDREF, NS_RELEASE
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsRect.h"                     // for nsIntRect
+ #include "nsRegion.h"                   // for nsIntRegion
+ #include "nsTArray.h"                   // for nsAutoTArray
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ #include <vector>
+ 
++#include "GeckoProfiler.h"
++#include "cutils/properties.h"
++
+ namespace mozilla {
+ namespace layers {
+ 
+ // HasOpaqueAncestorLayer and ContainerRender are shared between RefLayer and ContainerLayer
+ static bool
+ HasOpaqueAncestorLayer(Layer* aLayer)
+ {
+   for (Layer* l = aLayer->GetParent(); l; l = l->GetParent()) {
+@@ -210,33 +213,48 @@ static void DrawVelGraph(const nsIntRect
+                         opacity, transform);
+ }
+ 
+ template<class ContainerT> void
+ ContainerRender(ContainerT* aContainer,
+                 LayerManagerComposite* aManager,
+                 const nsIntRect& aClipRect)
+ {
++  char prop[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.log",prop,"0");
++
++  if(atoi(prop)==1){
++    printf_stderr("bignose ContainerRender start");
++  }
++
+   /**
+    * Setup our temporary surface for rendering the contents of this container.
+    */
+   RefPtr<CompositingRenderTarget> surface;
+ 
+   Compositor* compositor = aManager->GetCompositor();
+ 
+   RefPtr<CompositingRenderTarget> previousTarget = compositor->GetCurrentRenderTarget();
+ 
+   nsIntRect visibleRect = aContainer->GetEffectiveVisibleRegion().GetBounds();
+ 
+   aContainer->mSupportsComponentAlphaChildren = false;
+ 
+   float opacity = aContainer->GetEffectiveOpacity();
+ 
+   bool needsSurface = aContainer->UseIntermediateSurface();
++
++  {
++  PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 1");
++
+   if (needsSurface) {
++    //if(atoi(prop)==1){
++      printf_stderr("bignose needsSurface occur");
++    //}
++
+     SurfaceInitMode mode = INIT_MODE_CLEAR;
+     bool surfaceCopyNeeded = false;
+     gfx::IntRect surfaceRect = gfx::IntRect(visibleRect.x, visibleRect.y,
+                                             visibleRect.width, visibleRect.height);
+     gfx::IntPoint sourcePoint = gfx::IntPoint(visibleRect.x, visibleRect.y);
+     // we're about to create a framebuffer backed by textures to use as an intermediate
+     // surface. What to do if its size (as given by framebufferRect) would exceed the
+     // maximum texture size supported by the GL? The present code chooses the compromise
+@@ -265,36 +283,63 @@ ContainerRender(ContainerT* aContainer,
+         sourcePoint.x += transform._31;
+         sourcePoint.y += transform._32;
+         aContainer->mSupportsComponentAlphaChildren
+           = gfxPlatform::ComponentAlphaEnabled();
+       }
+     }
+ 
+     sourcePoint -= compositor->GetCurrentRenderTarget()->GetOrigin();
++
+     if (surfaceCopyNeeded) {
++      {
++      PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 1-1");
++
++      if(atoi(prop)==1){
++        printf_stderr("bignose CreateRenderTargetFromSource, pos(%d,%d) size(%d,%d)",surfaceRect.x,surfaceRect.y,surfaceRect.width,surfaceRect.height);
++      }
++
+       surface = compositor->CreateRenderTargetFromSource(surfaceRect, previousTarget, sourcePoint);
++
++      }
+     } else {
++      {
++      PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 1-2");
++
++      if(atoi(prop)==1){
++        printf_stderr("bignose CreateRenderTarget, pos(%d,%d) size(%d,%d)",surfaceRect.x,surfaceRect.y,surfaceRect.width,surfaceRect.height);
++      }
++
+       surface = compositor->CreateRenderTarget(surfaceRect, mode);
++      }
+     }
+ 
+     if (!surface) {
+       return;
+     }
+ 
+     compositor->SetRenderTarget(surface);
+   } else {
+     surface = previousTarget;
+     aContainer->mSupportsComponentAlphaChildren = (aContainer->GetContentFlags() & Layer::CONTENT_OPAQUE) ||
+       (aContainer->GetParent() && aContainer->GetParent()->SupportsComponentAlphaChildren());
+   }
+ 
++  }
++
+   nsAutoTArray<Layer*, 12> children;
+   aContainer->SortChildrenBy3DZOrder(children);
+ 
++  {
++  PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 2");
++
++  if(atoi(prop)==1){
++    printf_stderr("bignose ContainerRender begin child");
++  }
++
+   /**
+    * Render this container's contents.
+    */
+   for (uint32_t i = 0; i < children.Length(); i++) {
+     LayerComposite* layerToRender = static_cast<LayerComposite*>(children.ElementAt(i)->ImplData());
+ 
+     if (layerToRender->GetLayer()->GetEffectiveVisibleRegion().IsEmpty() &&
+         !layerToRender->GetLayer()->AsContainerLayer()) {
+@@ -340,17 +385,30 @@ ContainerRender(ContainerT* aContainer,
+ 
+     if (gfxPlatform::GetPrefLayersScrollGraph()) {
+       DrawVelGraph(clipRect, aManager, layerToRender->GetLayer());
+     }
+     // invariant: our GL context should be current here, I don't think we can
+     // assert it though
+   }
+ 
++  if(atoi(prop)==1){
++    printf_stderr("bignose ContainerRender end child");
++  }
++
++  }
++
++  {
++  PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 3");
++
+   if (needsSurface) {
++    if(atoi(prop)==1){
++      printf_stderr("bignose Draw tmp surface");
++    }
++
+     // Unbind the current surface and rebind the previous one.
+ #ifdef MOZ_DUMP_PAINTING
+     if (gfxUtils::sDumpPainting) {
+       RefPtr<gfx::DataSourceSurface> surf = surface->Dump(aManager->GetCompositor());
+       WriteSnapshotToDumpFile(aContainer, surf);
+     }
+ #endif
+ 
+@@ -361,27 +419,42 @@ ContainerRender(ContainerT* aContainer,
+                                                             !aContainer->GetTransform().CanDraw2D());
+ 
+     effectChain.mPrimaryEffect = new EffectRenderTarget(surface);
+ 
+     gfx::Rect rect(visibleRect.x, visibleRect.y, visibleRect.width, visibleRect.height);
+     gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
+     aManager->GetCompositor()->DrawQuad(rect, clipRect, effectChain, opacity,
+                                         aContainer->GetEffectiveTransform());
++    //show INTERMEDIATE_SURFACE
++    aManager->GetCompositor()->DrawDiagnostics(DIAGNOSTIC_INTERMEDIATE_SURFACE,
++                                               rect, clipRect,
++                                               aContainer->GetEffectiveTransform());
+   }
+ 
++  }
++
++  {
++  PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 4");
++
+   if (aContainer->GetFrameMetrics().IsScrollable()) {
+     const FrameMetrics& frame = aContainer->GetFrameMetrics();
+     LayerRect layerBounds = ScreenRect(frame.mCompositionBounds) * ScreenToLayerScale(1.0);
+     gfx::Rect rect(layerBounds.x, layerBounds.y, layerBounds.width, layerBounds.height);
+     gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
+     aManager->GetCompositor()->DrawDiagnostics(DIAGNOSTIC_CONTAINER,
+                                                rect, clipRect,
+                                                aContainer->GetEffectiveTransform());
+   }
++
++  }
++
++  if(atoi(prop)==1){
++    printf_stderr("bignose ContainerRender end");
++  }
+ }
+ 
+ ContainerLayerComposite::ContainerLayerComposite(LayerManagerComposite *aManager)
+   : ContainerLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+ {
+   MOZ_COUNT_CTOR(ContainerLayerComposite);
+   mImplData = static_cast<LayerComposite*>(this);
+@@ -424,16 +497,18 @@ ContainerLayerComposite::GetFirstChildCo
+     return nullptr;
+    }
+   return static_cast<LayerComposite*>(mFirstChild->ImplData());
+ }
+ 
+ void
+ ContainerLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("ContainerLayerComposite", "RenderLayer");
++
+   ContainerRender(this, mCompositeManager, aClipRect);
+ }
+ 
+ void
+ ContainerLayerComposite::CleanupResources()
+ {
+   for (Layer* l = GetFirstChild(); l; l = l->GetNextSibling()) {
+     LayerComposite* layerToCleanup = static_cast<LayerComposite*>(l->ImplData());
+@@ -467,16 +542,18 @@ RefLayerComposite::GetFirstChildComposit
+     return nullptr;
+    }
+   return static_cast<LayerComposite*>(mFirstChild->ImplData());
+ }
+ 
+ void
+ RefLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("RefLayerComposite", "RenderLayer");
++
+   ContainerRender(this, mCompositeManager, aClipRect);
+ }
+ 
+ void
+ RefLayerComposite::CleanupResources()
+ {
+ }
+ 
+diff --git a/gfx/layers/composite/ContainerLayerComposite.h b/gfx/layers/composite/ContainerLayerComposite.h
+--- a/gfx/layers/composite/ContainerLayerComposite.h
++++ b/gfx/layers/composite/ContainerLayerComposite.h
+@@ -3,16 +3,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifndef GFX_ContainerLayerComposite_H
+ #define GFX_ContainerLayerComposite_H
+ 
+ #include "Layers.h"                     // for Layer (ptr only), etc
+ #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
++#include "mozilla/RefPtr.h"             // for RefPtr
+ #include "mozilla/layers/LayerManagerComposite.h"
+ 
+ struct nsIntPoint;
+ struct nsIntRect;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+@@ -47,16 +48,19 @@ public:
+   virtual void CleanupResources() MOZ_OVERRIDE;
+ 
+   virtual LayerComposite* AsLayerComposite() MOZ_OVERRIDE { return this; }
+ 
+   // container layers don't use a compositable
+   CompositableHost* GetCompositableHost() MOZ_OVERRIDE { return nullptr; }
+ 
+   virtual const char* Name() const MOZ_OVERRIDE { return "ContainerLayerComposite"; }
++
++private:
++  //RefPtr<CompositingRenderTarget> mNonIntermediateSurface;
+ };
+ 
+ class RefLayerComposite : public RefLayer,
+                           public LayerComposite
+ {
+   template<class ContainerT>
+   friend void ContainerRender(ContainerT* aContainer,
+                               LayerManagerComposite* aManager,
+diff --git a/gfx/layers/composite/ImageLayerComposite.cpp b/gfx/layers/composite/ImageLayerComposite.cpp
+--- a/gfx/layers/composite/ImageLayerComposite.cpp
++++ b/gfx/layers/composite/ImageLayerComposite.cpp
+@@ -20,16 +20,18 @@
+ #include "nsAString.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsDebug.h"                    // for NS_ASSERTION
+ #include "nsPoint.h"                    // for nsIntPoint
+ #include "nsRect.h"                     // for nsIntRect
+ #include "nsString.h"                   // for nsAutoCString
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ 
++#include "GeckoProfiler.h"
++
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ ImageLayerComposite::ImageLayerComposite(LayerManagerComposite* aManager)
+   : ImageLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+@@ -80,16 +82,18 @@ Layer*
+ ImageLayerComposite::GetLayer()
+ {
+   return this;
+ }
+ 
+ void
+ ImageLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("ImageLayerComposite", "RenderLayer");
++
+   if (!mImageHost || !mImageHost->IsAttached()) {
+     return;
+   }
+ 
+ #ifdef MOZ_DUMP_PAINTING
+   if (gfxUtils::sDumpPainting) {
+     RefPtr<gfx::DataSourceSurface> surf = mImageHost->GetAsSurface();
+     WriteSnapshotToDumpFile(this, surf);
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -209,16 +209,20 @@ LayerManagerComposite::EndTransaction(Dr
+   }
+   mIsCompositorReady = false;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+   Log();
+ #endif
+ 
++  //Dump(nullptr,"bignose layer",false);
++
++  printf_stderr("bignose begin frame");
++
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+   if (mRoot && mClonedLayerTreeProperties) {
+     nsIntRegion invalid = mClonedLayerTreeProperties->ComputeDifferences(mRoot, nullptr);
+     mClonedLayerTreeProperties = nullptr;
+@@ -243,16 +247,18 @@ LayerManagerComposite::EndTransaction(Dr
+   }
+ 
+   mCompositor->SetTargetContext(nullptr);
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   Log();
+   MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
++
++  printf_stderr("bignose end frame");
+ }
+ 
+ already_AddRefed<gfxASurface>
+ LayerManagerComposite::CreateOptimalMaskSurface(const IntSize &aSize)
+ {
+   NS_RUNTIMEABORT("Should only be called on the drawing side");
+   return nullptr;
+ }
+@@ -432,89 +438,136 @@ void
+ LayerManagerComposite::Render()
+ {
+   PROFILER_LABEL("LayerManagerComposite", "Render");
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 1");
++
+   if (gfxPlatform::GetPrefLayersDump()) {
+     this->Dump();
+   }
+ 
++  }
++
+   /** Our more efficient but less powerful alter ego, if one is available. */
+   nsRefPtr<Composer2D> composer2D = mCompositor->GetWidget()->GetComposer2D();
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 2");
++
+   if (composer2D && composer2D->TryRender(mRoot, mWorldMatrix)) {
+     if (mFPS) {
+       double fps = mFPS->mCompositionFps.AddFrameAndGetFps(TimeStamp::Now());
+       if (gfxPlatform::GetPrefLayersDrawFPS()) {
+         printf_stderr("HWComposer: FPS is %g\n", fps);
+       }
+     }
+     mCompositor->EndFrameForExternalComposition(mWorldMatrix);
+     return;
+   }
+ 
++  }
++
+   {
+     PROFILER_LABEL("LayerManagerComposite", "PreRender");
+     if (!mCompositor->GetWidget()->PreRender(this)) {
+       return;
+     }
+   }
+ 
+   nsIntRect clipRect;
+   Rect bounds(mRenderBounds.x, mRenderBounds.y, mRenderBounds.width, mRenderBounds.height);
+   Rect actualBounds;
++
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 3");
++
+   if (mRoot->GetClipRect()) {
+     clipRect = *mRoot->GetClipRect();
+     WorldTransformRect(clipRect);
+     Rect rect(clipRect.x, clipRect.y, clipRect.width, clipRect.height);
+     mCompositor->BeginFrame(mInvalidRegion, &rect, mWorldMatrix, bounds, nullptr, &actualBounds);
+   } else {
+     gfx::Rect rect;
+     mCompositor->BeginFrame(mInvalidRegion, nullptr, mWorldMatrix, bounds, &rect, &actualBounds);
+     clipRect = nsIntRect(rect.x, rect.y, rect.width, rect.height);
+   }
+ 
++  }
++
+   // Reset the invalid region now that we've begun compositing.
+   mInvalidRegion.SetEmpty();
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 4");
++
+   if (actualBounds.IsEmpty()) {
+     mCompositor->GetWidget()->PostRender(this);
+     return;
+   }
+ 
++  }
++
++
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 5");
++
+   // Allow widget to render a custom background.
+   mCompositor->GetWidget()->DrawWindowUnderlay(this, nsIntRect(actualBounds.x,
+                                                                actualBounds.y,
+                                                                actualBounds.width,
+                                                                actualBounds.height));
+ 
++  }
++
++
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 6");
++
+   // Render our layers.
+   RootLayer()->RenderLayer(clipRect);
+ 
++  }
++
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 7");
++
+   // Allow widget to render a custom foreground.
+   mCompositor->GetWidget()->DrawWindowOverlay(this, nsIntRect(actualBounds.x,
+                                                               actualBounds.y,
+                                                               actualBounds.width,
+                                                               actualBounds.height));
++  }
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 8");
+   // Debugging
+   RenderDebugOverlay(actualBounds);
+ 
++  }
++
+   {
+     PROFILER_LABEL("LayerManagerComposite", "EndFrame");
+     mCompositor->EndFrame();
+   }
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 9");
+   mCompositor->GetWidget()->PostRender(this);
++  }
+ 
++  {
++    PROFILER_LABEL("LayerManagerComposite", "Render part 10");
+   RecordFrame();
++  }
+ }
+ 
+ void
+ LayerManagerComposite::SetWorldTransform(const gfx::Matrix& aMatrix)
+ {
+   NS_ASSERTION(aMatrix.PreservesAxisAlignedRectangles(),
+                "SetWorldTransform only accepts matrices that satisfy PreservesAxisAlignedRectangles");
+   NS_ASSERTION(!aMatrix.HasNonIntegerScale(),
+diff --git a/gfx/layers/composite/ThebesLayerComposite.cpp b/gfx/layers/composite/ThebesLayerComposite.cpp
+--- a/gfx/layers/composite/ThebesLayerComposite.cpp
++++ b/gfx/layers/composite/ThebesLayerComposite.cpp
+@@ -101,20 +101,21 @@ ThebesLayerComposite::GetRenderState()
+     return LayerRenderState();
+   }
+   return mBuffer->GetRenderState();
+ }
+ 
+ void
+ ThebesLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ {
++  PROFILER_LABEL("ThebesLayerComposite", "RenderLayer");
++
+   if (!mBuffer || !mBuffer->IsAttached()) {
+     return;
+   }
+-  PROFILER_LABEL("ThebesLayerComposite", "RenderLayer");
+ 
+   MOZ_ASSERT(mBuffer->GetCompositor() == mCompositeManager->GetCompositor() &&
+              mBuffer->GetLayer() == this,
+              "buffer is corrupted");
+ 
+   gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
+ 
+ #ifdef MOZ_DUMP_PAINTING
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -43,16 +43,18 @@
+ #include "ScopedGLHelpers.h"
+ #include "GLReadTexImageHelper.h"
+ 
+ #if MOZ_ANDROID_OMTC
+ #include "TexturePoolOGL.h"
+ #endif
+ #include "GeckoProfiler.h"
+ 
++#include "cutils/properties.h"
++
+ #define BUFFER_OFFSET(i) ((char *)nullptr + (i))
+ 
+ namespace mozilla {
+ 
+ using namespace std;
+ using namespace gfx;
+ 
+ namespace layers {
+@@ -534,16 +536,18 @@ CompositorOGL::PrepareViewport(const gfx
+   matrix3d._33 = 0.0f;
+ 
+   mProjMatrix = matrix3d;
+ }
+ 
+ TemporaryRef<CompositingRenderTarget>
+ CompositorOGL::CreateRenderTarget(const IntRect &aRect, SurfaceInitMode aInit)
+ {
++  PROFILER_LABEL("CompositorOGL", "CreateRenderTarget");
++
+   GLuint tex = 0;
+   GLuint fbo = 0;
+   CreateFBOWithTexture(aRect, false, 0, &fbo, &tex);
+   RefPtr<CompositingRenderTargetOGL> surface
+     = new CompositingRenderTargetOGL(this, aRect.TopLeft(), tex, fbo);
+   surface->Initialize(aRect.Size(), mFBOTextureTarget, aInit);
+   return surface.forget();
+ }
+@@ -976,16 +980,19 @@ void ApplyFilterToBoundTexture(GLContext
+ void
+ CompositorOGL::DrawQuadInternal(const Rect& aRect,
+                                 const Rect& aClipRect,
+                                 const EffectChain &aEffectChain,
+                                 Float aOpacity,
+                                 const gfx::Matrix4x4 &aTransform,
+                                 GLuint aDrawMode)
+ {
++  char prop[PROPERTY_VALUE_MAX];
++  property_get("debug.bignose.log",prop,"0");
++
+   PROFILER_LABEL("CompositorOGL", "DrawQuad");
+   MOZ_ASSERT(mFrameInProgress, "frame not started");
+ 
+   Rect clipRect = aClipRect;
+   if (!mTarget) {
+     clipRect.MoveBy(mRenderOffset.x, mRenderOffset.y);
+   }
+   IntRect intClipRect;
+@@ -1058,16 +1065,24 @@ CompositorOGL::DrawQuadInternal(const Re
+   config.SetOpacity(aOpacity != 1.f);
+   ShaderProgramOGL *program = GetShaderProgramFor(config);
+   program->Activate();
+   program->SetProjectionMatrix(mProjMatrix);
+   program->SetLayerQuadRect(aRect);
+   program->SetLayerTransform(aTransform);
+   IntPoint offset = mCurrentRenderTarget->GetOrigin();
+   program->SetRenderOffset(offset.x, offset.y);
++
++  //bignose debug
++  if(atoi(prop)==1){
++    printf_stderr("bignose quad(%f,%f), pos(%d,%d), effect(%d) opacity(%f)",
++        aRect.width,aRect.height,offset.x,offset.y,aEffectChain.mPrimaryEffect->mType,
++        aOpacity);
++  }
++
+   if (aOpacity != 1.f)
+     program->SetLayerOpacity(aOpacity);
+   if (config.mFeatures & ENABLE_TEXTURE_RECT) {
+     TexturedEffect* texturedEffect =
+         static_cast<TexturedEffect*>(aEffectChain.mPrimaryEffect.get());
+     TextureSourceOGL* source = texturedEffect->mTexture->AsSourceOGL();
+     // This is used by IOSurface that use 0,0...w,h coordinate rather then 0,0..1,1.
+     program->SetTexCoordMultiplier(source->GetSize().width, source->GetSize().height);
+@@ -1269,31 +1284,46 @@ CompositorOGL::EndFrame()
+     }
+     RefPtr<DrawTarget> target = gfxPlatform::GetPlatform()->CreateOffscreenContentDrawTarget(IntSize(rect.width, rect.height), SurfaceFormat::B8G8R8A8);
+     CopyToTarget(target, mCurrentRenderTarget->GetTransform());
+ 
+     WriteSnapshotToDumpFile(this, target);
+   }
+ #endif
+ 
++  {
++    PROFILER_LABEL("CompositorOGL", "EndFrame part2");
+   mFrameInProgress = false;
+ 
+   LayerScope::EndFrame(mGLContext);
+ 
+   if (mTarget) {
+     CopyToTarget(mTarget, mCurrentRenderTarget->GetTransform());
+     mGLContext->fBindBuffer(LOCAL_GL_ARRAY_BUFFER, 0);
+     mCurrentRenderTarget = nullptr;
+     return;
+   }
+ 
++  }
++
+   mCurrentRenderTarget = nullptr;
+ 
++  {
++    PROFILER_LABEL("CompositorOGL", "EndFrame part3");
++
++  {
++    PROFILER_LABEL("CompositorOGL", "EndFrame part3-1");
+   mGLContext->SwapBuffers();
++  }
++
++  {
++    PROFILER_LABEL("CompositorOGL", "EndFrame part3-2");
+   mGLContext->fBindBuffer(LOCAL_GL_ARRAY_BUFFER, 0);
++  }
++  }
+ }
+ 
+ void
+ CompositorOGL::EndFrameForExternalComposition(const gfx::Matrix& aTransform)
+ {
+   // This lets us reftest and screenshot content rendered externally
+   if (mTarget) {
+     MakeCurrent();
+diff --git a/gfx/layers/opengl/TextureHostOGL.cpp b/gfx/layers/opengl/TextureHostOGL.cpp
+--- a/gfx/layers/opengl/TextureHostOGL.cpp
++++ b/gfx/layers/opengl/TextureHostOGL.cpp
+@@ -603,24 +603,32 @@ StreamTextureHostOGL::SetCompositor(Comp
+     mTextureSource->SetCompositor(glCompositor);
+   }
+ }
+ 
+ gfx::SurfaceFormat
+ StreamTextureHostOGL::GetFormat() const
+ {
+   MOZ_ASSERT(mTextureSource);
+-  return mTextureSource->GetFormat();
++  if(mTextureSource){
++    return mTextureSource->GetFormat();
++  }
++
++  return SurfaceFormat::UNKNOWN;
+ }
+ 
+ gfx::IntSize
+ StreamTextureHostOGL::GetSize() const
+ {
+   MOZ_ASSERT(mTextureSource);
+-  return mTextureSource->GetSize();
++  if(mTextureSource){
++    return mTextureSource->GetSize();
++  }
++
++  return gfx::IntSize(0, 0);
+ }
+ 
+ TextureImageDeprecatedTextureHostOGL::~TextureImageDeprecatedTextureHostOGL()
+ {
+   MOZ_COUNT_DTOR(TextureImageDeprecatedTextureHostOGL);
+   if (mTexture && mTexture->InUpdate()) {
+     mTexture->EndUpdate();
+   }
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -26,16 +26,18 @@
+ #include <hardware/power.h>
+ #include <suspend/autosuspend.h>
+ 
+ #if ANDROID_VERSION == 17
+ #include "GraphicBufferAlloc.h"
+ #endif
+ #include "BootAnimation.h"
+ 
++#include "GeckoProfiler.h"
++
+ using namespace android;
+ 
+ namespace mozilla {
+ 
+ static GonkDisplayJB* sGonkDisplay = nullptr;
+ 
+ GonkDisplayJB::GonkDisplayJB()
+     : mList(nullptr)
+@@ -218,21 +220,25 @@ GonkDisplayJB::SwapBuffers(EGLDisplay dp
+     eglSwapBuffers(dpy, sur);
+     return Post(mFBSurface->lastHandle, mFBSurface->lastFenceFD);
+ }
+ 
+ bool
+ GonkDisplayJB::Post(buffer_handle_t buf, int fence)
+ {
+     if (!mHwc) {
++        PROFILER_LABEL("GonkDisplayJB::Post", "mFBDevice");
++
+         if (fence >= 0)
+             close(fence);
+         return !mFBDevice->post(mFBDevice, buf);
+     }
+ 
++    PROFILER_LABEL("GonkDisplayJB::Post", "mHwc");
++
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};
+     const hwc_rect_t r = { 0, 0, mWidth, mHeight };
+     displays[HWC_DISPLAY_PRIMARY] = mList;
+     mList->retireFenceFd = -1;
+     mList->numHwLayers = 2;
+     mList->flags = HWC_GEOMETRY_CHANGED;
+     mList->hwLayers[0].compositionType = HWC_BACKGROUND;
+     mList->hwLayers[0].hints = 0;
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+--- a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
++++ b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+@@ -27,16 +27,18 @@
+ #endif
+ 
+ #include <binder/Parcel.h>
+ #include <utils/Log.h>
+ #include <ui/Fence.h>
+ 
+ #include "GonkNativeWindowClientJB.h"
+ 
++#include "GeckoProfiler.h"
++
+ namespace android {
+ 
+ GonkNativeWindowClient::GonkNativeWindowClient(
+         const sp<IGraphicBufferProducer>& bufferProducer)
+     : mBufferProducer(bufferProducer)
+ {
+     // Initialize the ANativeWindow function pointers.
+     ANativeWindow::setSwapInterval  = hook_setSwapInterval;
+@@ -105,16 +107,20 @@ int GonkNativeWindowClient::hook_cancelB
+ int GonkNativeWindowClient::hook_queueBuffer(ANativeWindow* window,
+         ANativeWindowBuffer* buffer, int fenceFd) {
+     GonkNativeWindowClient* c = getSelf(window);
+     return c->queueBuffer(buffer, fenceFd);
+ }
+ 
+ int GonkNativeWindowClient::hook_dequeueBuffer_DEPRECATED(ANativeWindow* window,
+         ANativeWindowBuffer** buffer) {
++
++
++    PROFILER_LABEL("GonkNativeWindowClient", "hook_dequeueBuffer_DEPRECATED");
++
+     GonkNativeWindowClient* c = getSelf(window);
+     ANativeWindowBuffer* buf;
+     int fenceFd = -1;
+     int result = c->dequeueBuffer(&buf, &fenceFd);
+     sp<Fence> fence(new Fence(fenceFd));
+ #if ANDROID_VERSION == 17
+     int waitResult = fence->waitForever(1000, "dequeueBuffer_DEPRECATED");
+ #else
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowJB.cpp b/widget/gonk/nativewindow/GonkNativeWindowJB.cpp
+--- a/widget/gonk/nativewindow/GonkNativeWindowJB.cpp
++++ b/widget/gonk/nativewindow/GonkNativeWindowJB.cpp
+@@ -44,16 +44,18 @@ GonkNativeWindow::~GonkNativeWindow() {
+ 
+ void GonkNativeWindow::setName(const String8& name) {
+     Mutex::Autolock _l(mMutex);
+     mName = name;
+     mBufferQueue->setConsumerName(name);
+ }
+ #if ANDROID_VERSION >= 18
+ status_t GonkNativeWindow::acquireBuffer(BufferItem *item, bool waitForFence) {
++    PROFILER_LABEL("GonkNativeWindowClient", "acquireBuffer");
++
+     status_t err;
+ 
+     if (!item) return BAD_VALUE;
+ 
+     Mutex::Autolock _l(mMutex);
+ 
+     err = acquireBufferLocked(item);
+     if (err != OK) {

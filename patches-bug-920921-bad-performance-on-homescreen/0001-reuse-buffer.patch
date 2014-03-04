@@ -1,0 +1,545 @@
+From eb5dfbaddee6fc639cb68fc5f3fd18ed2dd308fc Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Mon, 14 Oct 2013 17:37:16 +0800
+Subject: [PATCH] reuse buffer
+
+---
+ gfx/2d/Makefile.in                         |    1 +
+ gfx/gl/Makefile.in                         |    2 +
+ gfx/layers/Makefile.in                     |    2 +
+ gfx/layers/client/ContentClient.cpp        |  105 ++++++++++++++++++++++++----
+ gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp |   41 +++++++++++
+ gfx/layers/opengl/CompositorOGL.cpp        |   34 +++++++++
+ gfx/thebes/Makefile.in                     |    1 +
+ 7 files changed, 172 insertions(+), 14 deletions(-)
+
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -57,11 +57,12 @@ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
+ ImageScalingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ BlurSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ endif
+ endif
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS)
++MOZ_OPTIMIZE_FLAGS="-O0"
+ 
+ 
+ MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -2,16 +2,18 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),windows)
+ ifdef MOZ_WEBGL
+ DEFINES += -DMOZ_D3DCOMPILER_DLL=$(MOZ_D3DCOMPILER_DLL)
+ endif
+ endif
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),gonk)
+ LOCAL_INCLUDES = -I$(topsrcdir)/widget/gonk
+ LOCAL_INCLUDES += -I$(ANDROID_SOURCE)/hardware/libhardware/include
+ endif
+ 
+ ifdef MOZ_ANDROID_OMTC
+ DEFINES += -DMOZ_ANDROID_OMTC
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -39,10 +39,12 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PI
+ ifdef _MSC_VER
+ ifeq ($(CPU_ARCH),x86_64)
+ # Workaround compiler bug (Bug 795594)
+ LayerTreeInvalidation.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ Layers.$(OBJ_SUFFIX): CXXFLAGS += -GL-
+ endif
+ endif
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+ 
+ MOZ_OPTIMIZE_FLAGS="-O0"
+diff --git a/gfx/layers/client/ContentClient.cpp b/gfx/layers/client/ContentClient.cpp
+--- a/gfx/layers/client/ContentClient.cpp
++++ b/gfx/layers/client/ContentClient.cpp
+@@ -1,16 +1,17 @@
+ /* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+  * This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "mozilla/layers/ContentClient.h"
+ #include "BasicLayers.h"                // for BasicLayerManager
+ #include "Layers.h"                     // for ThebesLayer, Layer, etc
++#include "GeckoProfiler.h"
+ #include "gfxColor.h"                   // for gfxRGBA
+ #include "gfxContext.h"                 // for gfxContext, etc
+ #include "gfxPlatform.h"                // for gfxPlatform
+ #include "gfxPoint.h"                   // for gfxIntSize, gfxPoint
+ #include "gfxTeeSurface.h"              // for gfxTeeSurface
+ #include "gfxUtils.h"                   // for gfxUtils
+ #include "ipc/ShadowLayers.h"           // for ShadowLayerForwarder
+ #include "mozilla/Util.h"               // for ArrayLength
+@@ -27,22 +28,31 @@
+ #include "nsISupportsImpl.h"            // for gfxContext::Release, etc
+ #include "nsIWidget.h"                  // for nsIWidget
+ #include "prenv.h"                      // for PR_GetEnv
+ #ifdef XP_WIN
+ #include "gfxWindowsPlatform.h"
+ #endif
+ #include "gfx2DGlue.h"
+ 
++#include "cutils/properties.h"
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
++struct CachedTextureInfo
++{
++  RefPtr<DeprecatedTextureClient> cachedTexture;
++  gfx::IntSize cachedTextureSize;
++  ThebesLayerBuffer::ContentType contentType;
++};
++nsTArray<CachedTextureInfo> mCachedTextureList;
++
+ /* static */ TemporaryRef<ContentClient>
+ ContentClient::CreateContentClient(CompositableForwarder* aForwarder)
+ {
+   LayersBackend backend = aForwarder->GetCompositorBackendType();
+   if (backend != LAYERS_OPENGL &&
+       backend != LAYERS_D3D9 &&
+       backend != LAYERS_D3D11 &&
+       backend != LAYERS_BASIC) {
+@@ -197,20 +207,41 @@ ContentClientRemoteBuffer::BuildDeprecat
+     if (mDeprecatedTextureClientOnWhite) {
+       mOldTextures.AppendElement(mDeprecatedTextureClientOnWhite);
+     }
+     DestroyBuffers();
+   }
+ 
+   mContentType = aType;
+   mSize = gfx::IntSize(aRect.width, aRect.height);
+-  mTextureInfo.mTextureFlags = aFlags & ~TEXTURE_DEALLOCATE_CLIENT;
++  mTextureInfo.mTextureFlags = aFlags | TEXTURE_DEALLOCATE_CLIENT;
+ 
+-  if (!CreateAndAllocateDeprecatedTextureClient(mDeprecatedTextureClient)) {
+-    return;
++  //peter query textureclient
++  //a match mContentType/mSize here
++  //b how to bring layermanager here
++  //c consider DEALLOCATE flag or no need to worry
++
++  bool bReused = false;
++  if (mCachedTextureList.Length()) {
++    for (uint32_t i = 0; i < mCachedTextureList.Length(); ++i) {
++      if (mCachedTextureList[i].cachedTextureSize == mSize && mCachedTextureList[i].contentType == mContentType) {
++        mDeprecatedTextureClient = mCachedTextureList[i].cachedTexture;
++        bReused = true;
++        printf_stderr("peter ContentClientRemoteBuffer::BuildDeprecatedTextureClients reuse textureclient %p cnt %d descriptor %p textureflag %p\n",
++          mDeprecatedTextureClient.get(), mCachedTextureList.Length(), mDeprecatedTextureClient->GetDescriptor(), mTextureInfo.mTextureFlags);
++        mCachedTextureList.RemoveElementAt(i);
++        break;
++      }
++    }
++  }
++
++  if (!bReused) {
++    if (!CreateAndAllocateDeprecatedTextureClient(mDeprecatedTextureClient)) {
++      return;
++    }
+   }
+   
+   if (aFlags & BUFFER_COMPONENT_ALPHA) {
+     if (!CreateAndAllocateDeprecatedTextureClient(mDeprecatedTextureClientOnWhite)) {
+       mDeprecatedTextureClient->SetFlags(0);
+       mDeprecatedTextureClient = nullptr;
+       return;
+     }
+@@ -324,40 +355,85 @@ ContentClientRemoteBuffer::SwapBuffers(c
+   mDeprecatedTextureClient->SetAccessMode(DeprecatedTextureClient::ACCESS_READ_WRITE);
+   if (mDeprecatedTextureClientOnWhite) {
+     mDeprecatedTextureClientOnWhite->SetAccessMode(DeprecatedTextureClient::ACCESS_READ_WRITE);
+   }
+ }
+ 
+ ContentClientDoubleBuffered::~ContentClientDoubleBuffered()
+ {
++  //peter save textureclient here
++  //Prefer to add contentRemoteClient deconstructor to cache textureclient
++
++  char prop[PROPERTY_VALUE_MAX];
++  property_get("debug.gfx.cachetexture", prop, "1");
++
+   if (mDeprecatedTextureClient) {
+-    MOZ_ASSERT(mFrontClient);
+-    mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor());
+-    mFrontClient->SetDescriptor(SurfaceDescriptor());
++    printf_stderr("peter ContentClientDoubleBuffered::~ContentClientDoubleBuffered textureclient %p w %d h %d\n",
++      mDeprecatedTextureClient.get(), mSize.width, mSize.height);
++    if (atoi(prop) && ((mSize.height >= 1000 && mSize.width == 768) ||
++      (mSize.width == 320 && mSize.height == 385))) {
++      printf_stderr("peter ContentClientDoubleBuffered::~ContentClientDoubleBuffered save textureclient %p w %d h %d descriptor %p actor %p\n",
++        mDeprecatedTextureClient.get(), mSize.width, mSize.height, mDeprecatedTextureClient->GetDescriptor(), (*(mDeprecatedTextureClient->GetDescriptor())).get_SurfaceDescriptorGralloc().bufferChild());
++      CachedTextureInfo info;
++      info.cachedTexture = mDeprecatedTextureClient;
++      info.cachedTextureSize = mSize;
++      info.contentType = mContentType;
++      mCachedTextureList.AppendElement(info);
++      mDeprecatedTextureClient = nullptr;
++      MOZ_ASSERT(mFrontClient);
++      printf_stderr("peter ContentClientDoubleBuffered::~ContentClientDoubleBuffered save textureclient %p w %d h %d descriptor %p actor %p\n",
++        mFrontClient.get(), mSize.width, mSize.height, mFrontClient->GetDescriptor(), (*(mFrontClient->GetDescriptor())).get_SurfaceDescriptorGralloc().bufferChild());
++      info.cachedTexture = mFrontClient;
++      mCachedTextureList.AppendElement(info);
++      mFrontClient = nullptr;
++    } else {
++      mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor());
++      MOZ_ASSERT(mFrontClient);
++      mFrontClient->SetDescriptor(SurfaceDescriptor());
++    }
++
++
+   }
+   if (mDeprecatedTextureClientOnWhite) {
+     MOZ_ASSERT(mFrontClientOnWhite);
+     mDeprecatedTextureClientOnWhite->SetDescriptor(SurfaceDescriptor());
+     mFrontClientOnWhite->SetDescriptor(SurfaceDescriptor());
+   }
+ }
+ 
+ void
+ ContentClientDoubleBuffered::CreateFrontBufferAndNotify(const nsIntRect& aBufferRect)
+ {
+-  if (!CreateAndAllocateDeprecatedTextureClient(mFrontClient)) {
+-    mDeprecatedTextureClient->SetFlags(0);
+-    mDeprecatedTextureClient = nullptr;
+-    if (mDeprecatedTextureClientOnWhite) {
+-      mDeprecatedTextureClientOnWhite->SetFlags(0);
+-      mDeprecatedTextureClientOnWhite = nullptr;
++    bool bReused = false;
++    if (mCachedTextureList.Length()) {
++      for (uint32_t i = 0; i < mCachedTextureList.Length(); ++i) {
++        if (mSize == mCachedTextureList[i].cachedTextureSize && mCachedTextureList[i].contentType == mContentType) {
++          mFrontClient = mCachedTextureList[i].cachedTexture;
++          bReused = true;
++          printf_stderr("peter ContentClientRemoteBuffer::CreateFrontBufferAndNotify reuse textureclient %p cnt %d descriptor %p\n",
++            mFrontClient.get(), mCachedTextureList.Length(), mFrontClient->GetDescriptor());
++          mCachedTextureList.RemoveElementAt(i);
++          break;
++        }
++      }
+     }
+-    return;
+-  }
++
++    if (!bReused) {
++      if (!CreateAndAllocateDeprecatedTextureClient(mFrontClient)) {
++          mDeprecatedTextureClient->SetFlags(0);
++          mDeprecatedTextureClient = nullptr;
++          if (mDeprecatedTextureClientOnWhite) {
++            mDeprecatedTextureClientOnWhite->SetFlags(0);
++            mDeprecatedTextureClientOnWhite = nullptr;
++          }
++          return;
++        }
++    }
++
+ 
+   if (mTextureInfo.mTextureFlags & TEXTURE_COMPONENT_ALPHA) {
+     if (!CreateAndAllocateDeprecatedTextureClient(mFrontClientOnWhite)) {
+       mDeprecatedTextureClient->SetFlags(0);
+       mDeprecatedTextureClient = nullptr;
+       mDeprecatedTextureClientOnWhite->SetFlags(0);
+       mDeprecatedTextureClientOnWhite = nullptr;
+       mFrontClient->SetFlags(0);
+@@ -531,16 +607,17 @@ ContentClientDoubleBuffered::SyncFrontBu
+   mIsNewBuffer = false;
+   mFrontAndBackBufferDiffer = false;
+ }
+ 
+ void
+ ContentClientDoubleBuffered::UpdateDestinationFrom(const RotatedBuffer& aSource,
+                                                    const nsIntRegion& aUpdateRegion)
+ {
++  PROFILER_LABEL("ContentClientDoubleBuffered", "UpdateDestinationFrom");
+   nsRefPtr<gfxContext> destCtx =
+     GetContextForQuadrantUpdate(aUpdateRegion.GetBounds(), BUFFER_BLACK);
+   destCtx->SetOperator(gfxContext::OPERATOR_SOURCE);
+ 
+   bool isClippingCheap = IsClippingCheap(destCtx, aUpdateRegion);
+   if (isClippingCheap) {
+     gfxUtils::ClipToRegion(destCtx, aUpdateRegion);
+   }
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -230,16 +230,19 @@ GrallocBufferActor::GrallocBufferActor()
+   }
+ }
+ 
+ GrallocBufferActor::~GrallocBufferActor()
+ {
+   if (mAllocBytes > 0) {
+     GrallocReporter::sAmount -= mAllocBytes;
+   }
++
++  //printf_stderr("GrallocBufferActor::~GrallocBufferActor this %p buffer %p size %d\n", this, this->mGraphicBuffer.get(), this->mAllocBytes);
++
+ }
+ 
+ /*static*/ PGrallocBufferParent*
+ GrallocBufferActor::Create(const gfxIntSize& aSize,
+                            const uint32_t& aFormat,
+                            const uint32_t& aUsage,
+                            MaybeMagicGrallocBufferHandle* aOutHandle)
+ {
+@@ -260,16 +263,18 @@ GrallocBufferActor::Create(const gfxIntS
+ 
+   size_t bpp = BytesPerPixelForPixelFormat(format);
+   actor->mAllocBytes = aSize.width * aSize.height * bpp;
+   GrallocReporter::sAmount += actor->mAllocBytes;
+ 
+   actor->mGraphicBuffer = buffer;
+   *aOutHandle = MagicGrallocBufferHandle(buffer);
+ 
++  printf_stderr("GrallocBufferActor::Create %p buffer %p w%d h%d size %d\n", actor, buffer.get(), aSize.width, aSize.height, actor->mAllocBytes);
++
+   return actor;
+ }
+ 
+ // used only for hacky fix for bug 862324
+ void GrallocBufferActor::ActorDestroy(ActorDestroyReason)
+ {
+   for (size_t i = 0; i < mDeprecatedTextureHosts.Length(); i++) {
+     mDeprecatedTextureHosts[i]->ForgetBuffer();
+@@ -337,16 +342,46 @@ ISurfaceAllocator::PlatformDestroyShared
+ 
+   *aSurface = SurfaceDescriptor();
+   return true;
+ }
+ 
+ //-----------------------------------------------------------------------------
+ // Child process
+ 
++class MyTime
++{
++public:
++  MyTime(int nLine = 0, int w = 0, int h = 0) {
++    mLine = nLine;
++    mbegin = systemTime();
++    mwidth = w;
++    mheight = h;
++  };
++
++  int64_t systemTime(void) {
++    struct timespec t;
++    t.tv_sec = t.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (int64_t)(t.tv_sec)*1000000000LL + t.tv_nsec;
++  }
++
++  ~MyTime() {
++    mend = systemTime();
++    printf_stderr("time(%d) takes %0.3fms w %d h %d\n", mLine, (mend-mbegin) / 1000000.0, mwidth, mheight);
++  };
++
++private:
++  int64_t mbegin;
++  int64_t mend;
++  int mLine;
++  int mwidth;
++  int mheight;
++};
++
+ /*static*/ PGrallocBufferChild*
+ GrallocBufferActor::Create()
+ {
+   return new GrallocBufferActor();
+ }
+ 
+ void
+ GrallocBufferActor::InitFromHandle(const MagicGrallocBufferHandle& aHandle)
+@@ -398,16 +433,18 @@ ISurfaceAllocator::PlatformAllocSurfaceD
+     return false;
+   }
+ #endif
+ 
+   // Some GL implementations fail to render gralloc textures with
+   // width < 64.  There's not much point in gralloc'ing buffers that
+   // small anyway, so fall back on shared memory plus a texture
+   // upload.
++
++  MyTime mytime(__LINE__, aSize.width, aSize.height);
+   if (aSize.width < 64) {
+     return false;
+   }
+   PROFILER_LABEL("ShadowLayerForwarder", "PlatformAllocSurfaceDescriptor");
+   // Gralloc buffers are efficiently mappable as gfxImageSurface, so
+   // no need to check |aCaps & MAP_AS_IMAGE_SURFACE|.
+   MaybeMagicGrallocBufferHandle handle;
+   PGrallocBufferChild* gc;
+@@ -445,16 +482,18 @@ ISurfaceAllocator::PlatformAllocSurfaceD
+   }
+ 
+   GrallocBufferActor* gba = static_cast<GrallocBufferActor*>(gc);
+   gba->InitFromHandle(handle.get_MagicGrallocBufferHandle());
+ 
+   *aBuffer = SurfaceDescriptorGralloc(nullptr, gc, aSize,
+                                       /* external */ false,
+                                       defaultRBSwap);
++//  if (gba->mGraphicBuffer.get())
++  //printf_stderr("buffer created %p\n", gba->mGraphicBuffer.get());
+   return true;
+ }
+ 
+ //-----------------------------------------------------------------------------
+ // Both processes
+ 
+ /*static*/ sp<GraphicBuffer>
+ GrallocBufferActor::GetFrom(const SurfaceDescriptorGralloc& aDescriptor)
+@@ -565,23 +604,25 @@ ShadowLayerForwarder::PlatformDestroySha
+   PGrallocBufferChild::Send__delete__(gbp);
+   *aSurface = SurfaceDescriptor();
+   return true;
+ }
+ 
+ /*static*/ bool
+ ShadowLayerForwarder::PlatformCloseDescriptor(const SurfaceDescriptor& aDescriptor)
+ {
++  //MyTime mytime(__LINE__);
+   PROFILER_LABEL("ShadowLayerForwarder", "PlatformCloseDescriptor");
+   if (SurfaceDescriptor::TSurfaceDescriptorGralloc != aDescriptor.type()) {
+     return false;
+   }
+ 
+   sp<GraphicBuffer> buffer = GrallocBufferActor::GetFrom(aDescriptor);
+   DebugOnly<status_t> status = buffer->unlock();
++  //printf_stderr("PlatformCloseDescriptor buffer %p w %d h %d", buffer.get(), buffer->width, buffer->height);
+   // If we fail to unlock, we'll subsequently fail to lock and end up aborting anyway.
+   MOZ_ASSERT(status == OK);
+   return true;
+ }
+ 
+ /*static*/ void
+ ShadowLayerForwarder::PlatformSyncBeforeUpdate()
+ {
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -41,16 +41,19 @@
+ #include "nsString.h"                   // for nsString, nsAutoCString, etc
+ #include "prtypes.h"                    // for PR_INT32_MAX
+ 
+ #if MOZ_ANDROID_OMTC
+ #include "TexturePoolOGL.h"
+ #endif
+ #include "GeckoProfiler.h"
+ 
++#include <cmath>
++#include <numeric>
++#include <vector>
+ 
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
+ using namespace mozilla::gl;
+@@ -152,16 +155,34 @@ AddDigits(GLContext::RectTriangles &aRec
+     aRects.addRect(d.x, d.y, d.x + d.width, d.y + d.height,
+                    t.x, t.y, t.x + t.width, t.y + t.height,
+                    false);
+     divisor /= 10;
+     ++aOffset;
+   }
+ }
+ 
++static unsigned minfps = 60;
++std::vector<unsigned> fpsArray;
++
++void ComputeStandardDeviation(std::vector<unsigned>::const_iterator start,
++                             std::vector<unsigned>::const_iterator end)
++{
++  unsigned num_elements = end - start;
++  unsigned mean = std::accumulate(start, end, 0) / num_elements;
++
++  float variance = 0;
++  for (; start != end; ++start) {
++    variance += (*start - mean) * (*start - mean);
++  }
++  variance = variance / (num_elements - 1);
++  printf_stderr("FPS avgfps %d std %f minfps %d\n", mean, std::sqrt(variance), minfps);
++}
++
++
+ void
+ FPSState::DrawFPS(TimeStamp aNow,
+                   unsigned int aFillRatio,
+                   GLContext* aContext,
+                   ShaderProgramOGL* aProgram)
+ {
+   if (!mTexture) {
+     // Bind the number of textures we need, in this case one.
+@@ -195,16 +216,30 @@ FPSState::DrawFPS(TimeStamp aNow,
+   mVBOs.Reset();
+ 
+   GLint viewport[4];
+   aContext->fGetIntegerv(LOCAL_GL_VIEWPORT, viewport);
+   gfx::IntSize viewportSize(viewport[2], viewport[3]);
+ 
+   unsigned int fps = unsigned(mCompositionFps.AddFrameAndGetFps(aNow));
+   unsigned int txnFps = unsigned(mTransactionFps.GetFpsAt(aNow));
++  
++  if (fps > 0) {
++    fpsArray.push_back(fps);
++
++    if (fps < minfps)
++      minfps = fps;
++
++    if (fpsArray.size() > 300) {
++      ComputeStandardDeviation(fpsArray.begin()+10, fpsArray.end());
++      fpsArray.clear();
++      minfps = 60;
++    }
++  }
++
+ 
+   GLContext::RectTriangles rects;
+   AddDigits(rects, viewportSize, 0, fps);
+   AddDigits(rects, viewportSize, 4, txnFps);
+   AddDigits(rects, viewportSize, 8, aFillRatio);
+ 
+   // Turn necessary features on
+   aContext->fEnable(LOCAL_GL_BLEND);
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -9,16 +9,17 @@ LOCAL_INCLUDES += \
+ ifeq ($(MOZ_WIDGET_TOOLKIT),$(findstring $(MOZ_WIDGET_TOOLKIT),android gtk2 gtk3 gonk qt))
+ DEFINES += -DMOZ_ENABLE_FREETYPE
+ endif
+ 
+ SHARED_LIBRARY_LIBS += \
+ 	../layers/$(LIB_PREFIX)layers.$(LIB_SUFFIX) \
+ 	$(NULL)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),windows)
+ 
+ ifdef MOZ_ENABLE_D3D9_LAYER
+ DEFINES +=	-DMOZ_ENABLE_D3D9_LAYER
+ endif
+ 
+ ifdef MOZ_ENABLE_D3D10_LAYER

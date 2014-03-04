@@ -1,0 +1,64 @@
+From 2a07164fccfd434083539998f77f9cc84f89885d Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Thu, 17 Oct 2013 14:25:31 +0800
+Subject: [PATCH 4/4] enable systrace
+
+---
+ tools/profiler/GeckoProfilerImpl.h |    6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tools/profiler/GeckoProfilerImpl.h b/tools/profiler/GeckoProfilerImpl.h
+--- a/tools/profiler/GeckoProfilerImpl.h
++++ b/tools/profiler/GeckoProfilerImpl.h
+@@ -6,25 +6,28 @@
+ 
+ #ifndef TOOLS_SPS_SAMPLER_H_
+ #define TOOLS_SPS_SAMPLER_H_
+ 
+ #include <stdlib.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <algorithm>
++#include <utils/Trace.h>
+ #include "mozilla/ThreadLocal.h"
+ #include "mozilla/Assertions.h"
+ #include "mozilla/Util.h"
+ #include "nsAlgorithm.h"
+ #include "nscore.h"
+ #include "GeckoProfilerFunc.h"
+ #include "PseudoStack.h"
+ #include "nsISupports.h"
+ 
++#define ATRACE_TAG ATRACE_TAG_GRAPHICS
++
+ /* QT has a #define for the word "slots" and jsfriendapi.h has a struct with
+  * this variable name, causing compilation problems. Alleviate this for now by
+  * removing this #define */
+ #ifdef MOZ_WIDGET_QT
+ #undef slots
+ #endif
+ 
+ // Make sure that we can use std::min here without the Windows headers messing with us.
+@@ -218,18 +221,20 @@ static inline void profiler_tracing(cons
+ 
+ // we want the class and function name but can't easily get that using preprocessor macros
+ // __func__ doesn't have the class name and __PRETTY_FUNCTION__ has the parameters
+ 
+ #define SAMPLER_APPEND_LINE_NUMBER_PASTE(id, line) id ## line
+ #define SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, line) SAMPLER_APPEND_LINE_NUMBER_PASTE(id, line)
+ #define SAMPLER_APPEND_LINE_NUMBER(id) SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, __LINE__)
+ 
+-#define PROFILER_LABEL(name_space, info) mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
+-#define PROFILER_LABEL_PRINTF(name_space, info, ...) mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
++//#define PROFILER_LABEL(name_space, info) mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
++#define PROFILER_LABEL(name_space, info) ATRACE_NAME(name_space "::" info)
++//#define PROFILER_LABEL_PRINTF(name_space, info, ...) mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
++#define PROFILER_LABEL_PRINTF(name_space, info, ...) ATRACE_NAME(name_space "::" info __VA_ARGS__)
+ 
+ #define PROFILER_MARKER(info) mozilla_sampler_add_marker(info)
+ #define PROFILER_MARKER_PAYLOAD(info, payload) mozilla_sampler_add_marker(info, payload)
+ #define PROFILER_MAIN_THREAD_MARKER(info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla_sampler_add_marker(info)
+ 
+ #define PROFILER_MAIN_THREAD_LABEL(name_space, info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
+ #define PROFILER_MAIN_THREAD_LABEL_PRINTF(name_space, info, ...)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
+ 

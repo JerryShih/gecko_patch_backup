@@ -1,0 +1,100 @@
+# HG changeset patch
+# Parent c90e15c4e82a7a127ae7c9213b0705b24b7f68fc
+# User Jerry Shih <hshih@mozilla.com>
+cache temp surface to prevent reallocation
+
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -254,23 +254,30 @@ ContainerRender(ContainerT* aContainer,
+ 
+   Compositor* compositor = aManager->GetCompositor();
+ 
+   RefPtr<CompositingRenderTarget> previousTarget = compositor->GetCurrentRenderTarget();
+ 
+   nsIntRect visibleRect = aContainer->GetEffectiveVisibleRegion().GetBounds();
+ 
+   if (aContainer->mCachedTarget && aContainer->GetInvalidRegion().IsEmpty()) {
++    //printf_stderr("bignose just BlitContainerSurface and return");
++
+     MOZ_ASSERT(aContainer->UseIntermediateSurface());
++    if(aContainer->UseIntermediateSurface()){
++      //printf_stderr("bignose MOZ_ASSERT(aContainer->UseIntermediateSurface()); file:%s line:%d",__FILE__,__LINE__);
++    }
+     BlitContainerSurface(aContainer, aManager, aClipRect,
+                          visibleRect, aContainer->mCachedTarget);
+     DrawScrollableDiagnostics(aContainer, aManager, aClipRect);
+     return;
+   }
+ 
++  //printf_stderr("bignose normal draw");
++
+   aContainer->mSupportsComponentAlphaChildren = false;
+ 
+   bool needsSurface = aContainer->UseIntermediateSurface();
+   if (needsSurface) {
+     SurfaceInitMode mode = INIT_MODE_CLEAR;
+     bool surfaceCopyNeeded = false;
+     gfx::IntRect surfaceRect = gfx::IntRect(visibleRect.x, visibleRect.y,
+                                             visibleRect.width, visibleRect.height);
+@@ -308,16 +315,18 @@ ContainerRender(ContainerT* aContainer,
+     }
+ 
+     sourcePoint -= compositor->GetCurrentRenderTarget()->GetOrigin();
+     if (surfaceCopyNeeded) {
+       surface = compositor->CreateRenderTargetFromSource(surfaceRect, previousTarget, sourcePoint);
+       aContainer->mCachedTarget = nullptr;
+     } else {
+       if (mode == INIT_MODE_NONE && surfaceRect.IsEqualEdges(aContainer->mCachedTargetRect)) {
++        printf_stderr("bignose use cache surface(%d,%d)",surfaceRect.width,surfaceRect.height);
++
+         surface = aContainer->mCachedTarget;
+       } else {
+         surface = compositor->CreateRenderTarget(surfaceRect, mode);
+         aContainer->mCachedTarget = surface;
+         aContainer->mCachedTargetRect = surfaceRect;
+       }
+     }
+ 
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -46,16 +46,18 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++#include "ElapsedTimer.h"
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -573,16 +575,19 @@ CompositorParent::Composite()
+     mLayerManager->BeginTransaction();
+   }
+   CompositeInTransaction();
+ }
+ 
+ void
+ CompositorParent::CompositeInTransaction()
+ {
++  static StatisticFrameElapsedTimer timer("bignose CompositorParent::CompositeInTransaction",15);
++  timer.Update();
++
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
+   PROFILER_LABEL("CompositorParent", "Composite");
+   NS_ABORT_IF_FALSE(CompositorThreadID() == PlatformThread::CurrentId(),
+                     "Composite can only be called on the compositor thread");
+   mCurrentCompositeTask = nullptr;
+ 
+   mLastCompose = TimeStamp::Now();
+ 

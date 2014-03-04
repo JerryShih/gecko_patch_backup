@@ -1,0 +1,220 @@
+# HG changeset patch
+# Parent f4eb29b8113ec71596c603975ae9d7373b6ef8b5
+# User Jerry Shih <hshih@mozilla.com>
+Bug 945082 - lockscreen fade-out animation is still < 60fps. Use 1x layer buffer size for css animation or transition.
+
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -264,16 +264,18 @@ ContainerRender(ContainerT* aContainer,
+         surfaceCopyNeeded = gfxPlatform::ComponentAlphaEnabled();
+         sourcePoint.x += transform._31;
+         sourcePoint.y += transform._32;
+         aContainer->mSupportsComponentAlphaChildren
+           = gfxPlatform::ComponentAlphaEnabled();
+       }
+     }
+ 
++    printf_stderr("bignose need surface, size(%d,%d)",surfaceRect.width,surfaceRect.height);
++
+     sourcePoint -= compositor->GetCurrentRenderTarget()->GetOrigin();
+     if (surfaceCopyNeeded) {
+       surface = compositor->CreateRenderTargetFromSource(surfaceRect, previousTarget, sourcePoint);
+     } else {
+       surface = compositor->CreateRenderTarget(surfaceRect, mode);
+     }
+ 
+     if (!surface) {
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -46,16 +46,18 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++#include "ElapsedTimer.h"
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -585,16 +587,19 @@ CompositorParent::Composite()
+     mLayerManager->BeginTransaction();
+   }
+   CompositeInTransaction();
+ }
+ 
+ void
+ CompositorParent::CompositeInTransaction()
+ {
++  static StatisticFrameElapsedTimer timer("bignose CompositorParent::CompositeInTransaction:",15);
++  timer.Update();
++
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
+   PROFILER_LABEL("CompositorParent", "Composite");
+   NS_ABORT_IF_FALSE(CompositorThreadID() == PlatformThread::CurrentId(),
+                     "Composite can only be called on the compositor thread");
+   mCurrentCompositeTask = nullptr;
+ 
+   mLastCompose = TimeStamp::Now();
+ 
+diff --git a/layout/base/FrameLayerBuilder.cpp b/layout/base/FrameLayerBuilder.cpp
+--- a/layout/base/FrameLayerBuilder.cpp
++++ b/layout/base/FrameLayerBuilder.cpp
+@@ -2985,17 +2985,18 @@ ChooseScaleAndSetTransform(FrameLayerBui
+   gfxSize scale;
+   // XXX Should we do something for 3D transforms?
+   if (canDraw2D) {
+ //     // If the container's transform is animated off main thread, then use the
+     // maximum scale.
+     if (aContainerFrame->GetContent() &&
+         nsLayoutUtils::HasAnimationsForCompositor(
+           aContainerFrame->GetContent(), eCSSProperty_transform)) {
+-      scale = nsLayoutUtils::GetMaximumAnimatedScale(aContainerFrame->GetContent());
++      scale = nsLayoutUtils::ComputeSuitableScaleForAnimation(aContainerFrame->GetContent());
++      printf_stderr("bignose scale(%f,%f)",scale.width,scale.height);
+     } else {
+       // Scale factors are normalized to a power of 2 to reduce the number of resolution changes
+       scale = RoundToFloatPrecision(transform2d.ScaleFactors(true));
+       // For frames with a changing transform that's not just a translation,
+       // round scale factors up to nearest power-of-2 boundary so that we don't
+       // keep having to redraw the content as it scales up and down. Rounding up to nearest
+       // power-of-2 boundary ensures we never scale up, only down --- avoiding
+       // jaggies. It also ensures we never scale down by more than a factor of 2,
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -305,72 +305,76 @@ GetScaleForValue(const nsStyleAnimation:
+   if (!canDraw2D) {
+     return gfxSize();
+   }
+ 
+   return transform2d.ScaleFactors(true);
+ }
+ 
+ gfxSize
+-nsLayoutUtils::GetMaximumAnimatedScale(nsIContent* aContent)
+-{
+-  gfxSize result;
++nsLayoutUtils::ComputeSuitableScaleForAnimation(nsIContent* aContent)
++{
++  gfxSize maxScale;
++
+   ElementAnimations* animations = HasAnimationOrTransitionForCompositor<ElementAnimations>
+     (aContent, nsGkAtoms::animationsProperty, eCSSProperty_transform);
+   if (animations) {
+     for (uint32_t animIdx = animations->mAnimations.Length(); animIdx-- != 0; ) {
+       ElementAnimation& anim = animations->mAnimations[animIdx];
+       for (uint32_t propIdx = anim.mProperties.Length(); propIdx-- != 0; ) {
+         AnimationProperty& prop = anim.mProperties[propIdx];
+         if (prop.mProperty == eCSSProperty_transform) {
+           for (uint32_t segIdx = prop.mSegments.Length(); segIdx-- != 0; ) {
+             AnimationPropertySegment& segment = prop.mSegments[segIdx];
+             gfxSize from = GetScaleForValue(segment.mFromValue,
+                                             aContent->GetPrimaryFrame());
+-            result.width = std::max<float>(result.width, from.width);
+-            result.height = std::max<float>(result.height, from.height);
++            maxScale.width = std::max<float>(maxScale.width, from.width);
++            maxScale.height = std::max<float>(maxScale.height, from.height);
+             gfxSize to = GetScaleForValue(segment.mToValue,
+                                           aContent->GetPrimaryFrame());
+-            result.width = std::max<float>(result.width, to.width);
+-            result.height = std::max<float>(result.height, to.height);
++            maxScale.width = std::max<float>(maxScale.width, to.width);
++            maxScale.height = std::max<float>(maxScale.height, to.height);
+           }
+         }
+       }
+     }
+   }
++
+   ElementTransitions* transitions = HasAnimationOrTransitionForCompositor<ElementTransitions>
+     (aContent, nsGkAtoms::transitionsProperty, eCSSProperty_transform);
+   if (transitions) {
+     for (uint32_t i = 0, i_end = transitions->mPropertyTransitions.Length();
+-         i < i_end; ++i)
+-    {
++         i < i_end; ++i){
+       ElementPropertyTransition &pt = transitions->mPropertyTransitions[i];
+       if (pt.IsRemovedSentinel()) {
+         continue;
+       }
+-
+       if (pt.mProperty == eCSSProperty_transform) {
+         gfxSize start = GetScaleForValue(pt.mStartValue,
+                                          aContent->GetPrimaryFrame());
+-        result.width = std::max<float>(result.width, start.width);
+-        result.height = std::max<float>(result.height, start.height);
++        maxScale.width = std::max<float>(maxScale.width, start.width);
++        maxScale.height = std::max<float>(maxScale.height, start.height);
+         gfxSize end = GetScaleForValue(pt.mEndValue,
+                                        aContent->GetPrimaryFrame());
+-        result.width = std::max<float>(result.width, end.width);
+-        result.height = std::max<float>(result.height, end.height);
++        maxScale.width = std::max<float>(maxScale.width, end.width);
++        maxScale.height = std::max<float>(maxScale.height, end.height);
+       }
+     }
+   }
+ 
+   // If we didn't manage to find a max scale, use no scale rather than 0,0
+-  if (result == gfxSize()) {
++  if (maxScale == gfxSize()) {
+     return gfxSize(1, 1);
+   }
+ 
+-  return result;
++  gfxSize scale;
++  scale.width = (maxScale.width >= 1.0f) ? (1.0f) : (maxScale.width);
++  scale.height = (maxScale.height >= 1.0f) ? (1.0f) : (maxScale.height);
++
++  return scale;
+ }
+ 
+ bool
+ nsLayoutUtils::AreAsyncAnimationsEnabled()
+ {
+   static bool sAreAsyncAnimationsEnabled;
+   static bool sAsyncPrefCached = false;
+ 
+diff --git a/layout/base/nsLayoutUtils.h b/layout/base/nsLayoutUtils.h
+--- a/layout/base/nsLayoutUtils.h
++++ b/layout/base/nsLayoutUtils.h
+@@ -1723,21 +1723,24 @@ public:
+   static bool AreAsyncAnimationsEnabled();
+ 
+   /**
+    * Checks if we should warn about animations that can't be async
+    */
+   static bool IsAnimationLoggingEnabled();
+ 
+   /**
+-   * Find the maximum scale for an element (aContent) over the course of any
+-   * animations and transitions on the element. Will return 1,1 if there is no
+-   * animated scaling.
++   * Find a suitable scale for an element (aContent) over the course of any
++   * animations and transitions on the element.
++   * It will check the maximum and minimum scale during the animations and
++   * transitions and return a suitable value for performance and quality.
++   * Will return scale(1,1) if there is no animated scaling.
++   * Always return positive.
+    */
+-  static gfxSize GetMaximumAnimatedScale(nsIContent* aContent);
++  static gfxSize ComputeSuitableScaleForAnimation(nsIContent* aContent);
+ 
+   /**
+    * Checks if we should forcibly use nearest pixel filtering for the
+    * background.
+    */
+   static bool UseBackgroundNearestFiltering();
+ 
+   /**

@@ -1,0 +1,69 @@
+# HG changeset patch
+# Parent 26aba17472521f1afe003bf726cf3bbd96c2ab43
+# User Jerry Shih <hshih@mozilla.com>
+test translateZ for scale
+
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -255,16 +255,18 @@ ContainerRender(ContainerT* aContainer,
+         sourcePoint.x += transform.x0;
+         sourcePoint.y += transform.y0;
+         aContainer->mSupportsComponentAlphaChildren
+           = gfxPlatform::ComponentAlphaEnabled();
+       }
+     }
+ 
+     sourcePoint -= compositor->GetCurrentRenderTarget()->GetOrigin();
++
++    //printf_stderr("bignose need surface(%d,%d)",surfaceRect.width,surfaceRect.height);
+     if (surfaceCopyNeeded) {
+       surface = compositor->CreateRenderTargetFromSource(surfaceRect, previousTarget, sourcePoint);
+     } else {
+       surface = compositor->CreateRenderTarget(surfaceRect, mode);
+     }
+ 
+     if (!surface) {
+       return;
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -46,16 +46,18 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++#include "ElapsedTimer.h"
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -573,16 +575,19 @@ CompositorParent::Composite()
+     mLayerManager->BeginTransaction();
+   }
+   CompositeInTransaction();
+ }
+ 
+ void
+ CompositorParent::CompositeInTransaction()
+ {
++  static StatisticFrameElapsedTimer timer("bignose CompositorParent::CompositeInTransaction:",15);
++  timer.Update();
++
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
+   PROFILER_LABEL("CompositorParent", "Composite");
+   NS_ABORT_IF_FALSE(CompositorThreadID() == PlatformThread::CurrentId(),
+                     "Composite can only be called on the compositor thread");
+   mCurrentCompositeTask = nullptr;
+ 
+   mLastCompose = TimeStamp::Now();
+ 

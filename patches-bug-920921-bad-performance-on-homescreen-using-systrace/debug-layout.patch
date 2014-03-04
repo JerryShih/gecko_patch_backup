@@ -1,0 +1,369 @@
+# HG changeset patch
+# Parent 881273a6435c3409b0e7baa3891d772b15fc3843
+# User Jerry Shih <hshih@mozilla.com>
+debug layout
+
+diff --git a/layout/base/FrameLayerBuilder.cpp b/layout/base/FrameLayerBuilder.cpp
+--- a/layout/base/FrameLayerBuilder.cpp
++++ b/layout/base/FrameLayerBuilder.cpp
+@@ -21,16 +21,18 @@
+ #include "nsSVGIntegrationUtils.h"
+ #include "ImageContainer.h"
+ 
+ #include "GeckoProfiler.h"
+ #include "mozilla/gfx/Tools.h"
+ 
+ #include <algorithm>
+ 
++#define DEBUG_DISPLAY_ITEM_DATA
++
+ using namespace mozilla::layers;
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ 
+ FrameLayerBuilder::DisplayItemData::DisplayItemData(LayerManagerData* aParent, uint32_t aKey, 
+                                                     Layer* aLayer, LayerState aLayerState, uint32_t aGeneration)
+ 
+@@ -172,17 +174,17 @@ public:
+     MOZ_COUNT_CTOR(LayerManagerData);
+   }
+   ~LayerManagerData() {
+     MOZ_COUNT_DTOR(LayerManagerData);
+   }
+  
+ #ifdef DEBUG_DISPLAY_ITEM_DATA
+   void Dump(const char *aPrefix = "") {
+-    printf("%sLayerManagerData %p\n", aPrefix, this);
++    printf_stderr("%sLayerManagerData %p\n", aPrefix, this);
+     nsAutoCString prefix;
+     prefix += aPrefix;
+     prefix += "  ";
+     mDisplayItems.EnumerateEntries(
+         FrameLayerBuilder::DumpDisplayItemDataForFrame, (void*)prefix.get());
+   }
+ #endif
+ 
+@@ -878,18 +880,18 @@ FrameLayerBuilder::RemoveFrameFromLayerM
+   }
+ 
+ #ifdef DEBUG_DISPLAY_ITEM_DATA
+   if (array->Length()) {
+     LayerManagerData *rootData = array->ElementAt(0)->mParent;
+     while (rootData->mParent) {
+       rootData = rootData->mParent;
+     }
+-    printf("Removing frame %p - dumping display data\n", aFrame);
+-    rootData->Dump();
++    printf_stderr("bignose layout debug:Removing frame %p - dumping display data\n", aFrame);
++    rootData->Dump("bignose layout debug:");
+   }
+ #endif
+ 
+   for (uint32_t i = 0; i < array->Length(); ++i) {
+     DisplayItemData* data = array->ElementAt(i);
+ 
+     ThebesLayer* t = data->mLayer->AsThebesLayer();
+     if (t) {
+@@ -1027,21 +1029,21 @@ FrameLayerBuilder::DumpDisplayItemDataFo
+   if (data->mOptLayer) {
+     str += nsPrintfCString(", OptLayer %p", data->mOptLayer.get());
+   }
+   if (data->mInactiveManager) {
+     str += nsPrintfCString(", InactiveLayerManager %p", data->mInactiveManager.get());
+   }
+   str += "\n";
+ 
+-  printf("%s", str.get());
++  printf_stderr("%s", str.get());
+     
+   if (data->mInactiveManager) {
+     prefix += "  ";
+-    printf("%sDumping inactive layer info:\n", prefix.get());
++    printf_stderr("%sDumping inactive layer info:\n", prefix.get());
+     LayerManagerData* lmd = static_cast<LayerManagerData*>
+       (data->mInactiveManager->GetUserData(&gLayerManagerUserData));
+     lmd->Dump(prefix.get());
+   }
+ #endif
+   return PL_DHASH_NEXT;
+ }
+ 
+diff --git a/layout/base/Makefile.in b/layout/base/Makefile.in
+--- a/layout/base/Makefile.in
++++ b/layout/base/Makefile.in
+@@ -23,8 +23,11 @@ LOCAL_INCLUDES += \
+ 		-I$(srcdir)/../../content/html/content/src \
+ 		-I$(srcdir)/../../content/svg/content/src \
+ 		-I$(topsrcdir)/xpcom/ds \
+ 		-I$(srcdir)/../svg \
+ 		-I$(srcdir)/../mathml \
+ 		$(NULL)
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/layout/base/nsDisplayList.cpp b/layout/base/nsDisplayList.cpp
+--- a/layout/base/nsDisplayList.cpp
++++ b/layout/base/nsDisplayList.cpp
+@@ -571,34 +571,52 @@ void nsDisplayListBuilder::SetDisplayPor
+     mHasDisplayPort = true;
+     mDisplayPort = aDisplayPort;
+ }
+ 
+ void nsDisplayListBuilder::MarkOutOfFlowFrameForDisplay(nsIFrame* aDirtyFrame,
+                                                         nsIFrame* aFrame,
+                                                         const nsRect& aDirtyRect)
+ {
++  PROFILER_LABEL("nsDisplayListBuilder", "MarkOutOfFlowFrameForDisplay");
++
+   nsRect dirty = aDirtyRect - aFrame->GetOffsetTo(aDirtyFrame);
+   nsRect overflowRect = aFrame->GetVisualOverflowRect();
+ 
++  nsIntRect dirtyIntRect=dirty.ToNearestPixels(aFrame->PresContext()->AppUnitsPerCSSPixel());
++  nsIntRect overflowRectIntRect=overflowRect.ToNearestPixels(aFrame->PresContext()->AppUnitsPerCSSPixel());
++  printf_stderr("bignose layout debug: MarkOutOfFlowFrameForDisplay orig dirty(%d,%d,%d,%d)",
++      dirtyIntRect.x,dirtyIntRect.y,dirtyIntRect.width,dirtyIntRect.height);
++  printf_stderr("bignose layout debug: MarkOutOfFlowFrameForDisplay orig overflow(%d,%d,%d,%d)",
++      overflowRectIntRect.x,overflowRectIntRect.y,overflowRectIntRect.width,overflowRectIntRect.height);
++
+   if (aFrame->IsTransformed() &&
+       nsLayoutUtils::HasAnimationsForCompositor(aFrame->GetContent(),
+                                                 eCSSProperty_transform)) {
+    /**
+     * Add a fuzz factor to the overflow rectangle so that elements only just
+     * out of view are pulled into the display list, so they can be
+     * prerendered if necessary.
+     */
+     overflowRect.Inflate(nsPresContext::CSSPixelsToAppUnits(32));
++
++    printf_stderr("bignose layout debug: MarkOutOfFlowFrameForDisplay overflow 32pixel");
+   }
+ 
+   if (mHasDisplayPort && IsFixedFrame(aFrame)) {
+     dirty = overflowRect;
+   }
+ 
++  dirtyIntRect=dirty.ToNearestPixels(aFrame->PresContext()->AppUnitsPerCSSPixel());
++  overflowRectIntRect=overflowRect.ToNearestPixels(aFrame->PresContext()->AppUnitsPerCSSPixel());
++  printf_stderr("bignose layout debug: MarkOutOfFlowFrameForDisplay orig dirty(%d,%d,%d,%d)",
++      dirty.x,dirty.y,dirty.width,dirty.height);
++  printf_stderr("bignose layout debug: MarkOutOfFlowFrameForDisplay ex32pix overflow(%d,%d,%d,%d)",
++          overflowRect.x,overflowRect.y,overflowRect.width,overflowRect.height);
++
+   if (!dirty.IntersectRect(dirty, overflowRect))
+     return;
+   const DisplayItemClip* clip = mClipState.GetClipForContainingBlockDescendants();
+   OutOfFlowDisplayData* data = clip ? new OutOfFlowDisplayData(*clip, dirty)
+     : new OutOfFlowDisplayData(dirty);
+   aFrame->Properties().Set(nsDisplayListBuilder::OutOfFlowDisplayDataProperty(), data);
+ 
+   MarkFrameForDisplay(aFrame, aDirtyFrame);
+@@ -882,17 +900,22 @@ nsDisplayListBuilder::ResetMarkedFramesF
+   }
+   mFramesMarkedForDisplay.SetLength(firstFrameForShell);
+ }
+ 
+ void
+ nsDisplayListBuilder::MarkFramesForDisplayList(nsIFrame* aDirtyFrame,
+                                                const nsFrameList& aFrames,
+                                                const nsRect& aDirtyRect) {
++  printf_stderr("bignose layout debug: call MarkFramesForDisplayList() for frame:%p",aDirtyFrame);
++  printf_stderr("bignose layout debug: dirty_rect(%d,%d,%d,%d)",aDirtyRect.x,aDirtyRect.y,aDirtyRect.width,aDirtyRect.height);
++
+   for (nsFrameList::Enumerator e(aFrames); !e.AtEnd(); e.Next()) {
++    printf_stderr("bignose layout debug: append frame for display :%p",e.get());
++
+     mFramesMarkedForDisplay.AppendElement(e.get());
+     MarkOutOfFlowFrameForDisplay(aDirtyFrame, e.get(), aDirtyRect);
+   }
+ }
+ 
+ void
+ nsDisplayListBuilder::MarkPreserve3DFramesForDisplayList(nsIFrame* aDirtyFrame, const nsRect& aDirtyRect)
+ {
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -1948,16 +1948,48 @@ nsLayoutUtils::GetFramesForArea(nsIFrame
+ }
+ 
+ nsresult
+ nsLayoutUtils::PaintFrame(nsRenderingContext* aRenderingContext, nsIFrame* aFrame,
+                           const nsRegion& aDirtyRegion, nscolor aBackstop,
+                           uint32_t aFlags)
+ {
+   PROFILER_LABEL("nsLayoutUtils","PaintFrame");
++
++  if(aFlags & PAINT_IN_TRANSFORM){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_IN_TRANSFORM");
++  }
++  if(aFlags & PAINT_SYNC_DECODE_IMAGES){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_SYNC_DECODE_IMAGES");
++  }
++  if(aFlags & PAINT_WIDGET_LAYERS){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_WIDGET_LAYERS");
++  }
++  if(aFlags & PAINT_IGNORE_SUPPRESSION){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_IGNORE_SUPPRESSION");
++  }
++  if(aFlags & PAINT_DOCUMENT_RELATIVE){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_DOCUMENT_RELATIVE");
++  }
++  if(aFlags & PAINT_HIDE_CARET){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_HIDE_CARET");
++  }
++  if(aFlags & PAINT_ALL_CONTINUATIONS){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_ALL_CONTINUATIONS");
++  }
++  if(aFlags & PAINT_TO_WINDOW){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_TO_WINDOW");
++  }
++  if(aFlags & PAINT_EXISTING_TRANSACTION){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_EXISTING_TRANSACTION");
++  }
++  if(aFlags & PAINT_NO_COMPOSITE){
++    printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame flag:PAINT_NO_COMPOSITE");
++  }
++
+   if (aFlags & PAINT_WIDGET_LAYERS) {
+     nsView* view = aFrame->GetView();
+     if (!(view && view->GetWidget() && GetDisplayRootFrame(aFrame) == aFrame)) {
+       aFlags &= ~PAINT_WIDGET_LAYERS;
+       NS_ASSERTION(aRenderingContext, "need a rendering context");
+     }
+   }
+ 
+@@ -2025,16 +2057,18 @@ nsLayoutUtils::PaintFrame(nsRenderingCon
+   if ((aFlags & PAINT_WIDGET_LAYERS) &&
+       !willFlushRetainedLayers &&
+       !(aFlags & PAINT_DOCUMENT_RELATIVE) &&
+       rootPresContext->NeedToComputePluginGeometryUpdates()) {
+     builder.SetWillComputePluginGeometry(true);
+   }
+   nsRect canvasArea(nsPoint(0, 0), aFrame->GetSize());
+ 
++  printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame canvasArea1(%d,%d,%d,%d)",canvasArea.x,canvasArea.y,canvasArea.width,canvasArea.height);
++
+   if (ignoreViewportScrolling && rootScrollFrame) {
+     nsIScrollableFrame* rootScrollableFrame =
+       presShell->GetRootScrollFrameAsScrollable();
+     if (aFlags & PAINT_DOCUMENT_RELATIVE) {
+       // Make visibleRegion and aRenderingContext relative to the
+       // scrolled frame instead of the root frame.
+       nsPoint pos = rootScrollableFrame->GetScrollPosition();
+       visibleRegion.MoveBy(-pos);
+@@ -2049,16 +2083,18 @@ nsLayoutUtils::PaintFrame(nsRenderingCon
+     if (canvasFrame) {
+       // Use UnionRect here to ensure that areas where the scrollbars
+       // were are still filled with the background color.
+       canvasArea.UnionRect(canvasArea,
+         canvasFrame->CanvasArea() + builder.ToReferenceFrame(canvasFrame));
+     }
+   }
+ 
++  printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame canvasArea2(%d,%d,%d,%d)",canvasArea.x,canvasArea.y,canvasArea.width,canvasArea.height);
++
+   nsRect dirtyRect = visibleRegion.GetBounds();
+   builder.EnterPresShell(aFrame, dirtyRect);
+   {
+     PROFILER_LABEL("nsLayoutUtils","PaintFrame::BuildDisplayList");
+     aFrame->BuildDisplayListForStackingContext(&builder, dirtyRect, &list);
+   }
+   const bool paintAllContinuations = aFlags & PAINT_ALL_CONTINUATIONS;
+   NS_ASSERTION(!paintAllContinuations || !aFrame->GetPrevContinuation(),
+@@ -2209,16 +2245,19 @@ nsLayoutUtils::PaintFrame(nsRenderingCon
+       !willFlushRetainedLayers &&
+       !(aFlags & PAINT_DOCUMENT_RELATIVE)) {
+     nsIWidget *widget = aFrame->GetNearestWidget();
+     if (widget) {
+       nsRegion excludedRegion = builder.GetExcludedGlassRegion();
+       excludedRegion.Sub(excludedRegion, visibleRegion);
+       nsIntRegion windowRegion(excludedRegion.ToNearestPixels(presContext->AppUnitsPerDevPixel()));
+       widget->UpdateOpaqueRegion(windowRegion);
++
++      nsIntRect rect=windowRegion.GetBounds();
++      printf_stderr("bignose layout debug: nsLayoutUtils::PaintFrame windowRegion(%d,%d,%d,%d)",rect.x,rect.y,rect.width,rect.height);
+     }
+   }
+ 
+   if (builder.WillComputePluginGeometry()) {
+     rootPresContext->ComputePluginGeometryUpdates(aFrame, &builder, &list);
+   }
+ 
+   // Flush the list so we don't trigger the IsEmpty-on-destruction assertion
+diff --git a/layout/base/nsPresShell.cpp b/layout/base/nsPresShell.cpp
+--- a/layout/base/nsPresShell.cpp
++++ b/layout/base/nsPresShell.cpp
+@@ -5580,39 +5580,50 @@ PresShell::Paint(nsView*        aViewToP
+   // B2G relies on first paint to configure the viewport and
+   // we only want to do that when we have real content to paint.
+   // See Bug 798245
+   if (mIsFirstPaint && !mPaintingSuppressed) {
+     layerManager->SetIsFirstPaint();
+     mIsFirstPaint = false;
+   }
+ 
++  printf_stderr("bignose PresShell debug: PresShell::Paint frame address:%p, isRetainingManager:%d",frame,(int)isRetainingManager);
++
+   if (frame && isRetainingManager) {
+     // Try to do an empty transaction, if the frame tree does not
+     // need to be updated. Do not try to do an empty transaction on
+     // a non-retained layer manager (like the BasicLayerManager that
+     // draws the window title bar on Mac), because a) it won't work
+     // and b) below we don't want to clear NS_FRAME_UPDATE_LAYER_TREE,
+     // that will cause us to forget to update the real layer manager!
+     if (!(aFlags & PAINT_LAYERS)) {
+       layerManager->BeginTransaction();
+       if (layerManager->EndEmptyTransaction()) {
++        printf_stderr("bignose PresShell debug: layerManager->EndEmptyTransaction()==true");
++
+         return;
+       }
+       NS_WARNING("Must complete empty transaction when compositing!");
+     } else {
+       layerManager->BeginTransaction();
+     }
+ 
+     if (!(frame->GetStateBits() & NS_FRAME_UPDATE_LAYER_TREE)) {
++      bool test_MayHavePaintEventListenerInSubDocument;
++
+       NotifySubDocInvalidationFunc computeInvalidFunc =
+-        presContext->MayHavePaintEventListenerInSubDocument() ? nsPresContext::NotifySubDocInvalidation : 0;
++          (test_MayHavePaintEventListenerInSubDocument=presContext->MayHavePaintEventListenerInSubDocument()) ? nsPresContext::NotifySubDocInvalidation : 0;
++
++      printf_stderr("bignose PresShell debug: MayHavePaintEventListenerInSubDocument==%d",(int)test_MayHavePaintEventListenerInSubDocument);
++
+       bool computeInvalidRect = computeInvalidFunc ||
+                                 (layerManager->GetBackendType() == LAYERS_BASIC);
+ 
++      printf_stderr("bignose PresShell debug: computeInvalidRect==%d",(int)computeInvalidRect);
++
+       nsAutoPtr<LayerProperties> props(computeInvalidRect ? 
+                                          LayerProperties::CloneFrom(layerManager->GetRoot()) : 
+                                          nullptr);
+ 
+       if (layerManager->EndEmptyTransaction((aFlags & PAINT_COMPOSITE) ?
+             LayerManager::END_DEFAULT : LayerManager::END_NO_COMPOSITE)) {
+         nsIntRegion invalid;
+         if (props) {
+@@ -5651,16 +5662,18 @@ PresShell::Paint(nsView*        aViewToP
+   nscolor bgcolor = ComputeBackstopColor(aViewToPaint);
+   uint32_t flags = nsLayoutUtils::PAINT_WIDGET_LAYERS | nsLayoutUtils::PAINT_EXISTING_TRANSACTION;
+   if (!(aFlags & PAINT_COMPOSITE)) {
+     flags |= nsLayoutUtils::PAINT_NO_COMPOSITE;
+   }
+ 
+   if (frame) {
+     // We can paint directly into the widget using its layer manager.
++    printf_stderr("bignose PresShell debug: call nsLayoutUtils::PaintFrame()");
++
+     nsLayoutUtils::PaintFrame(nullptr, frame, aDirtyRegion, bgcolor, flags);
+     return;
+   }
+ 
+   nsRefPtr<ColorLayer> root = layerManager->CreateColorLayer();
+   if (root) {
+     nsPresContext* pc = GetPresContext();
+     nsIntRect bounds =

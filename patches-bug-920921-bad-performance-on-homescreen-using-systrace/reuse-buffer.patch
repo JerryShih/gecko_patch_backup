@@ -1,0 +1,276 @@
+From 339eb7c52022f847e11128e7d2c1f8da7f1963f9 Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Thu, 17 Oct 2013 12:13:02 +0800
+Subject: [PATCH] reuse buffer
+
+---
+ gfx/layers/client/ContentClient.cpp        |  126 +++++++++++++++++++++++++---
+ gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp |   30 +++++++
+ gfx/layers/ipc/ShadowLayers.cpp            |    6 ++
+ gfx/layers/ipc/ShadowLayers.h              |    6 ++
+ 4 files changed, 156 insertions(+), 12 deletions(-)
+
+diff --git a/gfx/layers/client/ContentClient.cpp b/gfx/layers/client/ContentClient.cpp
+index 42194fe..eb01980 100644
+--- a/gfx/layers/client/ContentClient.cpp
++++ b/gfx/layers/client/ContentClient.cpp
+@@ -31,6 +31,8 @@
+ #include "gfxWindowsPlatform.h"
+ #endif
+ #include "gfx2DGlue.h"
++#include "GeckoProfiler.h"
++#include "cutils/properties.h"
+ 
+ namespace mozilla {
+ 
+@@ -38,6 +40,83 @@ using namespace gfx;
+ 
+ namespace layers {
+ 
++//TODO Move gralloc recycle to layermanager
++struct CachedTextureInfo
++{
++  RefPtr<DeprecatedTextureClient> cachedTexture;
++  gfx::IntSize cachedTextureSize;
++  ThebesLayerBuffer::ContentType contentType;
++};
++
++nsTArray<CachedTextureInfo> sCachedTextureList;
++
++//gralloc logger
++//Need to sort by count and most recently data
++//auto purge if no hit for a while
++
++struct grallocinfo {
++  gfx::IntSize size;
++  ThebesLayerBuffer::ContentType type;
++  uint32_t count;
++  //need interval data?
++};
++
++
++static void dumpGrallocLoggerData() {
++
++}
++
++static bool CacheTextureClient(gfx::IntSize size, gfxContentType type, RefPtr<DeprecatedTextureClient>& aClient)
++{
++  //Cache this textureclient based on the decision of textureclient logger
++
++  bool bRet =false;
++  char prop[PROPERTY_VALUE_MAX];
++  property_get("debug.gfx.cachetexture", prop, "0");
++
++  //start to cache current textureclient
++  if (aClient) {
++    //TODO remove size hard code later
++    if (atoi(prop) && ((size.height >= 1000 && size.width == 768) ||
++        (size.width == 320 && size.height == 385))) {
++        printf_stderr("peter RecycleTextureCliente client %p w %d h %d descriptor %p actor %p\n",
++          aClient.get(), size.width, size.height, aClient->GetDescriptor(),
++          (*(aClient->GetDescriptor())).get_SurfaceDescriptorGralloc().bufferChild());
++        CachedTextureInfo info;
++        info.cachedTexture = aClient;
++        info.cachedTextureSize = size;
++        info.contentType = type;
++        sCachedTextureList.AppendElement(info);
++        bRet = true;
++    }
++  }
++
++  return bRet;
++}
++
++static RefPtr<DeprecatedTextureClient> RecycleTextureClient(gfx::IntSize size, gfxContentType type)
++{
++  RefPtr<DeprecatedTextureClient> client = nullptr;
++
++  if (sCachedTextureList.Length()) {
++    for (uint32_t i = 0; i < sCachedTextureList.Length(); ++i) {
++      if (sCachedTextureList[i].cachedTextureSize == size && sCachedTextureList[i].contentType == type) {
++        client = sCachedTextureList[i].cachedTexture;
++        printf_stderr("peter RecycleTextureClient textureclient %p cnt %d descriptor %p\n",
++          client.get(), sCachedTextureList.Length(), client->GetDescriptor());
++        sCachedTextureList.RemoveElementAt(i);
++        break;
++      }
++    }
++  }
++
++  if (client) {
++
++  }
++
++  return client;
++}
++
+ /* static */ TemporaryRef<ContentClient>
+ ContentClient::CreateContentClient(CompositableForwarder* aForwarder)
+ {
+@@ -202,10 +281,15 @@ ContentClientRemoteBuffer::BuildDeprecatedTextureClients(ContentType aType,
+ 
+   mContentType = aType;
+   mSize = gfx::IntSize(aRect.width, aRect.height);
+-  mTextureInfo.mTextureFlags = aFlags & ~TEXTURE_DEALLOCATE_CLIENT;
++  mTextureInfo.mTextureFlags = aFlags | TEXTURE_DEALLOCATE_CLIENT;
+ 
+-  if (!CreateAndAllocateDeprecatedTextureClient(mDeprecatedTextureClient)) {
+-    return;
++  mDeprecatedTextureClient = RecycleTextureClient(mSize, mContentType);
++  if (!mDeprecatedTextureClient) {
++    if (!CreateAndAllocateDeprecatedTextureClient(mDeprecatedTextureClient)) {
++      return;
++    }
++  } else {
++    ShadowLayerForwarder::ClearDescriptor(*mDeprecatedTextureClient->GetDescriptor());
+   }
+   
+   if (aFlags & BUFFER_COMPONENT_ALPHA) {
+@@ -344,11 +428,24 @@ ContentClientRemoteBuffer::OnActorDestroy()
+ 
+ ContentClientDoubleBuffered::~ContentClientDoubleBuffered()
+ {
++  //peter save textureclient here
++  //Prefer to add contentRemoteClient deconstructor to cache textureclient
++
+   if (mDeprecatedTextureClient) {
++    if (CacheTextureClient(mSize, mContentType, mDeprecatedTextureClient)) {
++      mDeprecatedTextureClient = nullptr;
++    } else {
++      mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor());
++    }
++
+     MOZ_ASSERT(mFrontClient);
+-    mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor());
+-    mFrontClient->SetDescriptor(SurfaceDescriptor());
++    if (CacheTextureClient(mSize, mContentType, mFrontClient)) {
++      mFrontClient = nullptr;
++    } else {
++      mFrontClient->SetDescriptor(SurfaceDescriptor());
++    }
+   }
++
+   if (mDeprecatedTextureClientOnWhite) {
+     MOZ_ASSERT(mFrontClientOnWhite);
+     mDeprecatedTextureClientOnWhite->SetDescriptor(SurfaceDescriptor());
+@@ -359,16 +456,20 @@ ContentClientDoubleBuffered::~ContentClientDoubleBuffered()
+ void
+ ContentClientDoubleBuffered::CreateFrontBufferAndNotify(const nsIntRect& aBufferRect)
+ {
+-  if (!CreateAndAllocateDeprecatedTextureClient(mFrontClient)) {
+-    mDeprecatedTextureClient->SetFlags(0);
+-    mDeprecatedTextureClient = nullptr;
+-    if (mDeprecatedTextureClientOnWhite) {
+-      mDeprecatedTextureClientOnWhite->SetFlags(0);
+-      mDeprecatedTextureClientOnWhite = nullptr;
++  mFrontClient = RecycleTextureClient(mSize, mContentType);
++  if (!mFrontClient) {
++    if (!CreateAndAllocateDeprecatedTextureClient(mFrontClient)) {
++      mDeprecatedTextureClient->SetFlags(0);
++      mDeprecatedTextureClient = nullptr;
++      if (mDeprecatedTextureClientOnWhite) {
++        mDeprecatedTextureClientOnWhite->SetFlags(0);
++        mDeprecatedTextureClientOnWhite = nullptr;
++      }
++      return;
+     }
+-    return;
+   }
+ 
++
+   if (mTextureInfo.mTextureFlags & TEXTURE_COMPONENT_ALPHA) {
+     if (!CreateAndAllocateDeprecatedTextureClient(mFrontClientOnWhite)) {
+       mDeprecatedTextureClient->SetFlags(0);
+@@ -563,6 +664,7 @@ void
+ ContentClientDoubleBuffered::UpdateDestinationFrom(const RotatedBuffer& aSource,
+                                                    const nsIntRegion& aUpdateRegion)
+ {
++  PROFILER_LABEL("ContentClientDoubleBuffered", "UpdateDestinationFrom");
+   nsRefPtr<gfxContext> destCtx =
+     GetContextForQuadrantUpdate(aUpdateRegion.GetBounds(), BUFFER_BLACK);
+   destCtx->SetOperator(gfxContext::OPERATOR_SOURCE);
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+index 750c213..d532aea 100644
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -582,6 +582,36 @@ ShadowLayerForwarder::PlatformCloseDescriptor(const SurfaceDescriptor& aDescript
+   return true;
+ }
+ 
++/*static*/ bool
++ShadowLayerForwarder::PlatformClearDescriptor(const SurfaceDescriptor& aDescriptor)
++{
++  printf_stderr("peter PlatformClearDescriptor start\n");
++  PROFILER_LABEL("ShadowLayerForwarder", "PlatformClearDescriptor");
++  if (SurfaceDescriptor::TSurfaceDescriptorGralloc != aDescriptor.type()) {
++    return false;
++  }
++
++  sp<GraphicBuffer> buffer =
++    GrallocBufferActor::GetFrom(aDescriptor.get_SurfaceDescriptorGralloc());
++  uint32_t usage = GRALLOC_USAGE_SW_WRITE_OFTEN;
++
++  void *vaddr;
++  DebugOnly<status_t> status = buffer->lock(usage, &vaddr);
++  // If we fail to lock, we'll just end up aborting anyway.
++  MOZ_ASSERT(status == OK);
++
++  uint32_t bufferSizeInBytes = buffer->getStride() *
++    buffer->getHeight() * BytesPerPixelForPixelFormat(buffer->getPixelFormat());
++
++  memset(vaddr, 0, bufferSizeInBytes);
++
++  status = buffer->unlock();
++  // If we fail to unlock, we'll subsequently fail to lock and end up aborting anyway.
++  MOZ_ASSERT(status == OK);
++  printf_stderr("peter PlatformClearDescriptor end\n");
++  return true;
++}
++
+ /*static*/ void
+ ShadowLayerForwarder::PlatformSyncBeforeUpdate()
+ {
+diff --git a/gfx/layers/ipc/ShadowLayers.cpp b/gfx/layers/ipc/ShadowLayers.cpp
+index 81b1b66..1daf5a7 100644
+--- a/gfx/layers/ipc/ShadowLayers.cpp
++++ b/gfx/layers/ipc/ShadowLayers.cpp
+@@ -715,6 +715,12 @@ ShadowLayerForwarder::CloseDescriptor(const SurfaceDescriptor& aDescriptor)
+   // There's no "close" needed for Shmem surfaces.
+ }
+ 
++/*static*/ bool
++ShadowLayerForwarder::ClearDescriptor(const SurfaceDescriptor& aDescriptor)
++{
++  return PlatformClearDescriptor(aDescriptor);
++}
++
+ PLayerChild*
+ ShadowLayerForwarder::ConstructShadowFor(ShadowableLayer* aLayer)
+ {
+diff --git a/gfx/layers/ipc/ShadowLayers.h b/gfx/layers/ipc/ShadowLayers.h
+index f088d0d4..f64d198 100644
+--- a/gfx/layers/ipc/ShadowLayers.h
++++ b/gfx/layers/ipc/ShadowLayers.h
+@@ -410,6 +410,9 @@ public:
+   static already_AddRefed<gfxASurface>
+   OpenDescriptor(OpenMode aMode, const SurfaceDescriptor& aSurface);
+ 
++  static bool
++  ClearDescriptor(const SurfaceDescriptor& aDescriptor);
++
+ protected:
+   ShadowLayerForwarder();
+ 
+@@ -484,6 +487,9 @@ private:
+   static bool
+   PlatformCloseDescriptor(const SurfaceDescriptor& aDescriptor);
+ 
++  static bool
++  PlatformClearDescriptor(const SurfaceDescriptor& aDescriptor);
++
+   bool PlatformDestroySharedSurface(SurfaceDescriptor* aSurface);
+ 
+   Transaction* mTxn;
+-- 
+1.7.9.5
+

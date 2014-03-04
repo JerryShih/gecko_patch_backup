@@ -1,0 +1,428 @@
+commit 65ebe6ba57337219e378937dde9c1a2d76c7e455
+Author: Benoit Girard <b56girard@gmail.com>
+Date:   Fri Nov 22 05:34:18 2013 +0000
+
+    css p1
+
+diff --git a/layout/base/ActiveLayerTracker.cpp b/layout/base/ActiveLayerTracker.cpp
+index 14d2533..aceacfa 100644
+--- a/layout/base/ActiveLayerTracker.cpp
++++ b/layout/base/ActiveLayerTracker.cpp
+@@ -206,6 +206,12 @@ ActiveLayerTracker::NotifyInlineStyleRuleModified(nsIFrame* aFrame,
+ /* static */ bool
+ ActiveLayerTracker::IsStyleAnimated(nsIFrame* aFrame, nsCSSProperty aProperty)
+ {
++  // TODO: Add some abuse restrictions
++  if (aFrame->StyleDisplay()->mWillAnimate == NS_STYLE_WILL_ANIMATE_TRANSFORM &&
++      aProperty == eCSSProperty_transform) {
++    return true;
++  }
++
+   LayerActivity* layerActivity = GetLayerActivity(aFrame);
+   if (layerActivity) {
+     if (layerActivity->RestyleCountForProperty(aProperty) >= 2) {
+diff --git a/layout/base/nsDisplayList.cpp b/layout/base/nsDisplayList.cpp
+index 21e657f..900a3f2 100644
+--- a/layout/base/nsDisplayList.cpp
++++ b/layout/base/nsDisplayList.cpp
+@@ -3276,9 +3276,10 @@ bool nsDisplayBlendContainer::TryMerge(nsDisplayListBuilder* aBuilder, nsDisplay
+ 
+ nsDisplayOwnLayer::nsDisplayOwnLayer(nsDisplayListBuilder* aBuilder,
+                                      nsIFrame* aFrame, nsDisplayList* aList,
+-                                     uint32_t aFlags)
++                                     uint32_t aFlags, LayerState layerState)
+     : nsDisplayWrapList(aBuilder, aFrame, aList)
+-    , mFlags(aFlags) {
++    , mFlags(aFlags)
++    , mLayerState(layerState) {
+   MOZ_COUNT_CTOR(nsDisplayOwnLayer);
+ }
+ 
+diff --git a/layout/base/nsDisplayList.h b/layout/base/nsDisplayList.h
+index 927f6a1..375b819 100644
+--- a/layout/base/nsDisplayList.h
++++ b/layout/base/nsDisplayList.h
+@@ -2586,7 +2586,8 @@ public:
+    * for this layer are send to our nsPresContext.
+    */
+   nsDisplayOwnLayer(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
+-                    nsDisplayList* aList, uint32_t aFlags = 0);
++                    nsDisplayList* aList, uint32_t aFlags = 0,
++                    LayerState layerState = mozilla::LAYER_ACTIVE_FORCE);
+ #ifdef NS_BUILD_REFCNT_LOGGING
+   virtual ~nsDisplayOwnLayer();
+ #endif
+@@ -2598,7 +2599,7 @@ public:
+                                    LayerManager* aManager,
+                                    const ContainerParameters& aParameters) MOZ_OVERRIDE
+   {
+-    return mozilla::LAYER_ACTIVE_FORCE;
++    return mLayerState;
+   }
+   virtual bool TryMerge(nsDisplayListBuilder* aBuilder, nsDisplayItem* aItem) MOZ_OVERRIDE
+   {
+@@ -2608,6 +2609,7 @@ public:
+   NS_DISPLAY_DECL_NAME("OwnLayer", TYPE_OWN_LAYER)
+ private:
+   uint32_t mFlags;
++  LayerState mLayerState;
+ };
+ 
+ /**
+diff --git a/layout/generic/nsFrame.cpp b/layout/generic/nsFrame.cpp
+index f1ed8e8..2a0f252 100644
+--- a/layout/generic/nsFrame.cpp
++++ b/layout/generic/nsFrame.cpp
+@@ -1971,6 +1971,17 @@ nsIFrame::BuildDisplayListForStackingContext(nsDisplayListBuilder* aBuilder,
+     resultList.AppendNewToTop(
+         new (aBuilder) nsDisplayOpacity(aBuilder, this, &resultList));
+   }
++
++  /*
++  bool useActiveLayer = disp->mWillAnimate != NS_STYLE_WILL_ANIMATE_DEFAULT;
++  if (useActiveLayer) {
++    resultList.AppendNewToTop(
++        new (aBuilder) nsDisplayOwnLayer(aBuilder, this,
++                                         &resultList, 0,
++                                         mozilla::LAYER_ACTIVE));
++  }
++  */
++
+   /* If we have sticky positioning, wrap it in a sticky position item.
+    */
+   if (useStickyPosition) {
+@@ -2155,11 +2166,15 @@ nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder*   aBuilder,
+     || disp->mMixBlendMode != NS_STYLE_BLEND_NORMAL
+     || nsSVGIntegrationUtils::UsingEffectsForFrame(child);
+ 
++  // This logic should be extended to work as a hint instead.
++  bool suggestActiveLayer = false && disp->mWillAnimate != NS_STYLE_WILL_ANIMATE_DEFAULT;
++
+   bool isPositioned = disp->IsPositioned(child);
+   bool isStackingContext =
+     (isPositioned && (disp->mPosition == NS_STYLE_POSITION_STICKY ||
+                       pos->mZIndex.GetUnit() == eStyleUnit_Integer)) ||
+-     isVisuallyAtomic || (aFlags & DISPLAY_CHILD_FORCE_STACKING_CONTEXT);
++     isVisuallyAtomic || (aFlags & DISPLAY_CHILD_FORCE_STACKING_CONTEXT) ||
++     suggestActiveLayer;
+ 
+   if (isVisuallyAtomic || isPositioned || (!isSVG && disp->IsFloating(child)) ||
+       ((disp->mClipFlags & NS_STYLE_CLIP_RECT) &&
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+index bb25c12..5fec7c5 100644
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -1802,6 +1802,11 @@ bool ScrollFrameHelper::IsAlwaysActive() const
+     return true;
+   }
+ 
++  const nsStyleDisplay* disp = mOuter->StyleDisplay();
++  if (disp && disp->mWillAnimate == NS_STYLE_WILL_ANIMATE_SCROLL) {
++    return true;
++  }
++
+   // Unless this is the root scrollframe for a non-chrome document
+   // which is the direct child of a chrome document, we default to not
+   // being "active".
+diff --git a/layout/style/nsCSSKeywordList.h b/layout/style/nsCSSKeywordList.h
+index 62b8bdb..34e4260 100644
+--- a/layout/style/nsCSSKeywordList.h
++++ b/layout/style/nsCSSKeywordList.h
+@@ -523,6 +523,7 @@ CSS_KEY(toggle, toggle)
+ CSS_KEY(top, top)
+ CSS_KEY(top-outside, top_outside)
+ CSS_KEY(traditional, traditional)
++CSS_KEY(transform, transform)
+ CSS_KEY(translate, translate)
+ CSS_KEY(translate3d, translate3d)
+ CSS_KEY(translatex, translatex)
+diff --git a/layout/style/nsCSSParser.cpp b/layout/style/nsCSSParser.cpp
+index 1ad1b34..74d8b42 100644
+--- a/layout/style/nsCSSParser.cpp
++++ b/layout/style/nsCSSParser.cpp
+@@ -501,6 +501,7 @@ protected:
+   bool ParseMargin();
+   bool ParseMarks(nsCSSValue& aValue);
+   bool ParseTransform(bool aIsPrefixed);
++  bool ParseWillAnimate();
+   bool ParseOutline();
+   bool ParseOverflow();
+   bool ParsePadding();
+@@ -6591,6 +6592,8 @@ CSSParserImpl::ParsePropertyByFunction(nsCSSProperty aPropID)
+     return ParseTextDecoration();
+   case eCSSProperty_transform:
+     return ParseTransform(false);
++  case eCSSProperty_will_animate:
++    return ParseWillAnimate();
+   case eCSSProperty__moz_transform:
+     return ParseTransform(true);
+   case eCSSProperty_transform_origin:
+@@ -10156,6 +10159,54 @@ static bool GetFunctionParseInformation(nsCSSKeyword aToken,
+   return true;
+ }
+ 
++bool CSSParserImpl::ParseWillAnimate()
++{
++  uint8_t value = 0;
++  int values = 0;
++  for (;;) {
++
++    if (!GetToken(true)) {
++      return false;
++    }
++
++    if (mToken.mType != eCSSToken_Ident) {
++      UngetToken();
++      return false;
++    }
++
++    nsCSSKeyword keyword = nsCSSKeywords::LookupKeyword(mToken.mIdent);
++
++    // 'default' must be alone
++    if (keyword == eCSSKeyword_default) {
++      if (values != 0 || !CheckEndProperty()) {
++        return false;
++      } else {
++        value = NS_STYLE_WILL_ANIMATE_DEFAULT;
++        break;
++      }
++    }
++
++    if (keyword == eCSSKeyword_transform) {
++      value |= NS_STYLE_WILL_ANIMATE_TRANSFORM;
++    } else if (keyword == eCSSKeyword_scroll) {
++      value |= NS_STYLE_WILL_ANIMATE_SCROLL;
++    } else {
++      return false;
++    }
++
++    if (CheckEndProperty()) {
++      break;
++    }
++    values++;
++  }
++
++  nsCSSValue cssValue;
++  cssValue.SetIntValue(value, eCSSUnit_Enumerated);
++  AppendValue(eCSSProperty_will_animate, cssValue);
++
++  return true;
++}
++
+ /* Reads a single transform function from the tokenizer stream, reporting an
+  * error if something goes wrong.
+  */
+diff --git a/layout/style/nsCSSPropList.h b/layout/style/nsCSSPropList.h
+index e4e6a89..1b48b86 100644
+--- a/layout/style/nsCSSPropList.h
++++ b/layout/style/nsCSSPropList.h
+@@ -39,12 +39,12 @@
+   whether the use is for internal use such as eCSSProperty_* or
+   nsRuleData::ValueFor* or external use such as exposing DOM properties.
+ 
++  -. 'flags', a bitfield containing CSS_PROPERTY_* flags.
++
+   -. 'pref' is the name of a pref that controls whether the property
+   is enabled.  The property is enabled if 'pref' is an empty string,
+   or if the boolean property whose name is 'pref' is set to true.
+ 
+-  -. 'flags', a bitfield containing CSS_PROPERTY_* flags.
+-
+   -. 'parsevariant', to be passed to ParseVariant in the parser.
+ 
+   -. 'kwtable', which is either nullptr or the name of the appropriate
+@@ -3687,6 +3687,17 @@ CSS_PROP_SVGRESET(
+     offsetof(nsStyleSVGReset, mVectorEffect),
+     eStyleAnimType_EnumU8)
+ 
++CSS_PROP_DISPLAY(
++    will-animate,
++    will_animate,
++    WillAnimate,
++    CSS_PROPERTY_PARSE_FUNCTION,
++    "",
++    VARIANT_HK,
++    kWillAnimateKTable,
++    offsetof(nsStyleDisplay, mWillAnimate),
++    eStyleAnimType_Custom)
++
+ // The shorthands below are essentially aliases, but they require different
+ // parsing rules, and are therefore implemented as shorthands.
+ CSS_PROP_SHORTHAND(
+diff --git a/layout/style/nsCSSProps.cpp b/layout/style/nsCSSProps.cpp
+index 0d2bd43..5c2a816 100644
+--- a/layout/style/nsCSSProps.cpp
++++ b/layout/style/nsCSSProps.cpp
+@@ -1619,6 +1619,13 @@ const int32_t nsCSSProps::kWordBreakKTable[] = {
+   eCSSKeyword_UNKNOWN,-1
+ };
+ 
++const int32_t nsCSSProps::kWillAnimateKTable[] = {
++  eCSSKeyword_default, NS_STYLE_WILL_ANIMATE_DEFAULT,
++  eCSSKeyword_transform, NS_STYLE_WILL_ANIMATE_TRANSFORM,
++  eCSSKeyword_scroll, NS_STYLE_WILL_ANIMATE_SCROLL,
++  eCSSKeyword_UNKNOWN,-1
++};
++
+ const int32_t nsCSSProps::kWordWrapKTable[] = {
+   eCSSKeyword_normal, NS_STYLE_WORDWRAP_NORMAL,
+   eCSSKeyword_break_word, NS_STYLE_WORDWRAP_BREAK_WORD,
+diff --git a/layout/style/nsCSSProps.h b/layout/style/nsCSSProps.h
+index bd1fda6..59cac5a 100644
+--- a/layout/style/nsCSSProps.h
++++ b/layout/style/nsCSSProps.h
+@@ -504,6 +504,7 @@ public:
+   static const int32_t kImageOrientationKTable[];
+   static const int32_t kImageOrientationFlipKTable[];
+   static const int32_t kIMEModeKTable[];
++  static const int32_t kWillAnimateKTable[];
+   static const int32_t kLineHeightKTable[];
+   static const int32_t kListStylePositionKTable[];
+   static const int32_t kListStyleKTable[];
+diff --git a/layout/style/nsComputedDOMStyle.cpp b/layout/style/nsComputedDOMStyle.cpp
+index dcdb1c5..5922d86 100644
+--- a/layout/style/nsComputedDOMStyle.cpp
++++ b/layout/style/nsComputedDOMStyle.cpp
+@@ -3602,6 +3602,18 @@ nsComputedDOMStyle::DoGetClip()
+ }
+ 
+ CSSValue*
++nsComputedDOMStyle::DoGetWillAnimate()
++{
++  const nsStyleDisplay* display = StyleDisplay();
++
++  nsROCSSPrimitiveValue* val = new nsROCSSPrimitiveValue;
++  val->SetIdent(nsCSSProps::ValueToKeywordEnum(display->mWillAnimate,
++                                               nsCSSProps::kWillAnimateKTable));
++
++  return val;
++}
++
++CSSValue*
+ nsComputedDOMStyle::DoGetOverflow()
+ {
+   const nsStyleDisplay* display = StyleDisplay();
+diff --git a/layout/style/nsComputedDOMStyle.h b/layout/style/nsComputedDOMStyle.h
+index 2cc2d6b..8e2f41f 100644
+--- a/layout/style/nsComputedDOMStyle.h
++++ b/layout/style/nsComputedDOMStyle.h
+@@ -389,6 +389,7 @@ private:
+   mozilla::dom::CSSValue* DoGetPosition();
+   mozilla::dom::CSSValue* DoGetClip();
+   mozilla::dom::CSSValue* DoGetImageOrientation();
++  mozilla::dom::CSSValue* DoGetWillAnimate();
+   mozilla::dom::CSSValue* DoGetOverflow();
+   mozilla::dom::CSSValue* DoGetOverflowX();
+   mozilla::dom::CSSValue* DoGetOverflowY();
+diff --git a/layout/style/nsComputedDOMStylePropertyList.h b/layout/style/nsComputedDOMStylePropertyList.h
+index efb5541..e561ca2 100644
+--- a/layout/style/nsComputedDOMStylePropertyList.h
++++ b/layout/style/nsComputedDOMStylePropertyList.h
+@@ -131,6 +131,7 @@ COMPUTED_STYLE_PROP(height,                        Height)
+ COMPUTED_STYLE_PROP(image_orientation,             ImageOrientation)
+ COMPUTED_STYLE_PROP(ime_mode,                      IMEMode)
+ COMPUTED_STYLE_PROP(justify_content,               JustifyContent)
++COMPUTED_STYLE_PROP(will_animate,                  WillAnimate)
+ COMPUTED_STYLE_PROP(left,                          Left)
+ COMPUTED_STYLE_PROP(letter_spacing,                LetterSpacing)
+ COMPUTED_STYLE_PROP(line_height,                   LineHeight)
+diff --git a/layout/style/nsRuleNode.cpp b/layout/style/nsRuleNode.cpp
+index 467f157..0fdd47a 100644
+--- a/layout/style/nsRuleNode.cpp
++++ b/layout/style/nsRuleNode.cpp
+@@ -5025,6 +5025,12 @@ nsRuleNode::ComputeDisplayData(void* aStartStruct,
+             parentDisplay->mOpacity, 1.0f,
+             SETFCT_OPACITY | SETFCT_UNSET_INITIAL);
+ 
++  // layer: enum, inherit, initial
++  SetDiscrete(*aRuleData->ValueForWillAnimate(), display->mWillAnimate, canStoreInRuleTree,
++              SETDSC_ENUMERATED | SETDSC_UNSET_INITIAL,
++              parentDisplay->mWillAnimate,
++              NS_STYLE_WILL_ANIMATE_DEFAULT, 0, 0, 0, 0);
++
+   // display: enum, inherit, initial
+   SetDiscrete(*aRuleData->ValueForDisplay(), display->mDisplay, canStoreInRuleTree,
+               SETDSC_ENUMERATED | SETDSC_UNSET_INITIAL,
+diff --git a/layout/style/nsStyleConsts.h b/layout/style/nsStyleConsts.h
+index e74317a..095c827 100644
+--- a/layout/style/nsStyleConsts.h
++++ b/layout/style/nsStyleConsts.h
+@@ -212,6 +212,11 @@ static inline mozilla::css::Side operator++(mozilla::css::Side& side, int) {
+ #define NS_COLOR_CONTEXT_STROKE                 -8
+ 
+ // See nsStyleDisplay
++#define NS_STYLE_WILL_ANIMATE_DEFAULT            0x00
++#define NS_STYLE_WILL_ANIMATE_TRANSFORM          0x01
++#define NS_STYLE_WILL_ANIMATE_SCROLL             0x02
++
++// See nsStyleDisplay
+ #define NS_STYLE_ANIMATION_DIRECTION_NORMAL       0
+ #define NS_STYLE_ANIMATION_DIRECTION_REVERSE      1
+ #define NS_STYLE_ANIMATION_DIRECTION_ALTERNATE    2
+diff --git a/layout/style/nsStyleStruct.cpp b/layout/style/nsStyleStruct.cpp
+index a936ba2..b3f78bf 100644
+--- a/layout/style/nsStyleStruct.cpp
++++ b/layout/style/nsStyleStruct.cpp
+@@ -2302,6 +2302,7 @@ nsStyleDisplay::nsStyleDisplay()
+   mTransformStyle = NS_STYLE_TRANSFORM_STYLE_FLAT;
+   mOrient = NS_STYLE_ORIENT_AUTO;
+   mMixBlendMode = NS_STYLE_BLEND_NORMAL;
++  mWillAnimate = NS_STYLE_WILL_ANIMATE_DEFAULT;
+ 
+   mTransitions.AppendElement();
+   NS_ABORT_IF_FALSE(mTransitions.Length() == 1,
+@@ -2346,6 +2347,7 @@ nsStyleDisplay::nsStyleDisplay(const nsStyleDisplay& aSource)
+   , mClipFlags(aSource.mClipFlags)
+   , mOrient(aSource.mOrient)
+   , mMixBlendMode(aSource.mMixBlendMode)
++  , mWillAnimate(aSource.mWillAnimate)
+   , mBackfaceVisibility(aSource.mBackfaceVisibility)
+   , mTransformStyle(aSource.mTransformStyle)
+   , mSpecifiedTransform(aSource.mSpecifiedTransform)
+diff --git a/layout/style/nsStyleStruct.h b/layout/style/nsStyleStruct.h
+index 28b779f..5ce8339 100644
+--- a/layout/style/nsStyleStruct.h
++++ b/layout/style/nsStyleStruct.h
+@@ -1716,6 +1716,7 @@ struct nsStyleDisplay {
+   uint8_t mClipFlags;           // [reset] see nsStyleConsts.h
+   uint8_t mOrient;              // [reset] see nsStyleConsts.h
+   uint8_t mMixBlendMode;        // [reset] see nsStyleConsts.h
++  uint8_t mWillAnimate;         // see nsStyleConsts.h
+ 
+   // mSpecifiedTransform is the list of transform functions as
+   // specified, or null to indicate there is no transform.  (inherit or
+@@ -1817,9 +1818,10 @@ struct nsStyleDisplay {
+   /* Returns whether the element has the -moz-transform property
+    * or a related property. */
+   bool HasTransformStyle() const {
+-    return mSpecifiedTransform != nullptr || 
++    return mSpecifiedTransform != nullptr ||
+            mTransformStyle == NS_STYLE_TRANSFORM_STYLE_PRESERVE_3D ||
+-           mBackfaceVisibility == NS_STYLE_BACKFACE_VISIBILITY_HIDDEN;
++           mBackfaceVisibility == NS_STYLE_BACKFACE_VISIBILITY_HIDDEN ||
++           (mWillAnimate & NS_STYLE_WILL_ANIMATE_TRANSFORM);
+   }
+ 
+   // These are defined in nsStyleStructInlines.h.
+diff --git a/layout/style/test/property_database.js b/layout/style/test/property_database.js
+index e971dc7..1321cca 100644
+--- a/layout/style/test/property_database.js
++++ b/layout/style/test/property_database.js
+@@ -4764,6 +4764,17 @@ if (SpecialPowers.getBoolPref("layout.css.background-blend-mode.enabled")) {
+ 	};
+ }
+ 
++//if (SpecialPowers.getBoolPref("layout.css.mozlayer.enabled")) {
++	gCSSProperties["-moz-layer"] = {
++		domProp: "MozLayer",
++		inherited: false,
++		type: CSS_TYPE_LONGHAND,
++		initial_values: [ "-moz-default" ],
++		other_values: [ "-moz-active" ],
++		invalid_values: [ "force" ]
++	};
++//}
++
+ if (SpecialPowers.getBoolPref("layout.css.unset-value.enabled")) {
+   gCSSProperties["animation-direction"].invalid_values.push("normal, unset");
+   gCSSProperties["animation-name"].invalid_values.push("bounce, unset", "unset, bounce");

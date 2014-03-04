@@ -1,0 +1,345 @@
+# HG changeset patch
+# Parent e6c600d4fce086058cbc2283525d7156c0738ef7
+# User Jerry Shih <hshih@mozilla.com>
+add debug message
+
+diff --git a/gfx/layers/client/ContentClient.cpp b/gfx/layers/client/ContentClient.cpp
+--- a/gfx/layers/client/ContentClient.cpp
++++ b/gfx/layers/client/ContentClient.cpp
+@@ -359,23 +359,24 @@ ContentClientRemoteBuffer::SwapBuffers(c
+ }
+ 
+ ContentClientDoubleBuffered::~ContentClientDoubleBuffered()
+ {
+   //peter save textureclient here
+   //Prefer to add contentRemoteClient deconstructor to cache textureclient
+ 
+   char prop[PROPERTY_VALUE_MAX];
+-  property_get("debug.gfx.cachetexture", prop, "1");
++  property_get("debug.gfx.cachetexture", prop, "0");
+ 
+   if (mDeprecatedTextureClient) {
+     printf_stderr("peter ContentClientDoubleBuffered::~ContentClientDoubleBuffered textureclient %p w %d h %d\n",
+       mDeprecatedTextureClient.get(), mSize.width, mSize.height);
+-    if (atoi(prop) && ((mSize.height >= 1000 && mSize.width == 768) ||
+-      (mSize.width == 320 && mSize.height == 385))) {
++    //if (atoi(prop) && ((mSize.height >= 1000 && mSize.width == 768) ||
++    //  (mSize.width == 320 && mSize.height == 385))) {
++    if (atoi(prop)) {
+       printf_stderr("peter ContentClientDoubleBuffered::~ContentClientDoubleBuffered save textureclient %p w %d h %d descriptor %p actor %p\n",
+         mDeprecatedTextureClient.get(), mSize.width, mSize.height, mDeprecatedTextureClient->GetDescriptor(), (*(mDeprecatedTextureClient->GetDescriptor())).get_SurfaceDescriptorGralloc().bufferChild());
+       CachedTextureInfo info;
+       info.cachedTexture = mDeprecatedTextureClient;
+       info.cachedTextureSize = mSize;
+       info.contentType = mContentType;
+       mCachedTextureList.AppendElement(info);
+       mDeprecatedTextureClient = nullptr;
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -501,16 +501,18 @@ CompositorParent::ScheduleComposition()
+ void
+ CompositorParent::Composite()
+ {
+   PROFILER_LABEL("CompositorParent", "Composite");
+   NS_ABORT_IF_FALSE(CompositorThreadID() == PlatformThread::CurrentId(),
+                     "Composite can only be called on the compositor thread");
+   mCurrentCompositeTask = nullptr;
+ 
++  static TimeStamp test_last_time;
++
+   mLastCompose = TimeStamp::Now();
+ 
+   if (!CanComposite()) {
+     return;
+   }
+ 
+   AutoResolveRefLayers resolve(mCompositionManager);
+   if (mForceCompositionTask && !mOverrideComposeReadiness) {
+@@ -542,16 +544,25 @@ CompositorParent::Composite()
+   mLayerManager->EndEmptyTransaction();
+ 
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+   if (mExpectedComposeTime + TimeDuration::FromMilliseconds(15) < TimeStamp::Now()) {
+     printf_stderr("Compositor: Composite took %i ms.\n",
+                   15 + (int)(TimeStamp::Now() - mExpectedComposeTime).ToMilliseconds());
+   }
+ #endif
++
++
++
++
++  printf_stderr("bignose: Compositor: Composite between %i ms.\n",
++      (int)(TimeStamp::Now() - test_last_time).ToMilliseconds());
++  test_last_time=TimeStamp::Now();
++
++
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_END);
+ }
+ 
+ void
+ CompositorParent::ComposeToTarget(DrawTarget* aTarget)
+ {
+   PROFILER_LABEL("CompositorParent", "ComposeToTarget");
+   AutoRestore<bool> override(mOverrideComposeReadiness);
+diff --git a/gfx/layers/ipc/ImageBridgeParent.cpp b/gfx/layers/ipc/ImageBridgeParent.cpp
+--- a/gfx/layers/ipc/ImageBridgeParent.cpp
++++ b/gfx/layers/ipc/ImageBridgeParent.cpp
+@@ -32,16 +32,49 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ 
+ using namespace base;
+ using namespace mozilla::ipc;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
++class MyTime
++{
++public:
++  MyTime(const char *msg,int nLine = 0, int w = 0, int h = 0)
++  :mMsg(msg)
++  {
++    mLine = nLine;
++    mbegin = systemTime();
++    mwidth = w;
++    mheight = h;
++  };
++
++  int64_t systemTime(void) {
++    struct timespec t;
++    t.tv_sec = t.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (int64_t)(t.tv_sec)*1000000000LL + t.tv_nsec;
++  }
++
++  ~MyTime() {
++    mend = systemTime();
++    printf_stderr("time(%d) takes %0.3fms w %d h %d %s\n", mLine, (mend-mbegin) / 1000000.0, mwidth, mheight,mMsg.c_str());
++  };
++
++private:
++  int64_t mbegin;
++  int64_t mend;
++  int mLine;
++  int mwidth;
++  int mheight;
++  std::string mMsg;
++};
++
+ class PGrallocBufferParent;
+ 
+ ImageBridgeParent::ImageBridgeParent(MessageLoop* aLoop, Transport* aTransport)
+   : mMessageLoop(aLoop)
+   , mTransport(aTransport)
+ {
+   // creates the map only if it has not been created already, so it is safe
+   // with several bridges
+@@ -139,16 +172,18 @@ static  uint64_t GenImageContainerID() {
+ }
+ 
+ PGrallocBufferParent*
+ ImageBridgeParent::AllocPGrallocBufferParent(const gfxIntSize& aSize,
+                                              const uint32_t& aFormat,
+                                              const uint32_t& aUsage,
+                                              MaybeMagicGrallocBufferHandle* aOutHandle)
+ {
++  MyTime mytime("ImageBridgeParent::AllocPGrallocBufferParent",__LINE__, aSize.width, aSize.height);
++
+ #ifdef MOZ_HAVE_SURFACEDESCRIPTORGRALLOC
+   return GrallocBufferActor::Create(aSize, aFormat, aUsage, aOutHandle);
+ #else
+   NS_RUNTIMEABORT("No gralloc buffers for you");
+   return nullptr;
+ #endif
+ }
+ 
+diff --git a/gfx/layers/ipc/LayerTransactionParent.cpp b/gfx/layers/ipc/LayerTransactionParent.cpp
+--- a/gfx/layers/ipc/LayerTransactionParent.cpp
++++ b/gfx/layers/ipc/LayerTransactionParent.cpp
+@@ -42,16 +42,49 @@
+ 
+ typedef std::vector<mozilla::layers::EditReply> EditReplyVector;
+ 
+ using mozilla::layout::RenderFrameParent;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
++class MyTime
++{
++public:
++  MyTime(const char *msg,int nLine = 0, int w = 0, int h = 0)
++  :mMsg(msg)
++  {
++    mLine = nLine;
++    mbegin = systemTime();
++    mwidth = w;
++    mheight = h;
++  };
++
++  int64_t systemTime(void) {
++    struct timespec t;
++    t.tv_sec = t.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (int64_t)(t.tv_sec)*1000000000LL + t.tv_nsec;
++  }
++
++  ~MyTime() {
++    mend = systemTime();
++    printf_stderr("time(%d) takes %0.3fms w %d h %d %s\n", mLine, (mend-mbegin) / 1000000.0, mwidth, mheight,mMsg.c_str());
++  };
++
++private:
++  int64_t mbegin;
++  int64_t mend;
++  int mLine;
++  int mwidth;
++  int mheight;
++  std::string mMsg;
++};
++
+ class PGrallocBufferParent;
+ 
+ //--------------------------------------------------
+ // Convenience accessors
+ static ShadowLayerParent*
+ cast(const PLayerParent* in)
+ {
+   return const_cast<ShadowLayerParent*>(
+@@ -543,16 +576,18 @@ LayerTransactionParent::RecvClearCachedR
+ }
+ 
+ PGrallocBufferParent*
+ LayerTransactionParent::AllocPGrallocBufferParent(const gfxIntSize& aSize,
+                                             const uint32_t& aFormat,
+                                             const uint32_t& aUsage,
+                                             MaybeMagicGrallocBufferHandle* aOutHandle)
+ {
++  MyTime mytime("LayerTransactionParent::AllocPGrallocBufferParent",__LINE__, aSize.width, aSize.height);
++
+ #ifdef MOZ_HAVE_SURFACEDESCRIPTORGRALLOC
+   return GrallocBufferActor::Create(aSize, aFormat, aUsage, aOutHandle);
+ #else
+   NS_RUNTIMEABORT("No gralloc buffers for you");
+   return nullptr;
+ #endif
+ }
+ 
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -78,16 +78,18 @@
+ #include "nsXULPopupManager.h"
+ #endif
+ 
+ #include "GeckoProfiler.h"
+ #include "nsAnimationManager.h"
+ #include "nsTransitionManager.h"
+ #include "RestyleManager.h"
+ 
++#include <string>
++
+ using namespace mozilla;
+ using namespace mozilla::css;
+ using namespace mozilla::dom;
+ using namespace mozilla::layers;
+ using namespace mozilla::layout;
+ 
+ using mozilla::image::Angle;
+ using mozilla::image::Flip;
+@@ -97,16 +99,57 @@ using mozilla::image::Orientation;
+ #define FLEXBOX_ENABLED_PREF_NAME "layout.css.flexbox.enabled"
+ #define STICKY_ENABLED_PREF_NAME "layout.css.sticky.enabled"
+ 
+ #ifdef DEBUG
+ // TODO: remove, see bug 598468.
+ bool nsLayoutUtils::gPreventAssertInCompareTreePosition = false;
+ #endif // DEBUG
+ 
++
++class MyTime
++{
++public:
++  MyTime(const char *msg,int nLine = 0)
++  :mMsg(msg)
++  {
++    mLine = nLine;
++    mbegin = systemTime();
++  };
++
++  int64_t systemTime(void) {
++    struct timespec t;
++    t.tv_sec = t.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (int64_t)(t.tv_sec)*1000000000LL + t.tv_nsec;
++  }
++
++  void TimeoutBreak(void)
++  {
++    printf_stderr("time out");
++  }
++
++  ~MyTime() {
++    mend = systemTime();
++
++    if(((mend-mbegin) / 1000000.0)>100.0f){
++      TimeoutBreak();
++    }
++
++    printf_stderr("time(%d) takes %0.3fms ,%s\n", mLine, (mend-mbegin) / 1000000.0,mMsg.c_str());
++  };
++
++private:
++  int64_t mbegin;
++  int64_t mend;
++  int mLine;
++  std::string mMsg;
++};
++
++
+ typedef FrameMetrics::ViewID ViewID;
+ 
+ /* static */ uint32_t nsLayoutUtils::sFontSizeInflationEmPerLine;
+ /* static */ uint32_t nsLayoutUtils::sFontSizeInflationMinTwips;
+ /* static */ uint32_t nsLayoutUtils::sFontSizeInflationLineThreshold;
+ /* static */ int32_t  nsLayoutUtils::sFontSizeInflationMappingIntercept;
+ /* static */ uint32_t nsLayoutUtils::sFontSizeInflationMaxRatio;
+ /* static */ bool nsLayoutUtils::sFontSizeInflationForceEnabled;
+@@ -1947,16 +1990,18 @@ nsLayoutUtils::GetFramesForArea(nsIFrame
+   return NS_OK;
+ }
+ 
+ nsresult
+ nsLayoutUtils::PaintFrame(nsRenderingContext* aRenderingContext, nsIFrame* aFrame,
+                           const nsRegion& aDirtyRegion, nscolor aBackstop,
+                           uint32_t aFlags)
+ {
++  MyTime timer("nsLayoutUtils::PaintFrame",__LINE__);
++
+   PROFILER_LABEL("nsLayoutUtils","PaintFrame");
+   if (aFlags & PAINT_WIDGET_LAYERS) {
+     nsView* view = aFrame->GetView();
+     if (!(view && view->GetWidget() && GetDisplayRootFrame(aFrame) == aFrame)) {
+       aFlags &= ~PAINT_WIDGET_LAYERS;
+       NS_ASSERTION(aRenderingContext, "need a rendering context");
+     }
+   }
+@@ -2052,16 +2097,17 @@ nsLayoutUtils::PaintFrame(nsRenderingCon
+       canvasArea.UnionRect(canvasArea,
+         canvasFrame->CanvasArea() + builder.ToReferenceFrame(canvasFrame));
+     }
+   }
+ 
+   nsRect dirtyRect = visibleRegion.GetBounds();
+   builder.EnterPresShell(aFrame, dirtyRect);
+   {
++    MyTime timer("nsLayoutUtils::PaintFrame::BuildDisplayList",__LINE__);
+     PROFILER_LABEL("nsLayoutUtils","PaintFrame::BuildDisplayList");
+     aFrame->BuildDisplayListForStackingContext(&builder, dirtyRect, &list);
+   }
+   const bool paintAllContinuations = aFlags & PAINT_ALL_CONTINUATIONS;
+   NS_ASSERTION(!paintAllContinuations || !aFrame->GetPrevContinuation(),
+                "If painting all continuations, the frame must be "
+                "first-continuation");
+ 

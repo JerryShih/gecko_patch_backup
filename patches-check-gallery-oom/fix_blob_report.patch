@@ -1,0 +1,222 @@
+# HG changeset patch
+# Parent f675d9223e5239757a5854d9b95e3237198fbc7f
+# User Jerry Shih <hshih@mozilla.com>
+fix incorrect blob memory report
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -690,17 +690,17 @@ pref("hal.processPriorityManager.gonk.no
+ // We wait this long before polling the memory-pressure fd after seeing one
+ // memory pressure event.  (When we're not under memory pressure, we sit
+ // blocked on a poll(), and this pref has no effect.)
+ pref("gonk.systemMemoryPressureRecoveryPollMS", 5000);
+ 
+ #ifndef DEBUG
+ // Enable pre-launching content processes for improved startup time
+ // (hiding latency).
+-pref("dom.ipc.processPrelaunch.enabled", true);
++pref("dom.ipc.processPrelaunch.enabled", false);
+ // Wait this long before pre-launching a new subprocess.
+ pref("dom.ipc.processPrelaunch.delayMs", 5000);
+ #endif
+ 
+ // When a process receives a system message, we hold a CPU wake lock on its
+ // behalf for this many seconds, or until it handles the system message,
+ // whichever comes first.
+ pref("dom.ipc.systemMessageCPULockTimeoutSec", 30);
+diff --git a/content/base/public/nsDOMFile.h b/content/base/public/nsDOMFile.h
+--- a/content/base/public/nsDOMFile.h
++++ b/content/base/public/nsDOMFile.h
+@@ -375,16 +375,21 @@ public:
+     : nsDOMFile(aContentType, aLength),
+       mDataOwner(new DataOwner(aMemoryBuffer, aLength))
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
+   }
+ 
+   NS_IMETHOD GetInternalStream(nsIInputStream**) MOZ_OVERRIDE;
+ 
++  NS_IMETHOD_(bool) IsMemoryFile(void) MOZ_OVERRIDE
++  {
++    return true;
++  }
++
+ protected:
+   // Create slice
+   nsDOMMemoryFile(const nsDOMMemoryFile* aOther, uint64_t aStart,
+                   uint64_t aLength, const nsAString& aContentType)
+     : nsDOMFile(aContentType, aOther->mStart + aStart, aLength),
+       mDataOwner(aOther->mDataOwner)
+   {
+     NS_ASSERTION(mDataOwner && mDataOwner->mData, "must have data");
+diff --git a/content/base/public/nsHostObjectProtocolHandler.h b/content/base/public/nsHostObjectProtocolHandler.h
+--- a/content/base/public/nsHostObjectProtocolHandler.h
++++ b/content/base/public/nsHostObjectProtocolHandler.h
+@@ -49,16 +49,20 @@ public:
+   // AddDataEntry creates the URI with the given scheme and returns it in aUri
+   static nsresult AddDataEntry(const nsACString& aScheme,
+                                nsISupports* aObject,
+                                nsIPrincipal* aPrincipal,
+                                nsACString& aUri);
+   static void RemoveDataEntry(const nsACString& aUri);
+   static nsIPrincipal* GetDataEntryPrincipal(const nsACString& aUri);
+   static void Traverse(const nsACString& aUri, nsCycleCollectionTraversalCallback& aCallback);
++
++private:
++  static void Init(void);
++  static bool initialized;
+ };
+ 
+ class nsBlobProtocolHandler : public nsHostObjectProtocolHandler
+ {
+ public:
+   NS_IMETHOD GetScheme(nsACString &result) MOZ_OVERRIDE;
+ };
+ 
+diff --git a/content/base/public/nsIDOMFile.idl b/content/base/public/nsIDOMFile.idl
+--- a/content/base/public/nsIDOMFile.idl
++++ b/content/base/public/nsIDOMFile.idl
+@@ -52,16 +52,19 @@ interface nsIDOMBlob : nsISupports
+ 
+   // Called when the blob was successfully stored in a database or when
+   // the blob is initialized from a database. It can be called on any thread.
+   [notxpcom] void addFileInfo(in FileInfo aFileInfo);
+ 
+   // Called before the blob is stored in a database to decide if it can be
+   // shared or needs to be copied. It can be called on any thread.
+   [notxpcom] FileInfo getFileInfo(in FileManager aFileManager);
++
++  // Return true if this blob is memory file.
++  [notxpcom] bool isMemoryFile();
+ };
+ 
+ [scriptable, builtinclass, uuid(0acb4135-9f79-4516-ba92-b5fba5203620)]
+ interface nsIDOMFile : nsIDOMBlob
+ {
+   readonly attribute DOMString name;
+ 
+   readonly attribute DOMString path;
+diff --git a/content/base/src/Makefile.in b/content/base/src/Makefile.in
+--- a/content/base/src/Makefile.in
++++ b/content/base/src/Makefile.in
+@@ -11,8 +11,11 @@ ifneq (,$(INTEL_ARCHITECTURE))
+ ifdef GNU_CC
+ nsTextFragmentSSE2.$(OBJ_SUFFIX): CXXFLAGS+=-msse2
+ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
+ nsTextFragmentSSE2.$(OBJ_SUFFIX): CXXFLAGS+=-xarch=sse2 -xO4
+ endif
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/content/base/src/nsDOMFile.cpp b/content/base/src/nsDOMFile.cpp
+--- a/content/base/src/nsDOMFile.cpp
++++ b/content/base/src/nsDOMFile.cpp
+@@ -438,16 +438,21 @@ nsDOMFileBase::SetMutable(bool aMutable)
+     rv = this->GetSize(&dummyInt);
+     NS_ENSURE_SUCCESS(rv, rv);
+   }
+ 
+   mImmutable = !aMutable;
+   return rv;
+ }
+ 
++NS_IMETHODIMP_(bool)
++nsDOMFileBase::IsMemoryFile(void)
++{
++  return false;
++}
+ ////////////////////////////////////////////////////////////////////////////
+ // nsDOMFile implementation
+ 
+ DOMCI_DATA(File, nsDOMFile)
+ DOMCI_DATA(Blob, nsDOMFile)
+ 
+ NS_INTERFACE_MAP_BEGIN(nsDOMFile)
+   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIDOMFile)
+diff --git a/content/base/src/nsHostObjectProtocolHandler.cpp b/content/base/src/nsHostObjectProtocolHandler.cpp
+--- a/content/base/src/nsHostObjectProtocolHandler.cpp
++++ b/content/base/src/nsHostObjectProtocolHandler.cpp
+@@ -173,17 +173,18 @@ class BlobURLsReporter MOZ_FINAL : publi
+       blobWasCounted = envp->mRefCounts.Get(blob, &refCount);
+       MOZ_ASSERT(blobWasCounted);
+       MOZ_ASSERT(refCount > 0);
+ 
+       if (NS_FAILED(blob->GetSize(&size))) {
+         size = 0;
+       }
+ 
+-      path = "blob-urls/";
++      //path = "blob-urls/";
++      path = (blob->IsMemoryFile()) ? "memory-blob-urls/" : "file-blob-urls/";
+       if (NS_SUCCEEDED(aInfo->mPrincipal->GetURI(getter_AddRefs(principalURI))) &&
+           principalURI != nullptr &&
+           NS_SUCCEEDED(principalURI->GetSpec(owner)) &&
+           !owner.IsEmpty()) {
+         owner.ReplaceChar('/', '\\');
+         path += "owner(";
+         path += owner;
+         path += ")";
+@@ -228,34 +229,42 @@ class BlobURLsReporter MOZ_FINAL : publi
+     return PL_DHASH_NEXT;
+   }
+ };
+ 
+ NS_IMPL_ISUPPORTS1(BlobURLsReporter, nsIMemoryReporter)
+ 
+ }
+ 
+-nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++bool nsHostObjectProtocolHandler::initialized = false;
++
++void
++nsHostObjectProtocolHandler::Init(void)
+ {
+-  static bool initialized = false;
+-
+   if (!initialized) {
+     initialized = true;
+     RegisterStrongMemoryReporter(new mozilla::HostObjectURLsReporter());
+     RegisterStrongMemoryReporter(new mozilla::BlobURLsReporter());
+   }
+ }
+ 
++nsHostObjectProtocolHandler::nsHostObjectProtocolHandler()
++{
++  Init();
++}
++
+ 
+ nsresult
+ nsHostObjectProtocolHandler::AddDataEntry(const nsACString& aScheme,
+                                           nsISupports* aObject,
+                                           nsIPrincipal* aPrincipal,
+                                           nsACString& aUri)
+ {
++  Init();
++
+   nsresult rv = GenerateURIString(aScheme, aUri);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   if (!gDataTable) {
+     gDataTable = new nsClassHashtable<nsCStringHashKey, DataInfo>;
+   }
+ 
+   DataInfo* info = new DataInfo;
+diff --git a/image/src/Makefile.in b/image/src/Makefile.in
+--- a/image/src/Makefile.in
++++ b/image/src/Makefile.in
+@@ -2,8 +2,10 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ # Because imgFrame.cpp includes "cairo.h"
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"

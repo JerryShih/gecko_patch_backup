@@ -1,0 +1,831 @@
+# HG changeset patch
+# Parent 09796fb31a98c435de5278c672a3a05d20b3abad
+# User Jerry Shih <hshih@mozilla.com>
+hwc post function on thread
+
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore
++++ b/.gitignore
+@@ -21,16 +21,17 @@ ID
+ /.clang_complete
+ /mach.ini
+ 
+ # Empty marker file that's generated when we check out NSS
+ security/manager/.nss.checkout
+ 
+ # Build directories
+ /obj*/
++/gecko_obj_*/
+ 
+ # Build directories for js shell
+ */_DBG.OBJ/
+ */_OPT.OBJ/
+ 
+ # SpiderMonkey configury
+ js/src/configure
+ js/src/autom4te.cache
+diff --git a/.hgignore b/.hgignore
+--- a/.hgignore
++++ b/.hgignore
+@@ -20,16 +20,17 @@
+ ^\.clang_complete
+ ^mach.ini$
+ 
+ # Empty marker file that's generated when we check out NSS
+ ^security/manager/\.nss\.checkout$
+ 
+ # Build directories
+ ^obj
++^gecko_obj_
+ 
+ # Build directories for js shell
+ _DBG\.OBJ/
+ _OPT\.OBJ/
+ 
+ # SpiderMonkey configury
+ ^js/src/configure$
+ ^js/src/autom4te.cache$
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -316,17 +316,18 @@ GetSuitableScale(float aMaxScale, float 
+   // otherwise use 1.0f.
+   if (aMinScale >= 1.0f) {
+     return aMinScale;
+   }
+   else if (aMaxScale <= 1.0f) {
+     return aMaxScale;
+   }
+ 
+-  return 1.0f;
++  return aMaxScale;
++  //return 1.0f;
+ }
+ 
+ gfxSize
+ nsLayoutUtils::ComputeSuitableScaleForAnimation(nsIContent* aContent)
+ {
+   gfxSize maxScale(1.0f, 1.0f);
+   gfxSize minScale(1.0f, 1.0f);
+ 
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -89,20 +89,20 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+ 
+     nsIntSize screenSize;
+ 
+     mozilla::Framebuffer::GetSize(&screenSize);
+     mScreenRect  = nsIntRect(nsIntPoint(0, 0), screenSize);
+ 
+ #if ANDROID_VERSION >= 17
+     int supported = 0;
+-    if (mHwc->query(mHwc, HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
++    if (mHwc->GetDevice()->query(mHwc->GetDevice(), HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
+         mColorFill = supported ? true : false;
+     }
+-    if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
++    if (mHwc->GetDevice()->query(mHwc->GetDevice(), HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+         mRBSwapSupport = supported ? true : false;
+     }
+ #else
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+     mRBSwapSupport = true;
+ #endif
+@@ -145,17 +145,17 @@ HwcComposer2D::ReallocLayerList()
+     mMaxLayerCount += LAYER_COUNT_INCREMENTS;
+     return true;
+ }
+ 
+ void
+ HwcComposer2D::setCrop(HwcLayer* layer, hwc_rect_t srcCrop)
+ {
+ #if ANDROID_VERSION >= 19
+-    if (mHwc->common.version >= HWC_DEVICE_API_VERSION_1_3) {
++    if (mHwc->GetDevice()->common.version >= HWC_DEVICE_API_VERSION_1_3) {
+         layer->sourceCropf.left = srcCrop.left;
+         layer->sourceCropf.top = srcCrop.top;
+         layer->sourceCropf.right = srcCrop.right;
+         layer->sourceCropf.bottom = srcCrop.bottom;
+     } else {
+         layer->sourceCrop = srcCrop;
+     }
+ #else
+@@ -632,27 +632,31 @@ HwcComposer2D::Prepare(buffer_handle_t f
+     mList->hwLayers[idx].acquireFenceFd = fence;
+     mList->hwLayers[idx].releaseFenceFd = -1;
+ #if ANDROID_VERSION >= 18
+     mList->hwLayers[idx].planeAlpha = 0xFF;
+ #endif
+     if (mPrepared) {
+         LOGE("Multiple hwc prepare calls!");
+     }
+-    mHwc->prepare(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->AcquireDevice();
++    mHwc->GetDevice()->prepare(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->ReleaseDevice();
+     mPrepared = true;
+ }
+ 
+ bool
+ HwcComposer2D::Commit()
+ {
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = { nullptr };
+     displays[HWC_DISPLAY_PRIMARY] = mList;
+ 
+-    int err = mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->AcquireDevice();
++    int err = mHwc->GetDevice()->set(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->ReleaseDevice();
+ 
+     // To avoid tearing, workaround for missing releaseFenceFd
+     // waits in Gecko layers, see Bug 925444.
+     if (!mPrevReleaseFds.IsEmpty()) {
+         // Wait for previous retire Fence to signal.
+         // Denotes contents on display have been replaced.
+         // For buffer-sync, framework should not over-write
+         // prev buffers until we close prev releaseFenceFds
+@@ -686,24 +690,30 @@ HwcComposer2D::Commit()
+ }
+ 
+ void
+ HwcComposer2D::Reset()
+ {
+     LOGD("hwcomposer is already prepared, reset with null set");
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = { nullptr };
+     displays[HWC_DISPLAY_PRIMARY] = nullptr;
+-    mHwc->set(mHwc, HWC_DISPLAY_PRIMARY, displays);
++    mHwc->AcquireDevice();
++    mHwc->GetDevice()->set(mHwc->GetDevice(), HWC_DISPLAY_PRIMARY, displays);
++    mHwc->ReleaseDevice();
+     mPrepared = false;
+ }
+ #else
+ bool
+ HwcComposer2D::TryHwComposition()
+ {
+-    return !mHwc->set(mHwc, mDpy, mSur, mList);
++    mHwc->AcquireDevice();
++    int result=mHwc->GetDevice()->set(mHwc->GetDevice(), mDpy, mSur, mList);
++    mHwc->ReleaseDevice();
++
++    return !result;
+ }
+ 
+ bool
+ HwcComposer2D::Render(EGLDisplay dpy, EGLSurface sur)
+ {
+     return GetGonkDisplay()->SwapBuffers(dpy, sur);
+ }
+ 
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -12,42 +12,43 @@
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #ifndef mozilla_HwcComposer2D
+ #define mozilla_HwcComposer2D
+ 
++#include "HwcDef.h"
+ #include "Composer2D.h"
+ #include "Layers.h"
+ #include <vector>
+ #include <list>
+ 
+-#include <hardware/hwcomposer.h>
++//#include <hardware/hwcomposer.h>
+ 
+ namespace mozilla {
+ 
+ namespace layers {
+ class ContainerLayer;
+ class Layer;
+ }
+ 
+-//Holds a dynamically allocated vector of rectangles
+-//used to decribe the complex visible region of a layer
+-typedef std::vector<hwc_rect_t> RectVector;
+-#if ANDROID_VERSION >= 17
+-typedef hwc_composer_device_1_t HwcDevice;
+-typedef hwc_display_contents_1_t HwcList;
+-typedef hwc_layer_1_t HwcLayer;
+-#else
+-typedef hwc_composer_device_t HwcDevice;
+-typedef hwc_layer_list_t HwcList;
+-typedef hwc_layer_t HwcLayer;
+-#endif
++////Holds a dynamically allocated vector of rectangles
++////used to decribe the complex visible region of a layer
++//typedef std::vector<hwc_rect_t> RectVector;
++//#if ANDROID_VERSION >= 17
++//typedef hwc_composer_device_1_t HwcDevice;
++//typedef hwc_display_contents_1_t HwcList;
++//typedef hwc_layer_1_t HwcLayer;
++//#else
++//typedef hwc_composer_device_t HwcDevice;
++//typedef hwc_layer_list_t HwcList;
++//typedef hwc_layer_t HwcLayer;
++//#endif
+ 
+ class HwcComposer2D : public mozilla::layers::Composer2D {
+ public:
+     HwcComposer2D();
+     virtual ~HwcComposer2D();
+ 
+     int Init(hwc_display_t aDisplay, hwc_surface_t aSurface);
+ 
+diff --git a/widget/gonk/HwcDef.h b/widget/gonk/HwcDef.h
+new file mode 100644
+--- /dev/null
++++ b/widget/gonk/HwcDef.h
+@@ -0,0 +1,79 @@
++/*
++ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef mozilla_HwcDef
++#define mozilla_HwcDef
++
++#include <vector>
++#include <utils/Mutex.h>
++#include <hardware/hwcomposer.h>
++#include "GeckoProfiler.h"
++
++namespace mozilla {
++
++//Holds a dynamically allocated vector of rectangles
++//used to decribe the complex visible region of a layer
++typedef std::vector<hwc_rect_t> RectVector;
++
++#if ANDROID_VERSION >= 17
++typedef hwc_composer_device_1_t HwcDeviceImpl;
++typedef hwc_display_contents_1_t HwcList;
++typedef hwc_layer_1_t HwcLayer;
++#else
++typedef hwc_composer_device_t HwcDeviceImpl;
++typedef hwc_layer_list_t HwcList;
++typedef hwc_layer_t HwcLayer;
++#endif
++
++class HwcDevice
++{
++public:
++  HwcDevice(HwcDeviceImpl *aDevice)
++    : mDevice(aDevice)
++    , mMutex("hwc mutex")
++  {
++
++  }
++
++  void SetDevice(HwcDeviceImpl *aDevice)
++  {
++    mDevice = aDevice;
++  }
++
++  HwcDeviceImpl* GetDevice(void)
++  {
++    return mDevice;
++  }
++
++  void AcquireDevice(void)
++  {
++    PROFILER_LABEL("HwcDevice", "AcquireDevice");
++    mMutex.lock();
++  }
++
++  void ReleaseDevice(void)
++  {
++    mMutex.unlock();
++  }
++
++private:
++  HwcDeviceImpl *mDevice;
++  android::Mutex mMutex;
++};
++
++} // namespace mozilla
++
++#endif // mozilla_HwcDef
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -16,142 +16,261 @@
+ #include "GonkDisplayJB.h"
+ #if ANDROID_VERSION == 17
+ #include <gui/SurfaceTextureClient.h>
+ #else
+ #include <gui/Surface.h>
+ #include <gui/GraphicBufferAlloc.h>
+ #endif
+ 
++#include <utils/Thread.h>
+ #include <hardware/hardware.h>
+ #include <hardware/hwcomposer.h>
+ #include <hardware/power.h>
+ #include <suspend/autosuspend.h>
+ 
+ #if ANDROID_VERSION == 17
+ #include "GraphicBufferAlloc.h"
+ #endif
+ #include "BootAnimation.h"
+ 
+ #include "GeckoProfiler.h"
+ 
++#include "cutils/properties.h"
++
++# define ATRACE_TAG ATRACE_TAG_GRAPHICS
++// We need HAVE_ANDROID_OS to be defined for Trace.h.
++// If its not set we will set it temporary and remove it.
++# ifndef HAVE_ANDROID_OS
++#   define HAVE_ANDROID_OS
++#   define REMOVE_HAVE_ANDROID_OS
++# endif
++# include <utils/Trace.h>;
++# ifdef REMOVE_HAVE_ANDROID_OS
++#  undef HAVE_ANDROID_OS
++#  undef REMOVE_HAVE_ANDROID_OS
++# endif
++
+ using namespace android;
+ 
+ namespace mozilla {
++ 
++class HwcPostWorkUnit : public android::WorkQueue::WorkUnit
++{
++public:
++  HwcPostWorkUnit(android::FramebufferSurface *aFBSurface,HwcDevice* aHwc, HwcList* aHwcList, uint32_t aWidth, uint32_t aHeight,buffer_handle_t aBuffer, int aFence)
++    : mFBSurface(aFBSurface)
++    , mHwc(aHwc)
++    , mHwcList(aHwcList)
++    , mWidth(aWidth)
++    , mHeight(aHeight)
++    , mBuffer(aBuffer)
++    , mFence(aFence)
++  {
++
++  }
++
++  ~HwcPostWorkUnit()
++  {
++
++  }
++
++  virtual bool run()
++  {
++    hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};
++    const hwc_rect_t r = { 0, 0, mWidth, mHeight };
++
++    displays[HWC_DISPLAY_PRIMARY] = mHwcList;
++    mHwcList->retireFenceFd = -1;
++    mHwcList->numHwLayers = 2;
++    //mHwcList->flags = HWC_GEOMETRY_CHANGED;
++    mHwcList->flags = 0;
++    mHwcList->hwLayers[0].compositionType = HWC_BACKGROUND;
++    mHwcList->hwLayers[0].hints = 0;
++    /* Skip this layer so the hwc module doesn't complain about null handles */
++    mHwcList->hwLayers[0].flags = HWC_SKIP_LAYER;
++    mHwcList->hwLayers[0].backgroundColor = {0};
++    mHwcList->hwLayers[0].acquireFenceFd = -1;
++    mHwcList->hwLayers[0].releaseFenceFd = -1;
++    /* hwc module checks displayFrame even though it shouldn't */
++    mHwcList->hwLayers[0].displayFrame = r;
++    mHwcList->hwLayers[1].compositionType = HWC_FRAMEBUFFER_TARGET;
++    mHwcList->hwLayers[1].hints = 0;
++    mHwcList->hwLayers[1].flags = 0;
++    mHwcList->hwLayers[1].handle = mBuffer;
++    mHwcList->hwLayers[1].transform = 0;
++    mHwcList->hwLayers[1].blending = HWC_BLENDING_PREMULT;
++  #if ANDROID_VERSION >= 19
++    if (mHwc->GetDevice()->common.version >= HWC_DEVICE_API_VERSION_1_3) {
++        mHwcList->hwLayers[1].sourceCropf.left = 0;
++        mHwcList->hwLayers[1].sourceCropf.top = 0;
++        mHwcList->hwLayers[1].sourceCropf.right = mWidth;
++        mHwcList->hwLayers[1].sourceCropf.bottom = mHeight;
++    } else {
++        mHwcList->hwLayers[1].sourceCrop = r;
++    }
++  #else
++    mHwcList->hwLayers[1].sourceCrop = r;
++  #endif
++    mHwcList->hwLayers[1].displayFrame = r;
++    mHwcList->hwLayers[1].visibleRegionScreen.numRects = 1;
++    mHwcList->hwLayers[1].visibleRegionScreen.rects = &mHwcList->hwLayers[1].displayFrame;
++    mHwcList->hwLayers[1].acquireFenceFd = mFence;
++    mHwcList->hwLayers[1].releaseFenceFd = -1;
++  #if ANDROID_VERSION == 18
++    mHwcList->hwLayers[1].planeAlpha = 0xFF;
++  #endif
++    mHwc->GetDevice()->prepare(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->GetDevice()->set(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
++    mFBSurface->setReleaseFenceFd(mHwcList->hwLayers[1].releaseFenceFd);
++    if (mHwcList->retireFenceFd >= 0)
++        close(mHwcList->retireFenceFd);
++
++    mHwc->ReleaseDevice();
++
++    return true;
++  }
++
++private:
++  android::FramebufferSurface *mFBSurface;
++  HwcDevice* mHwc;
++  HwcList* mHwcList;
++  uint32_t mWidth;
++  uint32_t mHeight;
++  buffer_handle_t mBuffer;
++  int mFence;
++};
+ 
+ static GonkDisplayJB* sGonkDisplay = nullptr;
+ 
+ GonkDisplayJB::GonkDisplayJB()
+-    : mList(nullptr)
+-    , mModule(nullptr)
+-    , mFBModule(nullptr)
++    : mHwcPostWorkQueue(1, false)
+     , mHwc(nullptr)
++    , mList(nullptr)  
+     , mFBDevice(nullptr)
++    , mPowerModule(nullptr)
+     , mEnabledCallback(nullptr)
+-    , mPowerModule(nullptr)
+ {
+-    int err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &mFBModule);
++    int err = 0;
++
++    // FB device
++    const hw_module_t *FBModule = nullptr;
++
++    err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &FBModule);
+     ALOGW_IF(err, "%s module not found", GRALLOC_HARDWARE_MODULE_ID);
+     if (!err) {
+-        err = framebuffer_open(mFBModule, &mFBDevice);
++        err = framebuffer_open(FBModule, &mFBDevice);
+         ALOGW_IF(err, "could not open framebuffer");
+     }
+ 
+     if (!err && mFBDevice) {
+         mWidth = mFBDevice->width;
+-	 mHeight = mFBDevice->height;
+-	 xdpi = mFBDevice->xdpi;
++	      mHeight = mFBDevice->height;
++	      xdpi = mFBDevice->xdpi;
+         /* The emulator actually reports RGBA_8888, but EGL doesn't return
+          * any matching configuration. We force RGBX here to fix it. */
+         surfaceformat = HAL_PIXEL_FORMAT_RGBX_8888;
+     }
+ 
+-    err = hw_get_module(HWC_HARDWARE_MODULE_ID, &mModule);
++    // HWC device
++    const hw_module_t *HwcModule = nullptr;
++    HwcDeviceImpl *HwcImpl = nullptr;
++
++    err = hw_get_module(HWC_HARDWARE_MODULE_ID, &HwcModule);
+     ALOGW_IF(err, "%s module not found", HWC_HARDWARE_MODULE_ID);
+     if (!err) {
+-        err = hwc_open_1(mModule, &mHwc);
++        err = hwc_open_1(HwcModule, &HwcImpl);
+         ALOGE_IF(err, "%s device failed to initialize (%s)",
+                  HWC_HARDWARE_COMPOSER, strerror(-err));
+     }
+ 
+     /* Fallback on the FB rendering path instead of trying to support HWC 1.0 */
+-    if (!err && mHwc->common.version == HWC_DEVICE_API_VERSION_1_0) {
+-        hwc_close_1(mHwc);
+-        mHwc = nullptr;
++    if (!err && HwcImpl->common.version == HWC_DEVICE_API_VERSION_1_0) {
++        hwc_close_1(HwcImpl);
++        HwcImpl = nullptr;
+     }
+-
+-    if (!err && mHwc) {
++ 
++    if (!err && HwcImpl) {
+         if (mFBDevice) {
+             framebuffer_close(mFBDevice);
+             mFBDevice = nullptr;
+         }
+ 
+         int32_t values[3];
+         const uint32_t attrs[] = {
+             HWC_DISPLAY_WIDTH,
+             HWC_DISPLAY_HEIGHT,
+             HWC_DISPLAY_DPI_X,
+             HWC_DISPLAY_NO_ATTRIBUTE
+         };
+-        mHwc->getDisplayAttributes(mHwc, 0, 0, attrs, values);
++        HwcImpl->getDisplayAttributes(HwcImpl, 0, 0, attrs, values);
+ 
+         mWidth = values[0];
+         mHeight = values[1];
+         xdpi = values[2] / 1000.0f;
+         surfaceformat = HAL_PIXEL_FORMAT_RGBA_8888;
++
++        HwcImpl->blank(HwcImpl, HWC_DISPLAY_PRIMARY, 0);
++
++        mList = (hwc_display_contents_1_t *)malloc(sizeof(*mList) + (sizeof(hwc_layer_1_t)*2));
++
++        mHwc = new HwcDevice(HwcImpl);
+     }
+ 
+-    err = hw_get_module(POWER_HARDWARE_MODULE_ID,
+-                                           (hw_module_t const**)&mPowerModule);
++    // power module
++    err = hw_get_module(POWER_HARDWARE_MODULE_ID, (hw_module_t const**)&mPowerModule);
+     if (!err)
+         mPowerModule->init(mPowerModule);
+     ALOGW_IF(err, "Couldn't load %s module (%s)", POWER_HARDWARE_MODULE_ID, strerror(-err));
+ 
++    // GraphicBuffer allocator
+     mAlloc = new GraphicBufferAlloc();
+ 
+-    status_t error;
+-    uint32_t usage = GRALLOC_USAGE_HW_FB | GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_COMPOSER;
+-    mBootAnimBuffer = mAlloc->createGraphicBuffer(mWidth, mHeight, surfaceformat, usage, &error);
+-    if (error != NO_ERROR || !mBootAnimBuffer.get()) {
+-        ALOGI("Trying to create BRGA format framebuffer");
+-        surfaceformat = HAL_PIXEL_FORMAT_BGRA_8888;
+-        mBootAnimBuffer = mAlloc->createGraphicBuffer(mWidth, mHeight, surfaceformat, usage, &error);
+-    }
+-
++    //surface
+ #if ANDROID_VERSION >= 19
+     sp<BufferQueue> bq = new BufferQueue(mAlloc);
+ #else
+     sp<BufferQueue> bq = new BufferQueue(true, mAlloc);
+ #endif
+     mFBSurface = new FramebufferSurface(0, mWidth, mHeight, surfaceformat, bq);
+ 
+ #if ANDROID_VERSION == 17
+     sp<SurfaceTextureClient> stc = new SurfaceTextureClient(static_cast<sp<ISurfaceTexture> >(mFBSurface->getBufferQueue()));
+ #else
+     sp<Surface> stc = new Surface(static_cast<sp<IGraphicBufferProducer> >(bq));
+ #endif
+     mSTClient = stc;
+ 
+-    mList = (hwc_display_contents_1_t *)malloc(sizeof(*mList) + (sizeof(hwc_layer_1_t)*2));
+-    if (mHwc)
+-        mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, 0);
++    // boot anim
++    status_t error;
++    uint32_t usage = GRALLOC_USAGE_HW_FB | GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_COMPOSER;
+ 
++    mBootAnimBuffer = mAlloc->createGraphicBuffer(mWidth, mHeight, surfaceformat, usage, &error);
++    if (error != NO_ERROR || !mBootAnimBuffer.get()) {
++        ALOGI("Trying to create BRGA format framebuffer");
++        surfaceformat = HAL_PIXEL_FORMAT_BGRA_8888;
++        mBootAnimBuffer = mAlloc->createGraphicBuffer(mWidth, mHeight, surfaceformat, usage, &error);
++    }
++ 
+     if (error == NO_ERROR && mBootAnimBuffer.get()) {
+         ALOGI("Starting bootanimation with (%d) format framebuffer", surfaceformat);
+         StartBootAnimation();
+-    } else
++    } else {
+         ALOGW("Couldn't show bootanimation (%s)", strerror(-error));
++    }
+ }
+ 
+ GonkDisplayJB::~GonkDisplayJB()
+ {
+-    if (mHwc)
+-        hwc_close_1(mHwc);
+-    if (mFBDevice)
+-        framebuffer_close(mFBDevice);
++    if (mHwc){
++        hwc_close_1(mHwc->GetDevice());
++    }
++    if (mFBDevice){
++         framebuffer_close(mFBDevice);
++    }
+     free(mList);
+ }
+ 
+ ANativeWindow*
+ GonkDisplayJB::GetNativeWindow()
+ {
+     return mSTClient.get();
+ }
+@@ -160,17 +279,17 @@ void
+ GonkDisplayJB::SetEnabled(bool enabled)
+ {
+     if (enabled) {
+         autosuspend_disable();
+         mPowerModule->setInteractive(mPowerModule, true);
+     }
+ 
+     if (mHwc)
+-        mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, !enabled);
++      mHwc->GetDevice()->blank(mHwc->GetDevice(), HWC_DISPLAY_PRIMARY, !enabled);
+     else if (mFBDevice->enableScreen)
+         mFBDevice->enableScreen(mFBDevice, enabled);
+ 
+     if (mEnabledCallback)
+         mEnabledCallback(enabled);
+ 
+     if (!enabled) {
+         autosuspend_enable();
+@@ -194,16 +313,20 @@ void*
+ GonkDisplayJB::GetFBSurface()
+ {
+     return mFBSurface.get();
+ }
+ 
+ bool
+ GonkDisplayJB::SwapBuffers(EGLDisplay dpy, EGLSurface sur)
+ {
++  ATRACE_NAME("GonkDisplayJB::SwapBuffers");
++
++  ALOGE("bignose in GonkDisplayJB::SwapBuffers");
++
+     StopBootAnimation();
+     mBootAnimBuffer = nullptr;
+ 
+     // Should be called when composition rendering is complete for a frame.
+     // Only HWC v1.0 needs this call.
+     // HWC > v1.0 case, do not call compositionComplete().
+     // mFBDevice is present only when HWC is v1.0.
+     if (mFBDevice && mFBDevice->compositionComplete) {
+@@ -227,16 +350,33 @@ GonkDisplayJB::Post(buffer_handle_t buf,
+     if (!mHwc) {
+         PROFILER_LABEL("GonkDisplayJB::Post", "mFBDevice");
+ 
+         if (fence >= 0)
+             close(fence);
+         return !mFBDevice->post(mFBDevice, buf);
+     }
+ 
++    char prop[PROPERTY_VALUE_MAX];
++
++    property_get("debug.post_on_thread",prop,"0");
++    if(atoi(prop)==1){
++      mHwc->AcquireDevice();
++      mHwcPostWorkQueue.schedule(new HwcPostWorkUnit(mFBSurface.get(), mHwc, mList, mWidth, mHeight, buf, fence), 0);
++    }
++    else{
++      HwcPost(buf,fence);
++    }
++
++    return true;
++}
++
++void
++GonkDisplayJB::HwcPost(buffer_handle_t buf, int fence)
++{
+     hwc_display_contents_1_t *displays[HWC_NUM_DISPLAY_TYPES] = {NULL};
+     const hwc_rect_t r = { 0, 0, mWidth, mHeight };
+     {
+     PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-1");
+ 
+     displays[HWC_DISPLAY_PRIMARY] = mList;
+     mList->retireFenceFd = -1;
+     mList->numHwLayers = 2;
+@@ -272,39 +412,36 @@ GonkDisplayJB::Post(buffer_handle_t buf,
+     mList->hwLayers[1].visibleRegionScreen.numRects = 1;
+     mList->hwLayers[1].visibleRegionScreen.rects = &mList->hwLayers[1].displayFrame;
+     mList->hwLayers[1].acquireFenceFd = fence;
+     //mList->hwLayers[1].acquireFenceFd = -1;
+     mList->hwLayers[1].releaseFenceFd = -1;
+ #if ANDROID_VERSION == 18
+     mList->hwLayers[1].planeAlpha = 0xFF;
+ #endif
+-    mHwc->prepare(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+-
++    mHwc->GetDevice()->prepare(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
+     }
+-    int err = 0;
+     
+     {
+     PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-2");
+ 
+-    err=mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
++    mHwc->GetDevice()->set(mHwc->GetDevice(), HWC_NUM_DISPLAY_TYPES, displays);
+ 
+     }
+ 
+     {
+     PROFILER_LABEL("GonkDisplayJB::Post", "mHwc-3");
+ 
+     mFBSurface->setReleaseFenceFd(mList->hwLayers[1].releaseFenceFd);
+     if (mList->retireFenceFd >= 0)
+         close(mList->retireFenceFd);
+ 
+     }
++}
+ 
+-    return !err;
+-}
+ 
+ ANativeWindowBuffer*
+ GonkDisplayJB::DequeueBuffer()
+ {
+     return static_cast<ANativeWindowBuffer*>(mBootAnimBuffer.get());
+ }
+ 
+ bool
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.h b/widget/gonk/libdisplay/GonkDisplayJB.h
+--- a/widget/gonk/libdisplay/GonkDisplayJB.h
++++ b/widget/gonk/libdisplay/GonkDisplayJB.h
+@@ -11,21 +11,24 @@
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #ifndef GONKDISPLAYJB_H
+ #define GONKDISPLAYJB_H
+ 
++#include <hardware/power.h>
++#include <utils/RefBase.h>
++#include <utils/WorkQueue.h>
++
++#include "HwcDef.h"
+ #include "GonkDisplay.h"
+ #include "FramebufferSurface.h"
+-#include "hardware/hwcomposer.h"
+-#include "hardware/power.h"
+-#include "utils/RefBase.h"
++//#include "hardware/hwcomposer.h"
+ 
+ namespace mozilla {
+ 
+ class GonkDisplayJB : public GonkDisplay {
+ public:
+     GonkDisplayJB();
+     ~GonkDisplayJB();
+ 
+@@ -47,26 +50,31 @@ public:
+ 
+     virtual void UpdateFBSurface(EGLDisplay dpy, EGLSurface sur);
+ 
+     virtual void SetFBReleaseFd(int fd);
+ 
+     bool Post(buffer_handle_t buf, int fence);
+ 
+ private:
+-    hw_module_t const*        mModule;
+-    hw_module_t const*        mFBModule;
+-    hwc_composer_device_1_t*  mHwc;
++    void HwcPost(buffer_handle_t buf, int fence);
++
++    android::WorkQueue        mHwcPostWorkQueue;
++    HwcDevice*                mHwc;
++    HwcList*                  mList;
++
+     framebuffer_device_t*     mFBDevice;
++
+     power_module_t*           mPowerModule;
++
+     android::sp<android::FramebufferSurface> mFBSurface;
+     android::sp<ANativeWindow> mSTClient;
+     android::sp<android::IGraphicBufferAlloc> mAlloc;
+     android::sp<android::GraphicBuffer> mBootAnimBuffer;
+-    hwc_display_contents_1_t* mList;
++
+     uint32_t mWidth;
+     uint32_t mHeight;
+     OnEnabledCallbackType mEnabledCallback;
+ };
+ 
+ }
+ 
+ #endif /* GONKDISPLAYJB_H */
+diff --git a/widget/gonk/moz.build b/widget/gonk/moz.build
+--- a/widget/gonk/moz.build
++++ b/widget/gonk/moz.build
+@@ -11,16 +11,17 @@
+ # Unless required by applicable law or agreed to in writing, software
+ # distributed under the License is distributed on an "AS IS" BASIS,
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+ EXPORTS += [
+     'GonkPermission.h',
++    'HwcDef.h',
+     'OrientationObserver.h',
+ ]
+ 
+ DIRS += ['libdisplay', 'nativewindow']
+ 
+ # libui files
+ SOURCES += ['libui/' + src for src in [
+     'EventHub.cpp',

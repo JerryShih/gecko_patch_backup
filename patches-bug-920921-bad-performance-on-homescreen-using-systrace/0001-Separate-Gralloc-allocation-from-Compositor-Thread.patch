@@ -1,0 +1,716 @@
+From 3d8b858b8e549ea7d0ad93077775758baf01478e Mon Sep 17 00:00:00 2001
+From: chiajung hung <chung@mozilla.com>
+Date: Fri, 17 Jan 2014 17:47:05 +0800
+Subject: [PATCH] Separate Gralloc allocation from Compositor Thread
+
+---
+ gfx/layers/GrallocImages.cpp               |   29 ++++++--
+ gfx/layers/ipc/ImageBridgeChild.cpp        |   41 +++++++----
+ gfx/layers/ipc/ImageBridgeChild.h          |   10 +++
+ gfx/layers/ipc/ImageBridgeParent.cpp       |   32 +++++++--
+ gfx/layers/ipc/ImageBridgeParent.h         |   18 +++++
+ gfx/layers/ipc/LayersSurfaces.ipdlh        |    3 +-
+ gfx/layers/ipc/PImageBridge.ipdl           |    2 +
+ gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp |  108 ++++++++++++++++++++++------
+ gfx/layers/ipc/ShadowLayerUtilsGralloc.h   |    5 +-
+ gfx/layers/opengl/GrallocTextureClient.cpp |   24 +++++--
+ gfx/layers/opengl/GrallocTextureClient.h   |    3 +
+ gfx/layers/opengl/TextureHostOGL.cpp       |    8 +--
+ 12 files changed, 225 insertions(+), 58 deletions(-)
+
+diff --git a/gfx/layers/GrallocImages.cpp b/gfx/layers/GrallocImages.cpp
+index 2438e1a..4cd6aa5 100644
+--- a/gfx/layers/GrallocImages.cpp
++++ b/gfx/layers/GrallocImages.cpp
+@@ -9,6 +9,7 @@
+ #include <stdint.h>                     // for int8_t, uint8_t, uint32_t, etc
+ #include "nsDebug.h"                    // for NS_WARNING, NS_PRECONDITION
+ #include "mozilla/layers/ImageBridgeChild.h"
++#include "mozilla/layers/ImageBridgeParent.h"
+ #include "mozilla/layers/GrallocTextureClient.h"
+ #include "gfx2DGlue.h"
+ #include "gfxImageSurface.h"
+@@ -110,11 +111,12 @@ GrallocImage::SetData(const Data& aData)
+   }
+ 
+   uint8_t* yChannel = static_cast<uint8_t*>(vaddr);
+-  gfx::IntSize ySize = aData.mYSize;
++  gfxIntSize ySize = gfxIntSize(aData.mYSize.width,
++                                aData.mYSize.height);
+   int32_t yStride = graphicBuffer->getStride();
+ 
+   uint8_t* vChannel = yChannel + (yStride * ySize.height);
+-  gfx::IntSize uvSize = gfx::IntSize(ySize.width / 2,
++  gfxIntSize uvSize = gfxIntSize(ySize.width / 2,
+                                  ySize.height / 2);
+   // Align to 16 bytes boundary
+   int32_t uvStride = ((yStride / 2) + 15) & ~0x0F;
+@@ -293,9 +295,26 @@ GrallocImage::GetTextureClient()
+     if (desc.isRBSwapped()) {
+       flags |= TEXTURE_RB_SWAPPED;
+     }
+-    GrallocBufferActor* actor = static_cast<GrallocBufferActor*>(desc.bufferChild());
+-    mTextureClient = new GrallocTextureClientOGL(actor, mSize, flags);
+-    mTextureClient->SetGraphicBufferLocked(mGraphicBuffer);
++    MaybeMagicGrallocBufferHandle buffer = desc.buffer();
++    if (buffer.type() == MaybeMagicGrallocBufferHandle::TMagicGrallocBufferHandle) {
++      MagicGrallocBufferHandle handle = buffer.get_MagicGrallocBufferHandle();
++      mTextureClient = new GrallocTextureClientOGL(handle.mGraphicBuffer,
++                                                   mSize,
++                                                   flags);
++      mTextureClient->SetGraphicBufferLocked(mGraphicBuffer);
++    } else if (buffer.type() == MaybeMagicGrallocBufferHandle::Tint) {
++      int index = buffer.get_int();
++      sp<GraphicBuffer> realBuffer = ImageBridgeParent::GetOriginGraphicBuffer(index);
++      if (realBuffer == nullptr)
++        realBuffer =ImageBridgeChild::GetOriginGraphicBuffer(index);
++      if (realBuffer == nullptr)
++        return nullptr;
++      mTextureClient = new GrallocTextureClientOGL(realBuffer,
++                                                         mSize,
++                                                         flags);
++      mTextureClient->SetGraphicBufferLocked(mGraphicBuffer);
++    }
++
+   }
+   return mTextureClient;
+ }
+diff --git a/gfx/layers/ipc/ImageBridgeChild.cpp b/gfx/layers/ipc/ImageBridgeChild.cpp
+index 28b3acd..716b66d 100644
+--- a/gfx/layers/ipc/ImageBridgeChild.cpp
++++ b/gfx/layers/ipc/ImageBridgeChild.cpp
+@@ -533,6 +533,20 @@ ImageBridgeChild::StartUpInChildProcess(Transport* aTransport,
+   return sImageBridgeChildSingleton;
+ }
+ 
++android::DefaultKeyedVector<int, android::sp<android::GraphicBuffer> > ImageBridgeChild::mBuffers(nullptr);
++bool ImageBridgeChild::CreateGrallocBuffer(const IntSize& aSize, const uint32_t& aFormat, const uint32_t& aUsage, mozilla::layers::MaybeMagicGrallocBufferHandle* aHandle) {
++  MaybeMagicGrallocBufferHandle handle;
++  SendCreateGrallocBuffer(aSize, aFormat, aUsage, &handle);
++  if (handle.type() != MaybeMagicGrallocBufferHandle::TMagicGrallocBufferHandle)
++    return false;
++  MagicGrallocBufferHandle realHandle = handle.get_MagicGrallocBufferHandle();
++  MaybeMagicGrallocBufferHandle handleProxy(realHandle.mIndex);
++  *aHandle = handleProxy;
++  mBuffers.add(realHandle.mIndex, realHandle.mGraphicBuffer);
++  __android_log_print(ANDROID_LOG_INFO, "ImageChild", "Add buffer %d to list", realHandle.mIndex);
++  return true;
++}
++
+ void ImageBridgeChild::ShutDown()
+ {
+   NS_ASSERTION(NS_IsMainThread(), "Should be on the main Thread!");
+@@ -701,20 +715,21 @@ bool
+ ImageBridgeChild::AllocSurfaceDescriptorGrallocNow(const IntSize& aSize,
+                                                    const uint32_t& aFormat,
+                                                    const uint32_t& aUsage,
+-                                                   SurfaceDescriptor* aBuffer)
++                                                   SurfaceDescriptor* aHandle)
+ {
+ #ifdef MOZ_HAVE_SURFACEDESCRIPTORGRALLOC
+   MaybeMagicGrallocBufferHandle handle;
+-  PGrallocBufferChild* gc = SendPGrallocBufferConstructor(aSize, aFormat, aUsage, &handle);
+-  if (handle.Tnull_t == handle.type()) {
+-    PGrallocBufferChild::Send__delete__(gc);
+-    return false;
+-  }
+-
+-  GrallocBufferActor* gba = static_cast<GrallocBufferActor*>(gc);
+-  gba->InitFromHandle(handle.get_MagicGrallocBufferHandle());
+-
+-  *aBuffer = SurfaceDescriptorGralloc(nullptr, gc, aSize, /* external */ false, /* swapRB */ false);
++  SendCreateGrallocBuffer(aSize, aFormat, aUsage, &handle);
++//  PGrallocBufferChild* gc = SendPGrallocBufferConstructor(aSize, aFormat, aUsage, &handle);
++//  if (handle.Tnull_t == handle.type()) {
++//    PGrallocBufferChild::Send__delete__(gc);
++//    return false;
++//  }
++//
++//  GrallocBufferActor* gba = static_cast<GrallocBufferActor*>(gc);
++//  gba->InitFromHandle(handle.get_MagicGrallocBufferHandle());
++//
++//  *aBuffer = SurfaceDescriptorGralloc(nullptr, gc, aSize, /* external */ false, /* swapRB */ false);
+   return true;
+ #else
+   NS_RUNTIMEABORT("No gralloc buffers for you");
+@@ -747,9 +762,9 @@ bool
+ ImageBridgeChild::DeallocSurfaceDescriptorGrallocNow(const SurfaceDescriptor& aBuffer)
+ {
+ #ifdef MOZ_HAVE_SURFACEDESCRIPTORGRALLOC
+-  PGrallocBufferChild* gbp =
++  /*PGrallocBufferChild* gbp =
+     aBuffer.get_SurfaceDescriptorGralloc().bufferChild();
+-  PGrallocBufferChild::Send__delete__(gbp);
++  PGrallocBufferChild::Send__delete__(gbp);*/
+ 
+   return true;
+ #else
+diff --git a/gfx/layers/ipc/ImageBridgeChild.h b/gfx/layers/ipc/ImageBridgeChild.h
+index 0533dca..cb96d13 100644
+--- a/gfx/layers/ipc/ImageBridgeChild.h
++++ b/gfx/layers/ipc/ImageBridgeChild.h
+@@ -17,6 +17,7 @@
+ #include "mozilla/layers/PImageBridgeChild.h"
+ #include "nsDebug.h"                    // for NS_RUNTIMEABORT
+ #include "nsRegion.h"                   // for nsIntRegion
++#include "utils/KeyedVector.h"
+ class MessageLoop;
+ struct nsIntPoint;
+ struct nsIntRect;
+@@ -116,6 +117,7 @@ public:
+   static PImageBridgeChild*
+   StartUpInChildProcess(Transport* aTransport, ProcessId aOtherProcess);
+ 
++  bool CreateGrallocBuffer(const IntSize& aSize, const uint32_t& aFormat, const uint32_t& aUsage, mozilla::layers::MaybeMagicGrallocBufferHandle* aHandle);
+   /**
+    * Destroys the image bridge by calling DestroyBridge, and destroys the
+    * ImageBridge's thread.
+@@ -373,6 +375,13 @@ public:
+   virtual void DeallocShmem(mozilla::ipc::Shmem& aShmem);
+ 
+   virtual PTextureChild* CreateEmptyTextureChild() MOZ_OVERRIDE;
++  static android::sp<android::GraphicBuffer> GetOriginGraphicBuffer(int index) {
++    android::sp<android::GraphicBuffer> buf = mBuffers.valueFor(index);
++    return buf;
++  }
++  static void ForgetGraphicBuffer(int bufferId) {
++    mBuffers.removeItem(bufferId);
++  }
+ 
+ protected:
+   ImageBridgeChild();
+@@ -382,6 +391,7 @@ protected:
+                                   bool aUnsafe);
+ 
+   CompositableTransaction* mTxn;
++  static android::DefaultKeyedVector<int, android::sp<android::GraphicBuffer> > mBuffers;
+ 
+   // ISurfaceAllocator
+   virtual PGrallocBufferChild* AllocGrallocBuffer(const gfx::IntSize& aSize,
+diff --git a/gfx/layers/ipc/ImageBridgeParent.cpp b/gfx/layers/ipc/ImageBridgeParent.cpp
+index 5a9e367..ee37675 100644
+--- a/gfx/layers/ipc/ImageBridgeParent.cpp
++++ b/gfx/layers/ipc/ImageBridgeParent.cpp
+@@ -11,7 +11,8 @@
+ #include "base/process_util.h"          // for OpenProcessHandle
+ #include "base/task.h"                  // for CancelableTask, DeleteTask, etc
+ #include "base/tracked.h"               // for FROM_HERE
+-#include "mozilla/gfx/Point.h"          // for IntSize
++#include "gfxPoint.h"                   // for IntSize
++#include "base/thread.h"
+ #include "mozilla/ipc/MessageChannel.h" // for MessageChannel, etc
+ #include "mozilla/ipc/ProtocolUtils.h"
+ #include "mozilla/ipc/Transport.h"      // for Transport
+@@ -40,11 +41,17 @@ namespace mozilla {
+ namespace layers {
+ 
+ class PGrallocBufferParent;
++static Thread* bridgeThread = nullptr;
+ 
+ ImageBridgeParent::ImageBridgeParent(MessageLoop* aLoop, Transport* aTransport)
+-  : mMessageLoop(aLoop)
+-  , mTransport(aTransport)
++  : mTransport(aTransport)
+ {
++  if(!bridgeThread)
++  {
++    bridgeThread = new Thread("ImageBridgeParent");
++    bridgeThread->Start();
++  }
++  mMessageLoop = bridgeThread->message_loop();
+   // creates the map only if it has not been created already, so it is safe
+   // with several bridges
+   CompositableMap::Create();
+@@ -102,6 +109,19 @@ ImageBridgeParent::RecvUpdateNoSwap(const EditArray& aEdits)
+   return success;
+ }
+ 
++android::DefaultKeyedVector<int, android::sp<android::GraphicBuffer> > ImageBridgeParent::mBuffers(nullptr);
++int ImageBridgeParent::bufferId = 0;
++
++bool
++ImageBridgeParent::RecvCreateGrallocBuffer(const IntSize& aSize, const uint32_t& aFormat, const uint32_t& aUsage, mozilla::layers::MaybeMagicGrallocBufferHandle* aHandle)
++{
++
++  android::sp<android::GraphicBuffer> outgoingBuffer = new android::GraphicBuffer(aSize.width, aSize.height, aFormat, aUsage);
++  *aHandle = MagicGrallocBufferHandle(outgoingBuffer, ++bufferId);
++  mBuffers.add(bufferId, outgoingBuffer);
++  return true;
++}
++
+ static void
+ ConnectImageBridgeInParentProcess(ImageBridgeParent* aBridge,
+                                   Transport* aTransport,
+@@ -118,9 +138,13 @@ ImageBridgeParent::Create(Transport* aTransport, ProcessId aOtherProcess)
+     return nullptr;
+   }
+ 
+-  MessageLoop* loop = CompositorParent::CompositorLoop();
++
++  MessageLoop* loop = bridgeThread->message_loop();
++
++  //MessageLoop* loop = CompositorParent::CompositorLoop();
+   nsRefPtr<ImageBridgeParent> bridge = new ImageBridgeParent(loop, aTransport);
+   bridge->mSelfRef = bridge;
++  bridge->mBridgeThread = bridgeThread;
+   loop->PostTask(FROM_HERE,
+                  NewRunnableFunction(ConnectImageBridgeInParentProcess,
+                                      bridge.get(), aTransport, processHandle));
+diff --git a/gfx/layers/ipc/ImageBridgeParent.h b/gfx/layers/ipc/ImageBridgeParent.h
+index ac92617..8cf53e3 100644
+--- a/gfx/layers/ipc/ImageBridgeParent.h
++++ b/gfx/layers/ipc/ImageBridgeParent.h
+@@ -17,9 +17,14 @@
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsISupportsImpl.h"
+ #include "nsTArrayForwardDeclare.h"     // for InfallibleTArray
++#include "utils/KeyedVector.h"
+ 
+ class MessageLoop;
+ 
++namespace base {
++class Thread;
++}
++
+ namespace mozilla {
+ namespace ipc {
+ class Shmem;
+@@ -57,6 +62,7 @@ public:
+   // PImageBridge
+   virtual bool RecvUpdate(const EditArray& aEdits, EditReplyArray* aReply);
+   virtual bool RecvUpdateNoSwap(const EditArray& aEdits);
++  virtual bool RecvCreateGrallocBuffer(const IntSize&, const uint32_t&, const uint32_t&, mozilla::layers::MaybeMagicGrallocBufferHandle*);
+ 
+   virtual bool IsAsync() const MOZ_OVERRIDE { return true; }
+ 
+@@ -99,6 +105,14 @@ public:
+                 base::ProcessHandle aPeerProcess,
+                 mozilla::ipc::ProtocolCloneContext* aCtx) MOZ_OVERRIDE;
+ 
++  static android::sp<android::GraphicBuffer> GetOriginGraphicBuffer(int bufferId) {
++    android::sp<android::GraphicBuffer> buf = mBuffers.valueFor(bufferId);
++    return buf;
++  }
++  static void ForgetGraphicBuffer(int bufferId) {
++    mBuffers.removeItem(bufferId);
++  }
++
+ private:
+   void DeferredDestroy();
+ 
+@@ -107,6 +121,10 @@ private:
+   // This keeps us alive until ActorDestroy(), at which point we do a
+   // deferred destruction of ourselves.
+   nsRefPtr<ImageBridgeParent> mSelfRef;
++  base::Thread* mBridgeThread;
++  //android::sp<android::GraphicBuffer> mOutgoingBuffer;
++  static android::DefaultKeyedVector<int, android::sp<android::GraphicBuffer> > mBuffers;
++  static int bufferId;
+ };
+ 
+ } // layers
+diff --git a/gfx/layers/ipc/LayersSurfaces.ipdlh b/gfx/layers/ipc/LayersSurfaces.ipdlh
+index a77d1bc..8c40d1b 100644
+--- a/gfx/layers/ipc/LayersSurfaces.ipdlh
++++ b/gfx/layers/ipc/LayersSurfaces.ipdlh
+@@ -24,6 +24,7 @@ namespace layers {
+ 
+ union MaybeMagicGrallocBufferHandle {
+   MagicGrallocBufferHandle;
++  int;
+   null_t;
+ };
+ 
+@@ -93,7 +94,7 @@ struct NewSurfaceDescriptorGralloc {
+ 
+ // XXX - soon to be removed
+ struct SurfaceDescriptorGralloc {
+-  PGrallocBuffer buffer;
++  MaybeMagicGrallocBufferHandle buffer;
+   /**
+    * android::GraphicBuffer has a size information. But there are cases
+    * that GraphicBuffer's size and actual video's size are different.
+diff --git a/gfx/layers/ipc/PImageBridge.ipdl b/gfx/layers/ipc/PImageBridge.ipdl
+index dff6a0c..bbdd706 100644
+--- a/gfx/layers/ipc/PImageBridge.ipdl
++++ b/gfx/layers/ipc/PImageBridge.ipdl
+@@ -40,6 +40,8 @@ parent:
+   // flag. See GraphicBuffer.h and gralloc.h.
+   sync PGrallocBuffer(IntSize size, uint32_t format, uint32_t usage)
+     returns (MaybeMagicGrallocBufferHandle handle);
++  sync CreateGrallocBuffer(IntSize size, uint32_t format, uint32_t usage)
++   returns (MaybeMagicGrallocBufferHandle handle);
+ 
+   // First step of the destruction sequence. This puts all the ImageContainerParents
+   // in a state in which they can't send asynchronous messages to their child
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+index 09565a1..3bc5cfb 100644
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -15,6 +15,8 @@
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/CompositorTypes.h"
+ #include "mozilla/layers/TextureHost.h"
++#include "mozilla/layers/ImageBridgeChild.h"
++#include "mozilla/layers/ImageBridgeParent.h"
+ #include "mozilla/unused.h"
+ #include "nsXULAppAPI.h"
+ 
+@@ -30,6 +32,7 @@
+ #include "GeckoProfiler.h"
+ 
+ #include "cutils/properties.h"
++#include "utils/KeyedVector.h"
+ 
+ #include "MainThreadUtils.h"
+ 
+@@ -52,6 +55,7 @@ ParamTraits<MagicGrallocBufferHandle>::Write(Message* aMsg,
+   int fds[nfds];
+   flattenable->flatten(data, nbytes, fds, nfds);
+ 
++  aMsg->WriteInt32(aParam.mIndex);
+   aMsg->WriteSize(nbytes);
+   aMsg->WriteSize(nfds);
+ 
+@@ -61,7 +65,9 @@ ParamTraits<MagicGrallocBufferHandle>::Write(Message* aMsg,
+     // synchonously and the parent-side buffer can only be dropped if
+     // there's a crash.
+     aMsg->WriteFileDescriptor(FileDescriptor(fds[n], false));
++    __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer serializer", "write fd: %d", fds[n]);
+   }
++  __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer serializer", "serialize done index: %d", aParam.mIndex);
+ }
+ 
+ bool
+@@ -71,18 +77,22 @@ ParamTraits<MagicGrallocBufferHandle>::Read(const Message* aMsg,
+   size_t nbytes;
+   size_t nfds;
+   const char* data;
++  int index;
+ 
+-  if (!aMsg->ReadSize(aIter, &nbytes) ||
++  if (!aMsg->ReadInt32(aIter, &index) ||
++      !aMsg->ReadSize(aIter, &nbytes) ||
+       !aMsg->ReadSize(aIter, &nfds) ||
+       !aMsg->ReadBytes(aIter, &data, nbytes)) {
++    __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer deserializer", "Read fail");
+     return false;
+   }
+ 
+   int fds[nfds];
+-
++  bool sameProcess = (XRE_GetProcessType() == GeckoProcessType_Default);
+   for (size_t n = 0; n < nfds; ++n) {
+     FileDescriptor fd;
+     if (!aMsg->ReadFileDescriptor(aIter, &fd)) {
++      __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer deserializer", "Read FD fail, index: %d", index);
+       return false;
+     }
+     // If the GraphicBuffer was shared cross-process, SCM_RIGHTS does
+@@ -90,19 +100,40 @@ ParamTraits<MagicGrallocBufferHandle>::Read(const Message* aMsg,
+     // SCM_RIGHTS doesn't dup the fd.  That's surprising, but we just
+     // deal with it here.  NB: only the "default" (master) process can
+     // alloc gralloc buffers.
+-    bool sameProcess = (XRE_GetProcessType() == GeckoProcessType_Default);
+-    int dupFd = sameProcess ? dup(fd.fd) : fd.fd;
++    errno = 0;
++    int dupFd = sameProcess && index < 0 ? dup(fd.fd) : fd.fd;
++    __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer deserializer", "dup: ori_fd:%d, dup_fd:%d, error:%s", fd.fd, dupFd, strerror(errno));
+     fds[n] = dupFd;
+   }
++  aResult->mIndex = index;
++  if (sameProcess)
++    aResult->mGraphicBuffer = ImageBridgeParent::GetOriginGraphicBuffer(index);
++  else {
++    aResult->mGraphicBuffer = ImageBridgeChild::GetOriginGraphicBuffer(index);
++    if (index >= 0 && aResult->mGraphicBuffer == nullptr) {
++      sp<GraphicBuffer> buffer(new GraphicBuffer());
++      Flattenable *flattenable = buffer.get();
++
++      if (NO_ERROR == flattenable->unflatten(data, nbytes, fds, nfds)) {
++        __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer deserializer", "flattten new graphicbuffer: %d", index);
++        aResult->mGraphicBuffer = buffer;
++      }
++    }
++  }
+ 
+-  sp<GraphicBuffer> buffer(new GraphicBuffer());
++  if (aResult->mGraphicBuffer == nullptr) {
++    __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer deserializer", "can not find original buffer for id: %d", index);
++    return false;
++  }
++  /*sp<GraphicBuffer> buffer(new GraphicBuffer());
+   Flattenable *flattenable = buffer.get();
+ 
+   if (NO_ERROR == flattenable->unflatten(data, nbytes, fds, nfds)) {
+     aResult->mGraphicBuffer = buffer;
+     return true;
+-  }
+-  return false;
++  }*/
++  __android_log_print(ANDROID_LOG_INFO, "GraphicBuffer serializer", "deserialize done");
++  return true;
+ }
+ 
+ } // namespace IPC
+@@ -110,8 +141,9 @@ ParamTraits<MagicGrallocBufferHandle>::Read(const Message* aMsg,
+ namespace mozilla {
+ namespace layers {
+ 
+-MagicGrallocBufferHandle::MagicGrallocBufferHandle(const sp<GraphicBuffer>& aGraphicBuffer)
++MagicGrallocBufferHandle::MagicGrallocBufferHandle(const sp<GraphicBuffer>& aGraphicBuffer, int index)
+   : mGraphicBuffer(aGraphicBuffer)
++  , mIndex(index)
+ {
+ }
+ 
+@@ -227,6 +259,7 @@ NS_IMPL_ISUPPORTS1(GrallocReporter, nsIMemoryReporter)
+ 
+ int64_t GrallocReporter::sAmount = 0;
+ 
++
+ GrallocBufferActor::GrallocBufferActor()
+ : mAllocBytes(0)
+ {
+@@ -274,7 +307,7 @@ GrallocBufferActor::Create(const gfx::IntSize& aSize,
+   GrallocReporter::sAmount += actor->mAllocBytes;
+ 
+   actor->mGraphicBuffer = buffer;
+-  *aOutHandle = MagicGrallocBufferHandle(buffer);
++  *aOutHandle = MagicGrallocBufferHandle(buffer, -1);
+ 
+   return actor;
+ }
+@@ -323,7 +356,7 @@ ISurfaceAllocator::PlatformDestroySharedSurface(SurfaceDescriptor* aSurface)
+ 
+   // we should have either a bufferParent or bufferChild
+   // depending on whether we're on the parent or child side.
+-  PGrallocBufferParent* gbp =
++  /*PGrallocBufferParent* gbp =
+     aSurface->get_SurfaceDescriptorGralloc().bufferParent();
+   if (gbp) {
+     unused << PGrallocBufferParent::Send__delete__(gbp);
+@@ -331,10 +364,25 @@ ISurfaceAllocator::PlatformDestroySharedSurface(SurfaceDescriptor* aSurface)
+     PGrallocBufferChild* gbc =
+       aSurface->get_SurfaceDescriptorGralloc().bufferChild();
+     unused << PGrallocBufferChild::Send__delete__(gbc);
++  }*/
++  SurfaceDescriptorGralloc grallocSurface = aSurface->get_SurfaceDescriptorGralloc();
++  MaybeMagicGrallocBufferHandle maybehandle = grallocSurface.buffer();
++  int bufferIdx = -1;
++  if (maybehandle.type() == MaybeMagicGrallocBufferHandle::TMagicGrallocBufferHandle) {
++    MagicGrallocBufferHandle handle = maybehandle.get_MagicGrallocBufferHandle();
++    bufferIdx = handle.mIndex;
++  } else if (maybehandle.type() == MaybeMagicGrallocBufferHandle::Tint) {
++    bufferIdx = maybehandle.get_int();
+   }
+ 
+-  *aSurface = SurfaceDescriptor();
+-  return true;
++  if (bufferIdx != -1) {
++    ImageBridgeParent::ForgetGraphicBuffer(bufferIdx);
++    ImageBridgeChild::ForgetGraphicBuffer(bufferIdx);
++    return true;
++  }
++
++  __android_log_print(ANDROID_LOG_INFO, "Gralloc", "Invalid SurfaceDescriptorGralloc");
++  return false;
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -361,7 +409,9 @@ ShadowLayerForwarder::AllocGrallocBuffer(const gfx::IntSize& aSize,
+                                          uint32_t aUsage,
+                                          MaybeMagicGrallocBufferHandle* aHandle)
+ {
+-  return mShadowManager->SendPGrallocBufferConstructor(aSize, aFormat, aUsage, aHandle);
++  //return //ImageBridgeChild::GetSingleton()->SendPGrallocBufferConstructor(aSize, aFormat, aUsage, aHandle);//mShadowManager->SendPGrallocBufferConstructor(aSize, aFormat, aUsage, aHandle);
++  ImageBridgeChild::GetSingleton()->CreateGrallocBuffer(aSize, aFormat, aUsage, aHandle);
++  return nullptr;
+ }
+ 
+ bool
+@@ -430,19 +480,19 @@ ISurfaceAllocator::PlatformAllocSurfaceDescriptor(const gfx::IntSize& aSize,
+     defaultRBSwap = true;
+   }
+ 
+-  if (!gc) {
++  /*if (!gc) {
+     NS_ERROR("GrallocBufferConstructor failed by returned null");
+     return false;
+-  } else if (handle.Tnull_t == handle.type()) {
++  } else*/ if (handle.Tnull_t == handle.type()) {
+     NS_ERROR("GrallocBufferConstructor failed by returning handle with type Tnull_t");
+     PGrallocBufferChild::Send__delete__(gc);
+     return false;
+   }
+ 
+-  GrallocBufferActor* gba = static_cast<GrallocBufferActor*>(gc);
+-  gba->InitFromHandle(handle.get_MagicGrallocBufferHandle());
++  /*GrallocBufferActor* gba = static_cast<GrallocBufferActor*>(gc);
++  gba->InitFromHandle(handle.get_MagicGrallocBufferHandle());*/
+ 
+-  *aBuffer = SurfaceDescriptorGralloc(nullptr, gc, aSize,
++  *aBuffer = SurfaceDescriptorGralloc(MaybeMagicGrallocBufferHandle(handle), aSize,
+                                       /* external */ false,
+                                       defaultRBSwap);
+   return true;
+@@ -454,13 +504,26 @@ ISurfaceAllocator::PlatformAllocSurfaceDescriptor(const gfx::IntSize& aSize,
+ /*static*/ sp<GraphicBuffer>
+ GrallocBufferActor::GetFrom(const SurfaceDescriptorGralloc& aDescriptor)
+ {
+-  GrallocBufferActor* gba = nullptr;
++  /*GrallocBufferActor* gba = nullptr;
+   if (PGrallocBufferChild* child = aDescriptor.bufferChild()) {
+     gba = static_cast<GrallocBufferActor*>(child);
+   } else if (PGrallocBufferParent* parent = aDescriptor.bufferParent()) {
+     gba = static_cast<GrallocBufferActor*>(parent);
++  }*/
++  MaybeMagicGrallocBufferHandle handle = aDescriptor.buffer();
++  if (handle.type() == MaybeMagicGrallocBufferHandle::TMagicGrallocBufferHandle) {
++    MagicGrallocBufferHandle bufferHandle = handle.get_MagicGrallocBufferHandle();
++    __android_log_print(ANDROID_LOG_INFO, "Gralloc", "GetFrom handle:%d", bufferHandle.mIndex);
++    return bufferHandle.mGraphicBuffer;
++  } else if (handle.type() == MaybeMagicGrallocBufferHandle::Tint) {
++    __android_log_print(ANDROID_LOG_INFO, "Gralloc", "GetFrom %d", handle.get_int());
++    sp<GraphicBuffer> buffer = ImageBridgeParent::GetOriginGraphicBuffer(handle.get_int());
++    if (buffer == nullptr)
++      buffer = ImageBridgeChild::GetOriginGraphicBuffer(handle.get_int());
++    return buffer;
+   }
+-  return gba->mGraphicBuffer;
++  __android_log_print(ANDROID_LOG_INFO, "Gralloc", "no buffer");
++  return nullptr;
+ }
+ 
+ android::GraphicBuffer*
+@@ -558,9 +621,8 @@ ShadowLayerForwarder::PlatformDestroySharedSurface(SurfaceDescriptor* aSurface)
+     return false;
+   }
+ 
+-  PGrallocBufferChild* gbp =
+-    aSurface->get_SurfaceDescriptorGralloc().bufferChild();
+-  PGrallocBufferChild::Send__delete__(gbp);
++  //Since GraphicBuffer is 2-tier ref-counted, to release the buffer, just release the sp
++  MaybeMagicGrallocBufferHandle gbp = aSurface->get_SurfaceDescriptorGralloc().buffer();
+   *aSurface = SurfaceDescriptor();
+   return true;
+ }
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.h b/gfx/layers/ipc/ShadowLayerUtilsGralloc.h
+index 3cccca8..97acd04 100644
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.h
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.h
+@@ -39,10 +39,10 @@ class DeprecatedTextureHost;
+ struct MagicGrallocBufferHandle {
+   typedef android::GraphicBuffer GraphicBuffer;
+ 
+-  MagicGrallocBufferHandle()
++  MagicGrallocBufferHandle() : mIndex(0)
+   { }
+ 
+-  MagicGrallocBufferHandle(const android::sp<GraphicBuffer>& aGraphicBuffer);
++  MagicGrallocBufferHandle(const android::sp<GraphicBuffer>& aGraphicBuffer, int index = -1);
+ 
+   // Default copy ctor and operator= are OK
+ 
+@@ -51,6 +51,7 @@ struct MagicGrallocBufferHandle {
+   }
+ 
+   android::sp<GraphicBuffer> mGraphicBuffer;
++  int mIndex;
+ };
+ 
+ /**
+diff --git a/gfx/layers/opengl/GrallocTextureClient.cpp b/gfx/layers/opengl/GrallocTextureClient.cpp
+index 6dcdffe..8f9fa4d 100644
+--- a/gfx/layers/opengl/GrallocTextureClient.cpp
++++ b/gfx/layers/opengl/GrallocTextureClient.cpp
+@@ -61,9 +61,8 @@ public:
+   {
+     // We just need to wrap the actor in a SurfaceDescriptor because that's what
+     // ISurfaceAllocator uses as input, we don't care about the other parameters.
+-    SurfaceDescriptor sd = SurfaceDescriptorGralloc(nullptr, mGrallocActor,
+-                                                    IntSize(0, 0),
+-                                                    false, false);
++    SurfaceDescriptor sd = SurfaceDescriptorGralloc(MagicGrallocBufferHandle(nullptr),
++                                                    gfx::IntSize(0,0), false, false);
+     allocator->DestroySharedSurface(&sd);
+     mGrallocActor = nullptr;
+   }
+@@ -89,6 +88,19 @@ GrallocTextureClientOGL::DropTextureData()
+   }
+ }
+ 
++GrallocTextureClientOGL::GrallocTextureClientOGL(android::sp<android::GraphicBuffer> buffer,
++                        gfx::IntSize aSize,
++                        TextureFlags aFlags)
++: BufferTextureClient(nullptr, gfx::FORMAT_UNKNOWN, aFlags)
++, mGrallocFlags(android::GraphicBuffer::USAGE_SW_READ_OFTEN)
++, mMappedBuffer(nullptr)
++{
++  mGrallocActor = nullptr;
++  mGraphicBuffer = buffer;
++  mSize = aSize;
++  MOZ_COUNT_CTOR(GrallocTextureClientOGL);
++}
++
+ GrallocTextureClientOGL::GrallocTextureClientOGL(GrallocBufferActor* aActor,
+                                                  gfx::IntSize aSize,
+                                                  TextureFlags aFlags)
+@@ -122,9 +134,9 @@ GrallocTextureClientOGL::~GrallocTextureClientOGL()
+       MOZ_ASSERT(mCompositable);
+       // We just need to wrap the actor in a SurfaceDescriptor because that's what
+       // ISurfaceAllocator uses as input, we don't care about the other parameters.
+-      SurfaceDescriptor sd = SurfaceDescriptorGralloc(nullptr, mGrallocActor,
+-                                                      IntSize(0, 0),
+-                                                      false, false);
++      null_t nullBuffer;
++      SurfaceDescriptor sd = SurfaceDescriptorGralloc(nullBuffer,
++                                                      gfx::IntSize(0,0), false, false);
+       mCompositable->GetForwarder()->DestroySharedSurface(&sd);
+     }
+   }
+diff --git a/gfx/layers/opengl/GrallocTextureClient.h b/gfx/layers/opengl/GrallocTextureClient.h
+index a4dbf60..e48ba58 100644
+--- a/gfx/layers/opengl/GrallocTextureClient.h
++++ b/gfx/layers/opengl/GrallocTextureClient.h
+@@ -33,6 +33,9 @@ class GraphicBufferLocked;
+ class GrallocTextureClientOGL : public BufferTextureClient
+ {
+ public:
++  GrallocTextureClientOGL(android::sp<android::GraphicBuffer> buffer,
++                          gfx::IntSize aSize,
++                          TextureFlags aFlags = TEXTURE_FLAGS_DEFAULT);
+   GrallocTextureClientOGL(GrallocBufferActor* aActor,
+                           gfx::IntSize aSize,
+                           TextureFlags aFlags = TEXTURE_FLAGS_DEFAULT);
+diff --git a/gfx/layers/opengl/TextureHostOGL.cpp b/gfx/layers/opengl/TextureHostOGL.cpp
+index 6fb8abf..bcfaadf 100644
+--- a/gfx/layers/opengl/TextureHostOGL.cpp
++++ b/gfx/layers/opengl/TextureHostOGL.cpp
+@@ -1178,19 +1178,19 @@ GrallocDeprecatedTextureHostOGL::DeleteTextures()
+ static void
+ AddDeprecatedTextureHostToGrallocBufferActor(DeprecatedTextureHost* aDeprecatedTextureHost, const SurfaceDescriptor* aSurfaceDescriptor)
+ {
+-  if (aSurfaceDescriptor && IsSurfaceDescriptorValid(*aSurfaceDescriptor)) {
++  /*if (aSurfaceDescriptor && IsSurfaceDescriptorValid(*aSurfaceDescriptor)) {
+     GrallocBufferActor* actor = static_cast<GrallocBufferActor*>(aSurfaceDescriptor->get_SurfaceDescriptorGralloc().bufferParent());
+     actor->AddDeprecatedTextureHost(aDeprecatedTextureHost);
+-  }
++  }*/
+ }
+ 
+ static void
+ RemoveDeprecatedTextureHostFromGrallocBufferActor(DeprecatedTextureHost* aDeprecatedTextureHost, const SurfaceDescriptor* aSurfaceDescriptor)
+ {
+-  if (aSurfaceDescriptor && IsSurfaceDescriptorValid(*aSurfaceDescriptor)) {
++  /*if (aSurfaceDescriptor && IsSurfaceDescriptorValid(*aSurfaceDescriptor)) {
+     GrallocBufferActor* actor = static_cast<GrallocBufferActor*>(aSurfaceDescriptor->get_SurfaceDescriptorGralloc().bufferParent());
+     actor->RemoveDeprecatedTextureHost(aDeprecatedTextureHost);
+-  }
++  }*/
+ }
+ 
+ void
+-- 
+1.7.9.5
+

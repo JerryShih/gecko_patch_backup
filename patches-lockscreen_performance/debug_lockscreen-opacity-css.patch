@@ -1,0 +1,800 @@
+# HG changeset patch
+# Parent 491ccd2f2380ad47959d883f7f021538f13397ed
+# User Jerry Shih <hshih@mozilla.com>
+test opacity css
+
+diff --git a/gfx/layers/Compositor.cpp b/gfx/layers/Compositor.cpp
+--- a/gfx/layers/Compositor.cpp
++++ b/gfx/layers/Compositor.cpp
+@@ -110,17 +110,17 @@ Compositor::DrawDiagnosticsInternal(Diag
+     }
+   } else if (aFlags & DIAGNOSTIC_IMAGE) {
+     color = gfx::Color(1.0f, 0.0f, 0.0f, 1.0f); // red
+   } else if (aFlags & DIAGNOSTIC_COLOR) {
+     color = gfx::Color(0.0f, 0.0f, 1.0f, 1.0f); // blue
+   } else if (aFlags & DIAGNOSTIC_CONTAINER) {
+     color = gfx::Color(0.8f, 0.0f, 0.8f, 1.0f); // purple
+   } else if (aFlags & DIAGNOSTIC_INTERMEDIATE_SURFACE) {
+-    color = gfx::Color(1.0f, 1.0f, 0.0f, 1.0f); // purple
++    color = gfx::Color(1.0f, 1.0f, 0.0f, 1.0f); // yellow
+   }
+ 
+   // make tile borders a bit more transparent to keep layer borders readable.
+   if (aFlags & DIAGNOSTIC_TILE ||
+       aFlags & DIAGNOSTIC_BIGIMAGE ||
+       aFlags & DIAGNOSTIC_REGION_RECT) {
+     lWidth = 1;
+     opacity = 0.5f;
+diff --git a/gfx/layers/Layers.cpp b/gfx/layers/Layers.cpp
+--- a/gfx/layers/Layers.cpp
++++ b/gfx/layers/Layers.cpp
+@@ -27,16 +27,18 @@
+ #include "mozilla/layers/CompositorTypes.h"
+ #include "mozilla/layers/LayerManagerComposite.h"  // for LayerComposite
+ #include "mozilla/layers/LayersMessages.h"  // for TransformFunction, etc
+ #include "nsAString.h"
+ #include "nsCSSValue.h"                 // for nsCSSValue::Array, etc
+ #include "nsPrintfCString.h"            // for nsPrintfCString
+ #include "nsStyleStruct.h"              // for nsTimingFunction, etc
+ 
++#include "GeckoProfiler.h"
++
+ using namespace mozilla::layers;
+ using namespace mozilla::gfx;
+ 
+ typedef FrameMetrics::ViewID ViewID;
+ const ViewID FrameMetrics::NULL_SCROLL_ID = 0;
+ 
+ uint8_t gLayerManagerLayerBuilder;
+ 
+@@ -854,33 +856,50 @@ ContainerLayer::HasMultipleChildren()
+   }
+ 
+   return false;
+ }
+ 
+ bool
+ ContainerLayer::HasOverlapChildrenRegion()
+ {
++  PROFILER_LABEL("ContainerLayer", "HasOverlapChildrenRegion");
++  //printf_stderr("bignose ContainerLayer::HasOverlapChildrenRegion");
++
+   for (Layer* child1 = GetFirstChild(); child1; child1 = child1->GetNextSibling()) {
+     const nsIntRect *clipRect1 = child1->GetEffectiveClipRect();
+     if (clipRect1 && clipRect1->IsEmpty())
+       continue;
+     if (child1->GetVisibleRegion().IsEmpty())
+       continue;
+ 
+     for (Layer* child2 = child1->GetNextSibling(); child2; child2 = child2->GetNextSibling()) {
+       const nsIntRect *clipRect2 = child2->GetEffectiveClipRect();
+       if (clipRect2 && clipRect2->IsEmpty())
+         continue;
+       if (child2->GetVisibleRegion().IsEmpty())
+         continue;
+ 
+-      if(!child1->GetVisibleRegion().Intersect(child2->GetVisibleRegion()).IsEmpty()){
+-          return true;
++      //gfx3DMatrix child1_matrix=child1->GetLocalTransform().TransformBounds(gfxRect(child1->GetVisibleRegion().GetBounds()));
++      //gfx3DMatrix child2_matrix=child2->GetLocalTransform();
++
++      //gfxRect TransformBounds(const gfxRect& rect) const;
++
++      //gfxRect child1_bound(child1->GetVisibleRegion().GetBounds());
++      //gfxRect child2_bound(child1->GetVisibleRegion().GetBounds());
++
++      gfxRect child1_bound=child1->GetLocalTransform().TransformBounds(gfxRect(child1->GetVisibleRegion().GetBounds()));
++      gfxRect child2_bound=child1->GetLocalTransform().TransformBounds(gfxRect(child1->GetVisibleRegion().GetBounds()));
++
++      if(child1_bound.Intersects(child2_bound)){
++        return true;
+       }
++      //if(!child1->GetVisibleRegion().Intersect(child2->GetVisibleRegion()).IsEmpty()){
++      //    return true;
++      //}
+     }
+   }
+ 
+   return false;
+ }
+ 
+ void
+ ContainerLayer::SortChildrenBy3DZOrder(nsTArray<Layer*>& aArray)
+@@ -924,22 +943,22 @@ ContainerLayer::DefaultComputeEffectiveT
+     float opacity = GetEffectiveOpacity();
+     //if (opacity != 1.0f && HasMultipleChildren()){
+     //  printf_stderr("bignose ContainerLayer:%p has overlap result:%d",this,(int)HasOverlapChildrenRegion());
+     //}
+ 
+     //if (opacity != 1.0f && HasMultipleChildren()) {
+     //  useIntermediateSurface = true;
+     //} else {
+-    //if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
++    if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
++      useIntermediateSurface = true;
++    } else {
++    ///*if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
+     //  useIntermediateSurface = true;
+-    //} else {
+-    /*if (opacity != 1.0f && HasMultipleChildren() && HasOverlapChildrenRegion()) {
+-      useIntermediateSurface = true;
+-    } else */{
++    //} else */{
+       useIntermediateSurface = false;
+       gfxMatrix contTransform;
+       if (!mEffectiveTransform.Is2D(&contTransform) ||
+ #ifdef MOZ_GFX_OPTIMIZE_MOBILE
+         !contTransform.PreservesAxisAlignedRectangles()) {
+ #else
+         contTransform.HasNonIntegerTranslation()) {
+ #endif
+diff --git a/gfx/layers/Layers.h b/gfx/layers/Layers.h
+--- a/gfx/layers/Layers.h
++++ b/gfx/layers/Layers.h
+@@ -1662,16 +1662,17 @@ public:
+ 
+   /**
+    * Returns true if this container has more than one non-empty child
+    */
+   bool HasMultipleChildren();
+ 
+   /**
+    * Returns true if this container's visible region is overlap
++   * mEffectiveTransform should be computed
+    */
+   bool HasOverlapChildrenRegion();
+ 
+   /**
+    * Returns true if this container supports children with component alpha.
+    * Should only be called while painting a child of this layer.
+    */
+   bool SupportsComponentAlphaChildren() { return mSupportsComponentAlphaChildren; }
+@@ -1707,16 +1708,18 @@ protected:
+   float mPreYScale;
+   // The resolution scale inherited from the parent layer. This will already
+   // be part of mTransform.
+   float mInheritedXScale;
+   float mInheritedYScale;
+   bool mUseIntermediateSurface;
+   bool mSupportsComponentAlphaChildren;
+   bool mMayHaveReadbackChild;
++
++  bool mUseGroupOpacity;
+ };
+ 
+ /**
+  * A Layer which just renders a solid color in its visible region. It actually
+  * can fill any area that contains the visible region, so if you need to
+  * restrict the area filled, set a clip region on this layer.
+  */
+ class ColorLayer : public Layer {
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -24,27 +24,28 @@
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)         \
+   do { if (layer->AsShadowableLayer()) { PR_LOG(LayerManager::GetLog(), PR_LOG_DEBUG, _args); } } while (0)
+ #else
+ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG(_args)
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
++/*
+ #define MOZ_LAYERS_HAVE_LOG
+ #define PR_BEGIN_MACRO  do {
+ #define PR_END_MACRO    } while (0)
+ 
+ #define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
+ 
+ #define TMOZ_LAYERS_LOG(args...) \
+   PR_BEGIN_MACRO \
+     __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
+   PR_END_MACRO
+-
++*/
+ 
+ 
+ namespace android {
+ class GraphicBuffer;
+ }
+ 
+ namespace mozilla {
+ namespace layers {
+diff --git a/gfx/layers/composite/ContainerLayerComposite.cpp b/gfx/layers/composite/ContainerLayerComposite.cpp
+--- a/gfx/layers/composite/ContainerLayerComposite.cpp
++++ b/gfx/layers/composite/ContainerLayerComposite.cpp
+@@ -32,16 +32,18 @@
+ #include "nsRegion.h"                   // for nsIntRegion
+ #include "nsTArray.h"                   // for nsAutoTArray
+ #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+ #include <vector>
+ 
+ #include "GeckoProfiler.h"
+ #include "cutils/properties.h"
+ 
++#include "mozilla/layers/LayersMessages.h"  // for Animation etc
++
+ namespace mozilla {
+ namespace layers {
+ 
+ // HasOpaqueAncestorLayer and ContainerRender are shared between RefLayer and ContainerLayer
+ static bool
+ HasOpaqueAncestorLayer(Layer* aLayer)
+ {
+   for (Layer* l = aLayer->GetParent(); l; l = l->GetParent()) {
+@@ -198,21 +200,25 @@ static void DrawVelGraph(const nsIntRect
+                  graphBounds.y + graphRect.height - vel/yScaleFactor));
+   }
+ 
+   compositor->DrawLines(graph, clipRect, gfx::Color(0,1,0,1),
+                         opacity, transform);
+ 
+ }
+ 
++static int gPrefixSpaceNum=1;
++
+ template<class ContainerT> void
+ ContainerRender(ContainerT* aContainer,
+                 LayerManagerComposite* aManager,
+                 const nsIntRect& aClipRect)
+ {
++  gPrefixSpaceNum+=4;
++
+   char prop[PROPERTY_VALUE_MAX];
+   property_get("debug.bignose.log",prop,"0");
+ 
+   if(atoi(prop)==1){
+     printf_stderr("bignose ContainerRender start");
+   }
+ 
+   /**
+@@ -227,23 +233,55 @@ ContainerRender(ContainerT* aContainer,
+   nsIntRect visibleRect = aContainer->GetEffectiveVisibleRegion().GetBounds();
+ 
+   aContainer->mSupportsComponentAlphaChildren = false;
+ 
+   float opacity = aContainer->GetEffectiveOpacity();
+ 
+   bool needsSurface = aContainer->UseIntermediateSurface();
+ 
++
++  if(atoi(prop)==1){
++    //bignose test
++    bool has_opacity_anim=false;
++    InfallibleTArray<Animation>& animations = aContainer->GetAnimations();
++    for (uint32_t i = animations.Length(); i-- !=0; ) {
++      if(animations[i].property()==eCSSProperty_opacity){
++        has_opacity_anim=true;
++        printf_stderr("%*s" "bignose ContainerRender:%p has opacity anim",gPrefixSpaceNum," ",aContainer);
++      }
++    }
++
++    for (Layer* child_layer = aContainer->GetFirstChild(); child_layer; child_layer = child_layer->GetNextSibling()) {
++      if(!child_layer->AsContainerLayer()){
++        InfallibleTArray<Animation>& animations = child_layer->GetAnimations();
++        for (uint32_t i = animations.Length(); i-- !=0; ) {
++          if(animations[i].property()==eCSSProperty_opacity){
++            has_opacity_anim=true;
++            printf_stderr("%*s" "bignose ContainerRender's child:%p has opacity anim",gPrefixSpaceNum+4," ",child_layer);
++          }
++        }
++      }
++    }
++
++    if(has_opacity_anim){
++      printf_stderr("%*s" "bignose opacity -------",gPrefixSpaceNum," ");
++      printf_stderr("     ");
++    }
++  }
++
++
++
+   {
+   PROFILER_LABEL("ContainerLayerComposite", "ContainerRender 1");
+ 
+   if (needsSurface) {
+-    //if(atoi(prop)==1){
++    if(atoi(prop)==1){
+       printf_stderr("bignose needsSurface occur");
+-    //}
++    }
+ 
+     SurfaceInitMode mode = INIT_MODE_CLEAR;
+     bool surfaceCopyNeeded = false;
+     gfx::IntRect surfaceRect = gfx::IntRect(visibleRect.x, visibleRect.y,
+                                             visibleRect.width, visibleRect.height);
+     gfx::IntPoint sourcePoint = gfx::IntPoint(visibleRect.x, visibleRect.y);
+     // we're about to create a framebuffer backed by textures to use as an intermediate
+     // surface. What to do if its size (as given by framebufferRect) would exceed the
+@@ -442,16 +480,18 @@ ContainerRender(ContainerT* aContainer,
+                                                transform);
+   }
+ 
+   }
+ 
+   if(atoi(prop)==1){
+     printf_stderr("bignose ContainerRender end");
+   }
++
++  gPrefixSpaceNum-=4;
+ }
+ 
+ ContainerLayerComposite::ContainerLayerComposite(LayerManagerComposite *aManager)
+   : ContainerLayer(aManager, nullptr)
+   , LayerComposite(aManager)
+ {
+   MOZ_COUNT_CTOR(ContainerLayerComposite);
+   mImplData = static_cast<LayerComposite*>(this);
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -210,17 +210,17 @@ LayerManagerComposite::EndTransaction(Dr
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+   Log();
+ #endif
+ 
+   //Dump(nullptr,"bignose layer",false);
+ 
+-  printf_stderr("bignose begin frame");
++  //printf_stderr("bignose begin frame");
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+   if (mRoot && mClonedLayerTreeProperties) {
+     nsIntRegion invalid = mClonedLayerTreeProperties->ComputeDifferences(mRoot, nullptr);
+@@ -247,17 +247,17 @@ LayerManagerComposite::EndTransaction(Dr
+ 
+   mCompositor->SetTargetContext(nullptr);
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   Log();
+   MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ 
+-  printf_stderr("bignose end frame");
++  //printf_stderr("bignose end frame");
+ }
+ 
+ already_AddRefed<gfxASurface>
+ LayerManagerComposite::CreateOptimalMaskSurface(const IntSize &aSize)
+ {
+   NS_RUNTIMEABORT("Should only be called on the drawing side");
+   return nullptr;
+ }
+diff --git a/layout/base/FrameLayerBuilder.h b/layout/base/FrameLayerBuilder.h
+--- a/layout/base/FrameLayerBuilder.h
++++ b/layout/base/FrameLayerBuilder.h
+@@ -52,43 +52,51 @@ public:
+   nsRegion mRegion;
+   bool mIsInfinite;
+ };
+ 
+ struct ContainerLayerParameters {
+   ContainerLayerParameters() :
+     mXScale(1), mYScale(1), mAncestorClipRect(nullptr),
+     mInTransformedSubtree(false), mInActiveTransformedSubtree(false),
+-    mDisableSubpixelAntialiasingInDescendants(false)
++    mDisableSubpixelAntialiasingInDescendants(false),
++    mUseGroupOpacity(true)
+   {}
+   ContainerLayerParameters(float aXScale, float aYScale) :
+     mXScale(aXScale), mYScale(aYScale), mAncestorClipRect(nullptr),
+     mInTransformedSubtree(false), mInActiveTransformedSubtree(false),
+-    mDisableSubpixelAntialiasingInDescendants(false)
++    mDisableSubpixelAntialiasingInDescendants(false),
++    mUseGroupOpacity(true)
+   {}
+   ContainerLayerParameters(float aXScale, float aYScale,
+                            const nsIntPoint& aOffset,
+                            const ContainerLayerParameters& aParent) :
+     mXScale(aXScale), mYScale(aYScale), mAncestorClipRect(nullptr),
+     mOffset(aOffset),
+     mInTransformedSubtree(aParent.mInTransformedSubtree),
+     mInActiveTransformedSubtree(aParent.mInActiveTransformedSubtree),
+-    mDisableSubpixelAntialiasingInDescendants(aParent.mDisableSubpixelAntialiasingInDescendants)
++    mDisableSubpixelAntialiasingInDescendants(aParent.mDisableSubpixelAntialiasingInDescendants),
++    mUseGroupOpacity(aParent.mUseGroupOpacity)
+   {}
+   float mXScale, mYScale;
+   /**
+    * An ancestor clip rect that can be applied to restrict the visibility
+    * of this container. Null if none available.
+    */
+   const nsIntRect* mAncestorClipRect;
+   /**
+    * An offset to append to the transform set on all child layers created.
+    */
+   nsIntPoint mOffset;
+ 
++  /**
++   * has group opacity or not
++   */
++  bool mUseGroupOpacity;
++
+   bool mInTransformedSubtree;
+   bool mInActiveTransformedSubtree;
+   bool mDisableSubpixelAntialiasingInDescendants;
+   /**
+    * When this is false, ThebesLayer coordinates are drawn to with an integer
+    * translation and the scale in mXScale/mYScale.
+    */
+   bool AllowResidualTranslation()
+diff --git a/layout/style/nsCSSParser.cpp b/layout/style/nsCSSParser.cpp
+--- a/layout/style/nsCSSParser.cpp
++++ b/layout/style/nsCSSParser.cpp
+@@ -630,16 +630,17 @@ protected:
+   bool ParseFontVariantNumeric(nsCSSValue& aValue);
+   bool ParseFontWeight(nsCSSValue& aValue);
+   bool ParseOneFamily(nsAString& aFamily, bool& aOneKeyword);
+   bool ParseFamily(nsCSSValue& aValue);
+   bool ParseFontFeatureSettings(nsCSSValue& aValue);
+   bool ParseFontSrc(nsCSSValue& aValue);
+   bool ParseFontSrcFormat(InfallibleTArray<nsCSSValue>& values);
+   bool ParseFontRanges(nsCSSValue& aValue);
++  bool ParseGroupOpacity(nsCSSValue& aValue);
+   bool ParseListStyle();
+   bool ParseMargin();
+   bool ParseMarks(nsCSSValue& aValue);
+   bool ParseTransform(bool aIsPrefixed);
+   bool ParseOutline();
+   bool ParseOverflow();
+   bool ParsePadding();
+   bool ParseQuotes();
+@@ -7901,16 +7902,18 @@ CSSParserImpl::ParseSingleValueProperty(
+       case eCSSProperty_font_variant_ligatures:
+         return ParseFontVariantLigatures(aValue);
+       case eCSSProperty_font_variant_numeric:
+         return ParseFontVariantNumeric(aValue);
+       case eCSSProperty_font_feature_settings:
+         return ParseFontFeatureSettings(aValue);
+       case eCSSProperty_font_weight:
+         return ParseFontWeight(aValue);
++      case eCSSProperty_group_opacity:
++        return ParseGroupOpacity(aValue);
+       case eCSSProperty_image_orientation:
+         return ParseImageOrientation(aValue);
+       case eCSSProperty_marks:
+         return ParseMarks(aValue);
+       case eCSSProperty_text_align:
+         return ParseTextAlign(aValue);
+       case eCSSProperty_text_align_last:
+         return ParseTextAlignLast(aValue);
+@@ -10654,16 +10657,27 @@ CSSParserImpl::ParseFontFeatureSettings(
+     cur->mNext = new nsCSSValuePairList;
+     cur = cur->mNext;
+   }
+ 
+   return true;
+ }
+ 
+ bool
++CSSParserImpl::ParseGroupOpacity(nsCSSValue& aValue)
++{
++  printf_stderr("bignose CSSParserImpl::ParseGroupOpacity(nsCSSValue& aValue)");
++  if (ParseVariant(aValue, VARIANT_NONE | VARIANT_NORMAL,
++                   nsCSSProps::kGroupOpacityTable)) {
++    return true;
++  }
++  return false;
++}
++
++bool
+ CSSParserImpl::ParseListStyle()
+ {
+   // 'list-style' can accept 'none' for two different subproperties,
+   // 'list-style-type' and 'list-style-position'.  In order to accept
+   // 'none' as the value of either but still allow another value for
+   // either, we need to ensure that the first 'none' we find gets
+   // allocated to a dummy property instead.
+   static const nsCSSProperty listStyleIDs[] = {
+diff --git a/layout/style/nsCSSPropList.h b/layout/style/nsCSSPropList.h
+--- a/layout/style/nsCSSPropList.h
++++ b/layout/style/nsCSSPropList.h
+@@ -3746,16 +3746,26 @@ CSS_PROP_SVGRESET(
+     vector_effect,
+     VectorEffect,
+     CSS_PROPERTY_PARSE_VALUE,
+     "",
+     VARIANT_HK,
+     kVectorEffectKTable,
+     offsetof(nsStyleSVGReset, mVectorEffect),
+     eStyleAnimType_EnumU8)
++CSS_PROP_DISPLAY(
++    group-opacity,
++    group_opacity,
++    GroupOpacity,
++    CSS_PROPERTY_PARSE_VALUE,
++    "layout.css.group-opacity.enabled",
++    VARIANT_NONE | VARIANT_NORMAL,
++    kGroupOpacityTable,
++    CSS_PROP_NO_OFFSET,
++    eStyleAnimType_None)
+ 
+ // The shorthands below are essentially aliases, but they require different
+ // parsing rules, and are therefore implemented as shorthands.
+ CSS_PROP_SHORTHAND(
+     -moz-transform,
+     _moz_transform,
+     MozTransform,
+     CSS_PROPERTY_PARSE_FUNCTION |
+diff --git a/layout/style/nsCSSProps.cpp b/layout/style/nsCSSProps.cpp
+--- a/layout/style/nsCSSProps.cpp
++++ b/layout/style/nsCSSProps.cpp
+@@ -1880,16 +1880,22 @@ const int32_t nsCSSProps::kColorInterpol
+ };
+ 
+ const int32_t nsCSSProps::kColumnFillKTable[] = {
+   eCSSKeyword_auto, NS_STYLE_COLUMN_FILL_AUTO,
+   eCSSKeyword_balance, NS_STYLE_COLUMN_FILL_BALANCE,
+   eCSSKeyword_UNKNOWN, -1
+ };
+ 
++const int32_t nsCSSProps::kGroupOpacityTable[] = {
++  eCSSKeyword_normal,  NS_STYLE_GROUP_OPACITY_NORMAL,
++  eCSSKeyword_none, NS_STYLE_GROUP_OPACITY_NONE,
++  eCSSKeyword_UNKNOWN,-1
++};
++
+ static bool IsKeyValSentinel(nsCSSKeyword aKey, int32_t aValue)
+ {
+   return aKey == eCSSKeyword_UNKNOWN && aValue == -1;
+ }
+ 
+ int32_t
+ nsCSSProps::FindIndexOfKeyword(nsCSSKeyword aKeyword, const int32_t aTable[])
+ {
+diff --git a/layout/style/nsCSSProps.h b/layout/style/nsCSSProps.h
+--- a/layout/style/nsCSSProps.h
++++ b/layout/style/nsCSSProps.h
+@@ -572,11 +572,12 @@ public:
+   static const int32_t kVolumeKTable[];
+   static const int32_t kWhitespaceKTable[];
+   static const int32_t kWidthKTable[]; // also min-width, max-width
+   static const int32_t kWindowShadowKTable[];
+   static const int32_t kWordBreakKTable[];
+   static const int32_t kWordWrapKTable[];
+   static const int32_t kWritingModeKTable[];
+   static const int32_t kHyphensKTable[];
++  static const int32_t kGroupOpacityTable[];
+ };
+ 
+ #endif /* nsCSSProps_h___ */
+diff --git a/layout/style/nsComputedDOMStyle.cpp b/layout/style/nsComputedDOMStyle.cpp
+--- a/layout/style/nsComputedDOMStyle.cpp
++++ b/layout/style/nsComputedDOMStyle.cpp
+@@ -5300,16 +5300,28 @@ nsComputedDOMStyle::DoGetAnimationPlaySt
+     playState->SetIdent(
+       nsCSSProps::ValueToKeywordEnum(animation->GetPlayState(),
+                                      nsCSSProps::kAnimationPlayStateKTable));
+   } while (++i < display->mAnimationPlayStateCount);
+ 
+   return valueList;
+ }
+ 
++CSSValue*
++nsComputedDOMStyle::DoGetGroupOpacity()
++{
++  printf_stderr("bignose nsComputedDOMStyle::DoGetGroupOpacity");
++
++  nsROCSSPrimitiveValue *val = new nsROCSSPrimitiveValue;
++  val->SetIdent(
++    nsCSSProps::ValueToKeywordEnum((int32_t)(StyleDisplay()->mGroupOpacity),
++                                   nsCSSProps::kGroupOpacityTable));
++  return val;
++}
++
+ static void
+ MarkComputedStyleMapDirty(const char* aPref, void* aData)
+ {
+   static_cast<nsComputedStyleMap*>(aData)->MarkDirty();
+ }
+ 
+ CSSValue*
+ nsComputedDOMStyle::DoGetCustomProperty(const nsAString& aPropertyName)
+diff --git a/layout/style/nsComputedDOMStyle.h b/layout/style/nsComputedDOMStyle.h
+--- a/layout/style/nsComputedDOMStyle.h
++++ b/layout/style/nsComputedDOMStyle.h
+@@ -402,16 +402,17 @@ private:
+   mozilla::dom::CSSValue* DoGetTouchAction();
+   mozilla::dom::CSSValue* DoGetTransform();
+   mozilla::dom::CSSValue* DoGetTransformOrigin();
+   mozilla::dom::CSSValue* DoGetPerspective();
+   mozilla::dom::CSSValue* DoGetBackfaceVisibility();
+   mozilla::dom::CSSValue* DoGetPerspectiveOrigin();
+   mozilla::dom::CSSValue* DoGetTransformStyle();
+   mozilla::dom::CSSValue* DoGetOrient();
++  mozilla::dom::CSSValue* DoGetGroupOpacity();
+ 
+   /* User interface properties */
+   mozilla::dom::CSSValue* DoGetCursor();
+   mozilla::dom::CSSValue* DoGetForceBrokenImageIcon();
+   mozilla::dom::CSSValue* DoGetIMEMode();
+   mozilla::dom::CSSValue* DoGetUserFocus();
+   mozilla::dom::CSSValue* DoGetUserInput();
+   mozilla::dom::CSSValue* DoGetUserModify();
+diff --git a/layout/style/nsComputedDOMStylePropertyList.h b/layout/style/nsComputedDOMStylePropertyList.h
+--- a/layout/style/nsComputedDOMStylePropertyList.h
++++ b/layout/style/nsComputedDOMStylePropertyList.h
+@@ -124,16 +124,17 @@ COMPUTED_STYLE_PROP(font_synthesis,     
+ COMPUTED_STYLE_PROP(font_variant,                  FontVariant)
+ COMPUTED_STYLE_PROP(font_variant_alternates,       FontVariantAlternates)
+ COMPUTED_STYLE_PROP(font_variant_caps,             FontVariantCaps)
+ COMPUTED_STYLE_PROP(font_variant_east_asian,       FontVariantEastAsian)
+ COMPUTED_STYLE_PROP(font_variant_ligatures,        FontVariantLigatures)
+ COMPUTED_STYLE_PROP(font_variant_numeric,          FontVariantNumeric)
+ COMPUTED_STYLE_PROP(font_variant_position,         FontVariantPosition)
+ COMPUTED_STYLE_PROP(font_weight,                   FontWeight)
++COMPUTED_STYLE_PROP(group_opacity,                 GroupOpacity)
+ COMPUTED_STYLE_PROP(height,                        Height)
+ COMPUTED_STYLE_PROP(image_orientation,             ImageOrientation)
+ COMPUTED_STYLE_PROP(ime_mode,                      IMEMode)
+ COMPUTED_STYLE_PROP(justify_content,               JustifyContent)
+ COMPUTED_STYLE_PROP(left,                          Left)
+ COMPUTED_STYLE_PROP(letter_spacing,                LetterSpacing)
+ COMPUTED_STYLE_PROP(line_height,                   LineHeight)
+ //// COMPUTED_STYLE_PROP(list_style,               ListStyle)
+diff --git a/layout/style/nsRuleNode.cpp b/layout/style/nsRuleNode.cpp
+--- a/layout/style/nsRuleNode.cpp
++++ b/layout/style/nsRuleNode.cpp
+@@ -5542,16 +5542,27 @@ nsRuleNode::ComputeDisplayData(void* aSt
+ 
+   // orient: enum, inherit, initial
+   SetDiscrete(*aRuleData->ValueForOrient(),
+               display->mOrient, canStoreInRuleTree,
+               SETDSC_ENUMERATED | SETDSC_UNSET_INITIAL,
+               parentDisplay->mOrient,
+               NS_STYLE_ORIENT_AUTO, 0, 0, 0, 0);
+ 
++  //group-opacity: none, normal
++  const nsCSSValue* group_opacity = aRuleData->ValueForGroupOpacity();
++  if (group_opacity->GetUnit()) {
++    printf_stderr("bignose nsRuleNode display group_opacity: value:%d",group_opacity->GetUnit());
++  }
++  SetDiscrete(*aRuleData->ValueForGroupOpacity(),
++              display->mGroupOpacity, canStoreInRuleTree,
++              SETDSC_NORMAL | SETDSC_NONE | SETDSC_UNSET_INITIAL,
++              parentDisplay->mGroupOpacity,
++              NS_STYLE_GROUP_OPACITY_NORMAL, 0, 0, 0, 0);
++
+   COMPUTE_END_RESET(Display, display)
+ }
+ 
+ const void*
+ nsRuleNode::ComputeVisibilityData(void* aStartStruct,
+                                   const nsRuleData* aRuleData,
+                                   nsStyleContext* aContext,
+                                   nsRuleNode* aHighestNode,
+diff --git a/layout/style/nsStyleConsts.h b/layout/style/nsStyleConsts.h
+--- a/layout/style/nsStyleConsts.h
++++ b/layout/style/nsStyleConsts.h
+@@ -1015,16 +1015,20 @@ static inline mozilla::css::Side operato
+ #define NS_STYLE_BLEND_SOFT_LIGHT                   9
+ #define NS_STYLE_BLEND_DIFFERENCE                   10
+ #define NS_STYLE_BLEND_EXCLUSION                    11
+ #define NS_STYLE_BLEND_HUE                          12
+ #define NS_STYLE_BLEND_SATURATION                   13
+ #define NS_STYLE_BLEND_COLOR                        14
+ #define NS_STYLE_BLEND_LUMINOSITY                   15
+ 
++// See nsStyleDisplay
++#define NS_STYLE_GROUP_OPACITY_NORMAL               0
++#define NS_STYLE_GROUP_OPACITY_NONE                 1
++
+ /*****************************************************************************
+  * Constants for media features.                                             *
+  *****************************************************************************/
+ 
+ // orientation
+ #define NS_STYLE_ORIENTATION_PORTRAIT           0
+ #define NS_STYLE_ORIENTATION_LANDSCAPE          1
+ 
+diff --git a/layout/style/nsStyleStruct.cpp b/layout/style/nsStyleStruct.cpp
+--- a/layout/style/nsStyleStruct.cpp
++++ b/layout/style/nsStyleStruct.cpp
+@@ -2355,16 +2355,17 @@ nsStyleDisplay::nsStyleDisplay()
+   mAnimationTimingFunctionCount = 1;
+   mAnimationDurationCount = 1;
+   mAnimationDelayCount = 1;
+   mAnimationNameCount = 1;
+   mAnimationDirectionCount = 1;
+   mAnimationFillModeCount = 1;
+   mAnimationPlayStateCount = 1;
+   mAnimationIterationCountCount = 1;
++  mGroupOpacity = NS_STYLE_GROUP_OPACITY_NORMAL;
+ }
+ 
+ nsStyleDisplay::nsStyleDisplay(const nsStyleDisplay& aSource)
+   : mBinding(aSource.mBinding)
+   , mClip(aSource.mClip)
+   , mOpacity(aSource.mOpacity)
+   , mDisplay(aSource.mDisplay)
+   , mOriginalDisplay(aSource.mOriginalDisplay)
+@@ -2396,16 +2397,17 @@ nsStyleDisplay::nsStyleDisplay(const nsS
+   , mAnimationTimingFunctionCount(aSource.mAnimationTimingFunctionCount)
+   , mAnimationDurationCount(aSource.mAnimationDurationCount)
+   , mAnimationDelayCount(aSource.mAnimationDelayCount)
+   , mAnimationNameCount(aSource.mAnimationNameCount)
+   , mAnimationDirectionCount(aSource.mAnimationDirectionCount)
+   , mAnimationFillModeCount(aSource.mAnimationFillModeCount)
+   , mAnimationPlayStateCount(aSource.mAnimationPlayStateCount)
+   , mAnimationIterationCountCount(aSource.mAnimationIterationCountCount)
++  , mGroupOpacity(aSource.mGroupOpacity)
+ {
+   MOZ_COUNT_CTOR(nsStyleDisplay);
+ 
+   /* Copy over transform origin. */
+   mTransformOrigin[0] = aSource.mTransformOrigin[0];
+   mTransformOrigin[1] = aSource.mTransformOrigin[1];
+   mTransformOrigin[2] = aSource.mTransformOrigin[2];
+   mPerspectiveOrigin[0] = aSource.mPerspectiveOrigin[0];
+@@ -2457,16 +2459,20 @@ nsChangeHint nsStyleDisplay::CalcDiffere
+       || mClipFlags != aOther.mClipFlags || !mClip.IsEqualInterior(aOther.mClip))
+     NS_UpdateHint(hint, NS_CombineHint(nsChangeHint_AllReflowHints,
+                                        nsChangeHint_RepaintFrame));
+ 
+   if (mOpacity != aOther.mOpacity) {
+     NS_UpdateHint(hint, nsChangeHint_UpdateOpacityLayer);
+   }
+ 
++  if (mGroupOpacity != aOther.mGroupOpacity) {
++    NS_UpdateHint(hint, nsChangeHint_UpdateOpacityLayer);
++  }
++
+   /* If we've added or removed the transform property, we need to reconstruct the frame to add
+    * or remove the view object, and also to handle abs-pos and fixed-pos containers.
+    */
+   if (HasTransformStyle() != aOther.HasTransformStyle()) {
+     // We do not need to apply nsChangeHint_UpdateTransformLayer since
+     // nsChangeHint_RepaintFrame will forcibly invalidate the frame area and
+     // ensure layers are rebuilt (or removed).
+     NS_UpdateHint(hint, NS_CombineHint(nsChangeHint_AddOrRemoveTransform,
+diff --git a/layout/style/nsStyleStruct.h b/layout/style/nsStyleStruct.h
+--- a/layout/style/nsStyleStruct.h
++++ b/layout/style/nsStyleStruct.h
+@@ -1790,16 +1790,17 @@ struct nsStyleDisplay {
+   bool mBreakAfter;     // [reset]
+   uint8_t mOverflowX;           // [reset] see nsStyleConsts.h
+   uint8_t mOverflowY;           // [reset] see nsStyleConsts.h
+   uint8_t mResize;              // [reset] see nsStyleConsts.h
+   uint8_t mClipFlags;           // [reset] see nsStyleConsts.h
+   uint8_t mOrient;              // [reset] see nsStyleConsts.h
+   uint8_t mMixBlendMode;        // [reset] see nsStyleConsts.h
+   uint8_t mTouchAction;         // [reset] see nsStyleConsts.h
++  uint8_t mGroupOpacity;        // see nsStyleConsts.h. Use group opacity or not.
+ 
+   // mSpecifiedTransform is the list of transform functions as
+   // specified, or null to indicate there is no transform.  (inherit or
+   // initial are replaced by an actual list of transform functions, or
+   // null, as appropriate.)
+   uint8_t mBackfaceVisibility;
+   uint8_t mTransformStyle;
+   nsRefPtr<nsCSSValueSharedList> mSpecifiedTransform; // [reset]
+diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
+--- a/modules/libpref/src/init/all.js
++++ b/modules/libpref/src/init/all.js
+@@ -1735,16 +1735,19 @@ pref("layout.css.visited_links_enabled",
+ pref("layout.css.dpi", -1);
+ 
+ // Set the number of device pixels per CSS pixel. A value <= 0 means choose
+ // automatically based on user settings for the platform (e.g., "UI scale factor"
+ // on Mac). A positive value is used as-is. This effectively controls the size
+ // of a CSS "px". This is only used for windows on the screen, not for printing.
+ pref("layout.css.devPixelsPerPx", "-1.0");
+ 
++// Is support for CSS "group-opacity" enabled?
++pref("layout.css.group-opacity.enabled", true);
++
+ // Is support for CSS Masking features enabled?
+ #ifdef RELEASE_BUILD
+ pref("layout.css.masking.enabled", false);
+ #else
+ pref("layout.css.masking.enabled", true);
+ #endif
+ 
+ // Is support for mix-blend-mode enabled? 

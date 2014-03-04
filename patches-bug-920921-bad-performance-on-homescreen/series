@@ -1,0 +1,8 @@
+build_jb4.2.2.patch
+GonkNativeWindow_jb4.2.2.patch
+gfx_trace_makefile.patch
+0001-reuse-buffer.patch
+reuse-buffer-add-print.patch
+0001-layer-debug.patch
+buffer_rotation.patch
+dump_layer.patch

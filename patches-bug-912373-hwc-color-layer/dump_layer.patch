@@ -1,0 +1,168 @@
+# HG changeset patch
+# Parent 4624e37f2c627d76271515dac15eeab6f2120c15
+# User Jerry Shih <hshih@mozilla.com>
+Bug 911730 - Only dump layer tree(using MOZ_LAYERS_HAVE_LOG)
+		Dump layer test code
+* * *
+dump temp
+
+diff --git a/gfx/layers/LayerSorter.cpp b/gfx/layers/LayerSorter.cpp
+--- a/gfx/layers/LayerSorter.cpp
++++ b/gfx/layers/LayerSorter.cpp
+@@ -18,16 +18,19 @@
+ #include "gfxRect.h"                    // for gfxRect
+ #include "gfxTypes.h"                   // for gfxFloat
+ #include "mozilla/gfx/BasePoint3D.h"    // for BasePoint3D
+ #include "nsRegion.h"                   // for nsIntRegion
+ #include "nsTArray.h"                   // for nsTArray, etc
+ #include "limits.h"
+ #include "mozilla/Assertions.h"
+ 
++//dump layer info to logcat
++#define fprintf(file,format,args...) printf_stderr("bignose layer:" format, ##args)
++
+ namespace mozilla {
+ namespace layers {
+ 
+ enum LayerSortOrder {
+   Undefined,
+   ABeforeB,
+   BBeforeA,
+ };
+diff --git a/gfx/layers/Layers.cpp b/gfx/layers/Layers.cpp
+--- a/gfx/layers/Layers.cpp
++++ b/gfx/layers/Layers.cpp
+@@ -1168,19 +1168,23 @@ Layer::Dump(FILE* aFile, const char* aPr
+ #ifdef MOZ_DUMP_PAINTING
+     if (GetType() == TYPE_CONTAINER || GetType() == TYPE_THEBES) {
+       WriteSnapshotLinkToDumpFile(this, aFile);
+     }
+ #endif
+     fprintf(aFile, ">");
+   }
+   DumpSelf(aFile, aPrefix);
++
++#ifdef MOZ_DUMP_PAINTING
+   if (AsLayerComposite() && AsLayerComposite()->GetCompositableHost()) {
+     AsLayerComposite()->GetCompositableHost()->Dump(aFile, aPrefix, aDumpHtml);
+   }
++#endif
++
+   if (aDumpHtml) {
+     fprintf(aFile, "</a>");
+   }
+ 
+   if (Layer* mask = GetMaskLayer()) {
+     nsAutoCString pfx(aPrefix);
+     pfx += "  Mask layer: ";
+     mask->Dump(aFile, pfx.get(), aDumpHtml);
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -23,16 +23,35 @@
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)         \
+   do { if (layer->AsShadowableLayer()) { PR_LOG(LayerManager::GetLog(), PR_LOG_DEBUG, _args); } } while (0)
+ #else
+ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG(_args)
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
++
++
++#undef MOZ_LAYERS_LOG
++#undef MOZ_LAYERS_LOG_IF_SHADOWABLE
++
++#define MOZ_LAYERS_HAVE_LOG
++#define PR_BEGIN_MACRO  do {
++#define PR_END_MACRO    } while (0)
++
++#define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
++#define TMOZ_LAYERS_LOG(args...) \
++    PR_BEGIN_MACRO \
++      __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
++    PR_END_MACRO
++#define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)         \
++    do { if (layer->AsShadowableLayer()) { MOZ_LAYERS_LOG(_args); } } while (0)
++
++
++
+ namespace android {
+ class GraphicBuffer;
+ }
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ 
+diff --git a/gfx/layers/composite/CanvasLayerComposite.cpp b/gfx/layers/composite/CanvasLayerComposite.cpp
+--- a/gfx/layers/composite/CanvasLayerComposite.cpp
++++ b/gfx/layers/composite/CanvasLayerComposite.cpp
+@@ -101,17 +101,17 @@ CanvasLayerComposite::RenderLayer(const 
+                         gfx::Point(aOffset.x, aOffset.y),
+                         gfx::ToFilter(filter),
+                         clipRect);
+ }
+ 
+ CompositableHost*
+ CanvasLayerComposite::GetCompositableHost()
+ {
+-  if (mImageHost->IsAttached()) {
++  if ( mImageHost && mImageHost->IsAttached()) {
+     return mImageHost.get();
+   }
+ 
+   return nullptr;
+ }
+ 
+ void
+ CanvasLayerComposite::CleanupResources()
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -345,16 +345,23 @@ LayerManagerComposite::Render()
+   }
+ 
+   // Allow widget to render a custom background.
+   mCompositor->GetWidget()->DrawWindowUnderlay(this, nsIntRect(actualBounds.x,
+                                                                actualBounds.y,
+                                                                actualBounds.width,
+                                                                actualBounds.height));
+ 
++
++
++  //debug dump layer
++  Dump(nullptr,"  ", false);
++
++
++
+   // Render our layers.
+   RootLayer()->RenderLayer(nsIntPoint(0, 0), clipRect);
+ 
+   // Allow widget to render a custom foreground.
+   mCompositor->GetWidget()->DrawWindowOverlay(this, nsIntRect(actualBounds.x,
+                                                               actualBounds.y,
+                                                               actualBounds.width,
+                                                               actualBounds.height));
+diff --git a/gfx/layers/composite/ThebesLayerComposite.cpp b/gfx/layers/composite/ThebesLayerComposite.cpp
+--- a/gfx/layers/composite/ThebesLayerComposite.cpp
++++ b/gfx/layers/composite/ThebesLayerComposite.cpp
+@@ -152,17 +152,17 @@ ThebesLayerComposite::RenderLayer(const 
+   }
+ 
+   mCompositeManager->GetCompositor()->MakeCurrent();
+ }
+ 
+ CompositableHost*
+ ThebesLayerComposite::GetCompositableHost()
+ {
+-  if (mBuffer->IsAttached()) {
++  if ( mBuffer && mBuffer->IsAttached()) {
+     return mBuffer.get();
+   }
+ 
+   return nullptr;
+ }
+ 
+ void
+ ThebesLayerComposite::CleanupResources()

@@ -1,0 +1,7 @@
+gfx_trace_makefile.patch
+force-enable-hwcomposer
+partical_hwc.patch
+color_layer_with_buffer.patch
+message_io_working.patch
+dump_layer.patch
+test_fps.patch

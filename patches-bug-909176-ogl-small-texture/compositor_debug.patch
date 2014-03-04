@@ -1,0 +1,179 @@
+# HG changeset patch
+# Parent 69de67a278f18e1a545d71cc48b4a1cbfa6fc0f2
+# User Jerry Shih <hshih@mozilla.com>
+Bug 907055 - Have an preference value to enable Compositor render-insomnia
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -133,16 +133,44 @@ private:
+   // Get the fifo fd
+   int OpenFD(void);
+ 
+   MessageLoopForIO::FileDescriptorWatcher mReadWatcher;
+   int mFD;
+ };
+ #endif //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ 
++//force composition setter
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++class CompositorForceUpdateSetter;
++
++static RefPtr<CompositorForceUpdateSetter> sCompositorForceUpdateSetter;
++static Mutex sCompositorForceUpdateSetterMutex("CompositorForceUpdateSetter mutex");
++
++class CompositorForceUpdateSetter: public RefCounted<CompositorForceUpdateSetter>
++{
++public:
++  static CompositorForceUpdateSetter *GetSingleton(void);
++
++  static void StartListenPerf(void);
++
++  CompositorForceUpdateSetter();
++  virtual ~CompositorForceUpdateSetter();
++
++  static int ForceUpdatePrefCallback(const char *preference_name,void *);
++
++private:
++  //force composition
++  void CompositorForceUpdate(void);
++
++  CompositorParent *mCompositorParent;
++  bool mInForceCompositionMode;
++};
++#endif //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
+ static void DeferredDeleteCompositorParent(CompositorParent* aNowReadyToDie)
+ {
+   aNowReadyToDie->Release();
+ }
+ 
+ static void DeleteCompositorThread()
+ {
+   if (NS_IsMainThread()){
+@@ -172,16 +200,20 @@ CompositorParent::StartUpWithExistingThr
+   sCompositorThreadID = aThreadID;
+   sMainLoop = MessageLoop::current();
+   sCompositorThreadRefCount = 1;
+ 
+ #if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+   //XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableMethod(CompositorDebugPropWatcher::GetSingleton(),&CompositorDebugPropWatcher::StartWatching));
+   CompositorDebugPropWatcher::GetSingleton()->StartWatching();
+ #endif
++
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(CompositorForceUpdateSetter::StartListenPerf));
++#endif
+ }
+ 
+ void CompositorParent::StartUp()
+ {
+   // Check if compositor started already with StartUpWithExistingThread
+   if (sCompositorThreadID) {
+     return;
+   }
+@@ -189,16 +221,20 @@ void CompositorParent::StartUp()
+   CreateCompositorMap();
+   CreateThread();
+   sMainLoop = MessageLoop::current();
+ 
+ #if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+   //XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableMethod(CompositorDebugPropWatcher::GetSingleton(),&CompositorDebugPropWatcher::StartWatching));
+   CompositorDebugPropWatcher::GetSingleton()->StartWatching();
+ #endif
++
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(CompositorForceUpdateSetter::StartListenPerf));
++#endif
+ }
+ 
+ void CompositorParent::ShutDown()
+ {
+   DestroyThread();
+   DestroyCompositorMap();
+ }
+ 
+@@ -1279,10 +1315,83 @@ CompositorDebugPropWatcher::OpenFD(void)
+ 
+     return -1;
+   }
+ 
+   return fd;
+ }
+ #endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++void CompositorForceUpdateSetter::StartListenPerf(void)
++{
++  printf_stderr("bignose trigger CompositorForceUpdateSetter::StartListenPerf()");
++
++  if(Preferences::HasUserValue("debug.force_update")){
++    Preferences::ClearUser("debug.force_update");
++  }
++
++  Preferences::RegisterCallback(CompositorForceUpdateSetter::ForceUpdatePrefCallback,"debug.force_update",nullptr);
++}
++
++CompositorForceUpdateSetter* CompositorForceUpdateSetter::GetSingleton(void)
++{
++  {
++    MutexAutoUnlock watcher_mutex(sCompositorForceUpdateSetterMutex);
++
++    if(!sCompositorForceUpdateSetter){
++      sCompositorForceUpdateSetter=new CompositorForceUpdateSetter();
++    }
++  }
++
++  MOZ_ASSERT(sCompositorForceUpdateSetter);
++
++  return sCompositorForceUpdateSetter.get();
++}
++
++CompositorForceUpdateSetter::CompositorForceUpdateSetter()
++  :mCompositorParent(nullptr),mInForceCompositionMode(false)
++{
++
++}
++
++CompositorForceUpdateSetter::~CompositorForceUpdateSetter()
++{
++
++}
++
++int CompositorForceUpdateSetter::ForceUpdatePrefCallback(const char *preference_name,void *)
++{
++  bool force_update=Preferences::GetBool(preference_name,false);
++  CompositorForceUpdateSetter *setter=CompositorForceUpdateSetter::GetSingleton();
++
++  if(setter->mInForceCompositionMode!=force_update){
++    if(force_update){
++      CancelableTask *render_task=NewRunnableMethod(setter,&CompositorForceUpdateSetter::CompositorForceUpdate);
++      CompositorParent::CompositorLoop()->PostTask(FROM_HERE,render_task);
++    }
++
++    setter->mInForceCompositionMode=force_update;
++  }
++
++  return 0;
++}
++
++void CompositorForceUpdateSetter::CompositorForceUpdate(void)
++{
++  //printf_stderr("bignose trigger CompositorForceUpdateSetter::CompositorForceUpdate()");
++
++  if(mInForceCompositionMode){
++    if(sCompositorMap){
++      for(CompositorMap::iterator compositor_iterator=sCompositorMap->begin();compositor_iterator!=sCompositorMap->end();++compositor_iterator){
++        //printf_stderr("bignose trigger compositor_iterator->second->ScheduleComposition()");
++        compositor_iterator->second->ScheduleComposition();
++      }
++    }
++
++    CancelableTask *render_task=NewRunnableMethod(this,&CompositorForceUpdateSetter::CompositorForceUpdate);
++    CompositorParent::CompositorLoop()->PostTask(FROM_HERE,render_task);
++  }
++}
++#endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++ 
+ } // namespace layers
+ } // namespace mozilla

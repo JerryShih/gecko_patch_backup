@@ -1,0 +1,2036 @@
+# HG changeset patch
+# Parent 65ae3390e4f7cc9bf7da73e8fd1150d3e3373b01
+# User Thinker K.F. Li <thinker@codemud.net>
+
+diff --git a/layout/base/FrameLayerBuilder.cpp b/layout/base/FrameLayerBuilder.cpp
+--- a/layout/base/FrameLayerBuilder.cpp
++++ b/layout/base/FrameLayerBuilder.cpp
+@@ -3295,17 +3295,17 @@ FrameLayerBuilder::DrawThebesLayer(Thebe
+     if (referenceFrame != lastReferenceFrame) {
+       // If we have set a translation to compensate for the reference frame before,
+       // undo it first.
+       if (lastReferenceFrame) {
+         aContext->Translate(-gfxPoint(lastReferenceFramePos.x,
+                                      lastReferenceFramePos.y));
+       }
+       nsPoint refPos =
+-        referenceFrame->GetOffsetToExternal(rootReferenceFrame);
++        referenceFrame->GetOffsetToCrossDoc(rootReferenceFrame);
+       NS_ASSERTION(NS_SUCCEEDED(rv), "no any ancestor has a view!");
+       aContext->Translate(gfxPoint(refPos.x, refPos.y));
+       lastReferenceFrame = referenceFrame;
+       lastReferenceFramePos = refPos;
+     }
+ 
+     if (cdi->mInactiveLayerManager) {
+       PaintInactiveLayer(builder, cdi->mInactiveLayerManager, cdi->mItem, aContext, rc);
+diff --git a/layout/base/nsDisplayItemTypesList.h b/layout/base/nsDisplayItemTypesList.h
+--- a/layout/base/nsDisplayItemTypesList.h
++++ b/layout/base/nsDisplayItemTypesList.h
+@@ -94,8 +94,10 @@ DECLARE_DISPLAY_ITEM_TYPE(MATHML_SLASH)
+ DECLARE_DISPLAY_ITEM_TYPE(MATHML_BOUNDING_METRICS)
+ DECLARE_DISPLAY_ITEM_TYPE(MATHML_CHAR_DEBUG)
+ 
+ DECLARE_DISPLAY_ITEM_TYPE(DEBUG_BORDER)
+ DECLARE_DISPLAY_ITEM_TYPE(DEBUG_IMAGE_MAP)
+ DECLARE_DISPLAY_ITEM_TYPE(DEBUG_PLACEHOLDER)
+ DECLARE_DISPLAY_ITEM_TYPE(EVENT_TARGET_BORDER)
+ #endif
++
++DECLARE_DISPLAY_ITEM_TYPE(DUMMY)
+diff --git a/layout/base/nsDisplayList.cpp b/layout/base/nsDisplayList.cpp
+--- a/layout/base/nsDisplayList.cpp
++++ b/layout/base/nsDisplayList.cpp
+@@ -459,22 +459,24 @@ AddAnimationsAndTransitionsToLayer(Layer
+     aLayer->SetAnimationGeneration(ea->mAnimationGeneration);
+   }
+ }
+ 
+ nsDisplayListBuilder::nsDisplayListBuilder(nsIFrame* aReferenceFrame,
+     Mode aMode, bool aBuildCaret)
+     : mReferenceFrame(aReferenceFrame),
+       mIgnoreScrollFrame(nullptr),
++      mCurrentPool(&mPool),
+       mCurrentTableItem(nullptr),
+       mFinalTransparentRegion(nullptr),
+       mCachedOffsetFrame(aReferenceFrame),
+       mCachedReferenceFrame(aReferenceFrame),
+       mCachedOffset(0, 0),
+       mGlassDisplayItem(nullptr),
++      mCurrentDisplayItemClipsToDestroy(&mDisplayItemClipsToDestroy),
+       mMode(aMode),
+       mBuildCaret(aBuildCaret),
+       mIgnoreSuppression(false),
+       mHadToIgnoreSuppression(false),
+       mIsAtRootOfPseudoStackingContext(false),
+       mIncludeAllOutOfFlows(false),
+       mSelectedFramesOnly(false),
+       mAccurateVisibleRegions(false),
+@@ -483,17 +485,18 @@ nsDisplayListBuilder::nsDisplayListBuild
+       mInTransform(false),
+       mSyncDecodeImages(false),
+       mIsPaintingToWindow(false),
+       mHasDisplayPort(false),
+       mHasFixedItems(false),
+       mIsInFixedPosition(false),
+       mIsCompositingCheap(false),
+       mContainsPluginItem(false),
+-      mContainsBlendMode(false)
++      mContainsBlendMode(false),
++      mIsInCacheScope(false)
+ {
+   MOZ_COUNT_CTOR(nsDisplayListBuilder);
+   PL_InitArenaPool(&mPool, "displayListArena", 1024,
+                    std::max(NS_ALIGNMENT_OF(void*),NS_ALIGNMENT_OF(double))-1);
+ 
+   nsPresContext* pc = aReferenceFrame->PresContext();
+   nsIPresShell *shell = pc->PresShell();
+   if (pc->IsRenderingOnlySelection()) {
+@@ -759,18 +762,18 @@ nsDisplayListBuilder::~nsDisplayListBuil
+   NS_ASSERTION(mFramesMarkedForDisplay.Length() == 0,
+                "All frames should have been unmarked");
+   NS_ASSERTION(mPresShellStates.Length() == 0,
+                "All presshells should have been exited");
+   NS_ASSERTION(!mCurrentTableItem, "No table item should be active");
+ 
+   nsCSSRendering::EndFrameTreesLocked();
+ 
+-  for (uint32_t i = 0; i < mDisplayItemClipsToDestroy.Length(); ++i) {
+-    mDisplayItemClipsToDestroy[i]->DisplayItemClip::~DisplayItemClip();
++  for (uint32_t i = 0; i < mCurrentDisplayItemClipsToDestroy->Length(); ++i) {
++    (*mCurrentDisplayItemClipsToDestroy)[i]->DisplayItemClip::~DisplayItemClip();
+   }
+ 
+   PL_FinishArenaPool(&mPool);
+   MOZ_COUNT_DTOR(nsDisplayListBuilder);
+ }
+ 
+ uint32_t
+ nsDisplayListBuilder::GetBackgroundPaintFlags() {
+@@ -914,34 +917,34 @@ nsDisplayListBuilder::MarkPreserve3DFram
+       }
+     }
+   }
+ }
+ 
+ void*
+ nsDisplayListBuilder::Allocate(size_t aSize) {
+   void *tmp;
+-  PL_ARENA_ALLOCATE(tmp, &mPool, aSize);
++  PL_ARENA_ALLOCATE(tmp, mCurrentPool, aSize);
+   if (!tmp) {
+     NS_RUNTIMEABORT("out of memory");
+   }
+   return tmp;
+ }
+ 
+ const DisplayItemClip*
+ nsDisplayListBuilder::AllocateDisplayItemClip(const DisplayItemClip& aOriginal)
+ {
+   void* p = Allocate(sizeof(DisplayItemClip));
+   if (!aOriginal.GetRoundedRectCount()) {
+     memcpy(p, &aOriginal, sizeof(DisplayItemClip));
+     return static_cast<DisplayItemClip*>(p);
+   }
+ 
+   DisplayItemClip* c = new (p) DisplayItemClip(aOriginal);
+-  mDisplayItemClipsToDestroy.AppendElement(c);
++  mCurrentDisplayItemClipsToDestroy->AppendElement(c);
+   return c;
+ }
+ 
+ void nsDisplayListSet::MoveTo(const nsDisplayListSet& aDestination) const
+ {
+   aDestination.BorderBackground()->AppendToTop(BorderBackground());
+   aDestination.BlockBorderBackgrounds()->AppendToTop(BlockBorderBackgrounds());
+   aDestination.Floats()->AppendToTop(Floats());
+@@ -951,17 +954,17 @@ void nsDisplayListSet::MoveTo(const nsDi
+ }
+ 
+ void
+ nsDisplayList::FlattenTo(nsTArray<nsDisplayItem*>* aElements) {
+   nsDisplayItem* item;
+   while ((item = RemoveBottom()) != nullptr) {
+     if (item->GetType() == nsDisplayItem::TYPE_WRAP_LIST) {
+       item->GetSameCoordinateSystemChildren()->FlattenTo(aElements);
+-      item->~nsDisplayItem();
++      item->Destroy();
+     } else {
+       aElements->AppendElement(item);
+     }
+   }
+ }
+ 
+ nsRect
+ nsDisplayList::GetBounds(nsDisplayListBuilder* aBuilder) const {
+@@ -1031,80 +1034,96 @@ GetDisplayPortBounds(nsDisplayListBuilde
+   nsRect result = nsLayoutUtils::TransformAncestorRectToFrame(
+                     frame,
+                     nsRect(0, 0, displayport->width, displayport->height),
+                     aBuilder->FindReferenceFrameFor(frame));
+   result.MoveBy(aBuilder->ToReferenceFrame(frame));
+   return result;
+ }
+ 
++void
++nsDisplayList::FlattenTArray(nsDisplayListBuilder* aBuilder,
++                             nsAutoTArray<nsDisplayItem*, 512> *aElements) {
++  nsAutoTArray<nsDisplayItem*, 512> &elements = *aElements;
++  FlattenTo(&elements);
++
++  for (int32_t i = elements.Length() - 1; i >= 0; --i) {
++    nsDisplayItem* item = elements[i];
++    nsDisplayItem* belowItem = i < 1 ? nullptr : elements[i - 1];
++
++    if (aBuilder->AllowMergingAndFlattening()) {
++      // Avoid to merge items in a cache.
++      if (belowItem &&
++          !item->IsInCache() && !belowItem->IsInCache() &&
++          item->TryMerge(aBuilder, belowItem)) {
++        belowItem->Destroy();
++        elements.ReplaceElementsAt(i - 1, 1, item);
++        continue;
++      }
++
++      nsDisplayList* list = item->GetSameCoordinateSystemChildren();
++      if (list && item->ShouldFlattenAway(aBuilder)) {
++        // The elements on the list >= i no longer serve any use.
++        elements.SetLength(i);
++        list->FlattenTo(&elements);
++        i = elements.Length();
++        item->Destroy();
++        continue;
++      }
++    }
++
++    AppendToBottom(item);
++  }
++}
++
+ bool
+ nsDisplayList::ComputeVisibilityForSublist(nsDisplayListBuilder* aBuilder,
+                                            nsRegion* aVisibleRegion,
+                                            const nsRect& aListVisibleBounds,
+                                            const nsRect& aAllowVisibleRegionExpansion) {
+ #ifdef DEBUG
+   nsRegion r;
+   r.And(*aVisibleRegion, GetBounds(aBuilder));
+   NS_ASSERTION(r.GetBounds().IsEqualInterior(aListVisibleBounds),
+                "bad aListVisibleBounds");
+ #endif
+ 
+   mVisibleRect = aListVisibleBounds;
+   bool anyVisible = false;
+ 
++  bool forceTransparentSurface = false;
++
+   nsAutoTArray<nsDisplayItem*, 512> elements;
+-  FlattenTo(&elements);
+-
+-  bool forceTransparentSurface = false;
++  FlattenTArray(aBuilder, &elements);
+ 
+   for (int32_t i = elements.Length() - 1; i >= 0; --i) {
+     nsDisplayItem* item = elements[i];
+     nsDisplayItem* belowItem = i < 1 ? nullptr : elements[i - 1];
+-
+-    nsDisplayList* list = item->GetSameCoordinateSystemChildren();
+-    if (aBuilder->AllowMergingAndFlattening()) {
+-      if (belowItem && item->TryMerge(aBuilder, belowItem)) {
+-        belowItem->~nsDisplayItem();
+-        elements.ReplaceElementsAt(i - 1, 1, item);
+-        continue;
+-      }
+-
+-      if (list && item->ShouldFlattenAway(aBuilder)) {
+-        // The elements on the list >= i no longer serve any use.
+-        elements.SetLength(i);
+-        list->FlattenTo(&elements);
+-        i = elements.Length();
+-        item->~nsDisplayItem();
+-        continue;
+-      }
+-    }
+-
+     nsRect bounds = item->GetClippedBounds(aBuilder);
+ 
+     nsRegion itemVisible;
+     if (ForceVisiblityForFixedItem(aBuilder, item)) {
+       itemVisible.And(GetDisplayPortBounds(aBuilder, item), bounds);
+     } else {
+       itemVisible.And(*aVisibleRegion, bounds);
+     }
+     item->mVisibleRect = itemVisible.GetBounds();
+ 
+     if (item->ComputeVisibility(aBuilder, aVisibleRegion,
+                                 aAllowVisibleRegionExpansion.Intersect(bounds))) {
+       anyVisible = true;
+       nsRegion opaque = TreatAsOpaque(item, aBuilder);
+       // Subtract opaque item from the visible region
+       aBuilder->SubtractFromVisibleRegion(aVisibleRegion, opaque);
++      nsDisplayList* list = item->GetSameCoordinateSystemChildren();
+       if (aBuilder->NeedToForceTransparentSurfaceForItem(item) ||
+           (list && list->NeedsTransparentSurface())) {
+         forceTransparentSurface = true;
+       }
+     }
+-    AppendToBottom(item);
+   }
+ 
+   mIsOpaque = !aVisibleRegion->Intersects(mVisibleRect);
+   mForceTransparentSurface = forceTransparentSurface;
+ #ifdef DEBUG
+   mDidComputeVisibility = true;
+ #endif
+   return anyVisible;
+@@ -1323,17 +1342,17 @@ nsDisplayItem* nsDisplayList::RemoveBott
+   }
+   item->mAbove = nullptr;
+   return item;
+ }
+ 
+ void nsDisplayList::DeleteAll() {
+   nsDisplayItem* item;
+   while ((item = RemoveBottom()) != nullptr) {
+-    item->~nsDisplayItem();
++    item->Destroy();
+   }
+ }
+ 
+ static bool
+ GetMouseThrough(const nsIFrame* aFrame)
+ {
+   if (!aFrame->IsBoxFrame())
+     return false;
+@@ -1544,16 +1563,137 @@ void nsDisplayList::SortByContentOrder(n
+ }
+ 
+ void nsDisplayList::Sort(nsDisplayListBuilder* aBuilder,
+                          SortLEQ aCmp, void* aClosure) {
+   ::Sort(this, Count(), aCmp, aClosure);
+ }
+ 
+ void
++nsItemsCache::Init(nsDisplayListBuilder* aBuilder,
++                   const nsDisplayList& aList) {
++  nsDisplayItem *item;
++  int cnt = 0;
++
++  for (item = aList.GetBottom();
++       item != nullptr;
++       item = item->GetAbove()) {
++    NS_ASSERTION(!item->IsInCache(),
++                 "An item can be in two caches!");
++    cnt++;
++    item->MarkInCache(aBuilder);
++  }
++
++  mItems = (nsDisplayItem**)aBuilder->Allocate(sizeof(nsDisplayItem*) * cnt);
++  nsDisplayItem **itempp = mItems;
++  for (item = aList.GetBottom();
++       item != nullptr;
++       item = item->GetAbove()) {
++    *itempp = item;
++    itempp++;
++  }
++  mNumItems = cnt;
++}
++
++nsItemsCache::nsItemsCache(nsDisplayListBuilder *aBuilder,
++                           nsItemsCacheState *aState)
++  : mPool(aBuilder->GetCurrentArenaPool())
++  , mDisplayItemClipsToDestroy(aState->mTransInfo->mDisplayItemClipsToDestroy)
++  , mSavedOffset(aState->mTransInfo->mOffset) {
++
++  nsItemsCacheState::TransactionInfo *transInfo = aState->mTransInfo;
++  Init(aBuilder, transInfo->mItems);
++}
++
++void
++nsItemsCache::Destroy(nsItemsCache *aCache) {
++  uint32_t i;
++  for (i = 0; i < aCache->mDisplayItemClipsToDestroy->Length(); ++i) {
++    (*aCache->mDisplayItemClipsToDestroy)[i]->DisplayItemClip::~DisplayItemClip();
++  }
++  delete aCache->mDisplayItemClipsToDestroy;
++
++  for (i = 0; i < aCache->mNumItems; i++) {
++    aCache->mItems[i]->~nsDisplayItem();
++  }
++
++  PLArenaPool *pool = aCache->mPool;
++  aCache->~nsItemsCache();
++  PL_FinishArenaPool(pool);
++  delete pool;
++}
++
++void
++nsItemsCache::AppendTo(nsDisplayListBuilder *aBuilder,
++                       nsDisplayList *aList,
++                       const nsPoint &aNewOffset,
++                       const nsRect &aDirtyFrame) {
++  nsPoint delta = aNewOffset - mSavedOffset;
++  nsRect dirty = aDirtyFrame;
++  dirty.MoveBy(delta);
++
++  const nsDisplayReuseContext context = { dirty };
++
++  for (int i = 0; i < mNumItems; i++) {
++    nsDisplayItem *item = mItems[i];
++    // XXXX: handle fixed position items
++    if (!dirty.Intersects(item->GetBorderRect())) {
++      continue;
++    }
++    item->BeforeReuseCache(aBuilder, context);
++    aList->AppendToTop(item);
++  }
++}
++
++nsItemsCacheState::nsItemsCacheState(nsDisplayListBuilder *aBuilder)
++  : mTransInfo(nullptr), mBuilder(aBuilder) {
++}
++
++nsDisplayList *
++nsItemsCacheState::BeginTransaction(const nsPoint &aOffset) {
++  NS_ASSERTION(mTransInfo == nullptr,
++               "be called for more than one time!");
++
++  mTransInfo = new TransactionInfo();
++
++  mTransInfo->mPool = new PLArenaPool();
++  PL_InitArenaPool(mTransInfo->mPool, "displayListArena", 1024,
++                   std::max(NS_ALIGNMENT_OF(void*),
++                            NS_ALIGNMENT_OF(double)));
++  mTransInfo->mSavedPool = mBuilder->GetCurrentArenaPool();
++  mBuilder->SetCurrentArenaPool(mTransInfo->mPool);
++
++  mTransInfo->mDisplayItemClipsToDestroy = new nsTArray<DisplayItemClip*>;
++  mTransInfo->mSavedDisplayItemClipsToDestroy =
++    mBuilder->GetCurrentDisplayItemClipsToDestroy();
++  mBuilder->SetCurrentDisplayItemClipsToDestroy(mTransInfo->mDisplayItemClipsToDestroy);
++
++  mTransInfo->mOffset = aOffset;
++
++  mBuilder->EnterCacheScope();
++
++  return &mTransInfo->mItems;
++}
++
++nsItemsCache *
++nsItemsCacheState::EndTransaction() {
++  // nsItemsCache shall delete mPool and mDisplayItemClipsToDestroy.
++  nsItemsCache *cache = new (mBuilder) nsItemsCache(mBuilder, this);
++  mBuilder->SetCurrentArenaPool(mTransInfo->mSavedPool);
++  mBuilder->SetCurrentDisplayItemClipsToDestroy(mTransInfo->mSavedDisplayItemClipsToDestroy);
++  mBuilder->LeaveCacheScope();
++
++  delete mTransInfo;
++  mTransInfo = nullptr;
++
++  return cache;
++}
++
++
++void
+ nsDisplayItem::AddInvalidRegionForSyncDecodeBackgroundImages(
+   nsDisplayListBuilder* aBuilder,
+   const nsDisplayItemGeometry* aGeometry,
+   nsRegion* aInvalidRegion)
+ {
+   if (aBuilder->ShouldSyncDecodeImages()) {
+     if (!nsCSSRendering::AreAllBackgroundImagesDecodedForFrame(mFrame)) {
+       bool snap;
+@@ -1617,16 +1757,37 @@ nsDisplayItem::RecomputeVisibility(nsDis
+ nsRect
+ nsDisplayItem::GetClippedBounds(nsDisplayListBuilder* aBuilder)
+ {
+   bool snap;
+   nsRect r = GetBounds(aBuilder, &snap);
+   return GetClip().ApplyNonRoundedIntersection(r);
+ }
+ 
++void
++nsDisplayItem::MarkInCache(nsDisplayListBuilder* aBuilder) {
++  // aBuilder must be the one that create this item.
++  mCacheInfo = new (aBuilder) nsDisplayItemCacheInfo;
++  mCacheInfo->mSavedClip = mClip;
++  mCacheInfo->mSavedClipOffset = mToReferenceFrame;
++}
++
++void
++nsDisplayItem::BeforeReuseCache(nsDisplayListBuilder* aBuilder,
++                                const nsDisplayReuseContext& aContext) {
++  // Remove the clip to make it re-computed at PresShell::ClipListToRange().
++  mClip = mCacheInfo->mSavedClip;
++}
++
++void
++nsDisplayItem::AfterReuseCache() {
++  NS_ASSERTION(IsInCache(), "not in a cache!");
++  mClip = nullptr;
++}
++
+ nsRect
+ nsDisplaySolidColor::GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap)
+ {
+   *aSnap = true;
+   return mBounds;
+ }
+ 
+ void
+@@ -2763,17 +2924,19 @@ nsIFrame *GetTransformRootFrame(nsIFrame
+   while (parent && parent->Preserves3DChildren()) {
+     parent = nsLayoutUtils::GetCrossDocParentFrame(parent);
+   }
+   return parent;
+ }
+ 
+ nsDisplayWrapList::nsDisplayWrapList(nsDisplayListBuilder* aBuilder,
+                                      nsIFrame* aFrame, nsDisplayList* aList)
+-  : nsDisplayItem(aBuilder, aFrame) {
++  : nsDisplayItem(aBuilder, aFrame)
++  , mChildrenCache(nullptr)
++  , mChildrenNum(0) {
+   mList.AppendToTop(aList);
+   UpdateBounds(aBuilder);
+ 
+   if (!aFrame || !aFrame->IsTransformed()) {
+     return;
+   }
+ 
+   // If the frame is a preserve-3d parent, then we will create transforms
+@@ -2805,17 +2968,19 @@ nsDisplayWrapList::nsDisplayWrapList(nsD
+       i->Frame() == mFrame) {
+     mReferenceFrame = i->ReferenceFrame();
+     mToReferenceFrame = i->ToReferenceFrame();
+   }
+ }
+ 
+ nsDisplayWrapList::nsDisplayWrapList(nsDisplayListBuilder* aBuilder,
+                                      nsIFrame* aFrame, nsDisplayItem* aItem)
+-  : nsDisplayItem(aBuilder, aFrame) {
++  : nsDisplayItem(aBuilder, aFrame)
++  , mChildrenCache(nullptr)
++  , mChildrenNum(0) {
+   mList.AppendToTop(aItem);
+   UpdateBounds(aBuilder);
+   
+   if (!aFrame || !aFrame->IsTransformed()) {
+     return;
+   }
+ 
+   if (aFrame->Preserves3DChildren()) {
+@@ -2831,17 +2996,19 @@ nsDisplayWrapList::nsDisplayWrapList(nsD
+     mToReferenceFrame = aItem->ToReferenceFrame();
+   }
+ }
+ 
+ nsDisplayWrapList::nsDisplayWrapList(nsDisplayListBuilder* aBuilder,
+                                      nsIFrame* aFrame, nsDisplayItem* aItem,
+                                      const nsIFrame* aReferenceFrame,
+                                      const nsPoint& aToReferenceFrame)
+-  : nsDisplayItem(aBuilder, aFrame, aReferenceFrame, aToReferenceFrame) {
++  : nsDisplayItem(aBuilder, aFrame, aReferenceFrame, aToReferenceFrame)
++  , mChildrenCache(nullptr)
++  , mChildrenNum(0) {
+   mList.AppendToTop(aItem);
+   mBounds = mList.GetBounds(aBuilder);
+ }
+ 
+ nsDisplayWrapList::~nsDisplayWrapList() {
+   mList.DeleteAll();
+ }
+ 
+@@ -2937,16 +3104,83 @@ nsDisplayWrapList::RequiredLayerStateFor
+           result = childState;
+         }
+       }
+     }
+   }
+   return result;
+ }
+ 
++void
++nsDisplayWrapList::MakeCache(nsDisplayListBuilder* aBuilder) {
++  MOZ_ASSERT(mChildrenNum == 0, "call MakeCache() for more than once!");
++
++  for (nsDisplayItem *item = mList.GetBottom();
++       item != nullptr;
++       item = item->GetAbove()) {
++    mChildrenNum++;
++  }
++
++  if (mChildrenNum == 0) {
++    return;
++  }
++    
++  mChildrenCache =
++    (nsDisplayItem **)aBuilder->Allocate(sizeof(nsDisplayItem *) *
++                                         mChildrenNum);
++    
++  int i = 0;
++  for (nsDisplayItem *item = mList.GetBottom();
++       item != nullptr;
++       item = item->GetAbove(), i++) {
++    item->MarkInCache(aBuilder);
++    mChildrenCache[i] = item;
++  }
++}
++
++void
++nsDisplayWrapList::MarkInCache(nsDisplayListBuilder* aBuilder) {
++  if (IsInCache()) return;
++
++  nsDisplayItem::MarkInCache(aBuilder);
++  MakeCache(aBuilder);
++}
++
++void
++nsDisplayWrapList::BeforeReuseCache(nsDisplayListBuilder* aBuilder,
++                                    const nsDisplayReuseContext& aContext) {
++  // Restore child items
++  mList.DeleteAll();
++  for (int i = 0; i < mChildrenNum; i++) {
++    nsDisplayItem *item = mChildrenCache[i];
++    if (!aContext.mDirtyRect.Intersects(item->GetBorderRect())) {
++      continue;
++    }
++    /*
++     * Call this here to make sure mClip is set before calling
++     * mList.ComputeVisibilityForSublist().
++     */
++    item->BeforeReuseCache(aBuilder, aContext);
++    mList.AppendToTop(item);
++  }
++
++  nsDisplayItem::BeforeReuseCache(aBuilder, aContext);
++}
++
++void
++nsDisplayWrapList::AfterReuseCache() {
++  for (nsDisplayItem *item = mList.GetBottom();
++       item != nullptr;
++       item = item->GetAbove()) {
++    item->AfterReuseCache();
++  }
++
++  nsDisplayItem::AfterReuseCache();
++}
++
+ nsRect nsDisplayWrapList::GetComponentAlphaBounds(nsDisplayListBuilder* aBuilder)
+ {
+   nsRect bounds;
+   for (nsDisplayItem* i = mList.GetBottom(); i; i = i->GetAbove()) {
+     bounds.UnionRect(bounds, i->GetComponentAlphaBounds(aBuilder));
+   }
+   return bounds;
+ }
+diff --git a/layout/base/nsDisplayList.h b/layout/base/nsDisplayList.h
+--- a/layout/base/nsDisplayList.h
++++ b/layout/base/nsDisplayList.h
+@@ -629,16 +629,31 @@ public:
+    * has a blend mode attached. We do this so we can insert a 
+    * nsDisplayBlendContainer in the parent stacking context.
+    */
+   void SetContainsBlendMode(bool aContainsBlendMode) { mContainsBlendMode = aContainsBlendMode; }
+   bool ContainsBlendMode() const { return mContainsBlendMode; }
+ 
+   DisplayListClipState& ClipState() { return mClipState; }
+ 
++  void EnterCacheScope() { mIsInCacheScope = true; }
++  void LeaveCacheScope() { mIsInCacheScope = false; }
++  bool IsInCacheScope() const { return mIsInCacheScope; }
++
++  PLArenaPool *GetCurrentArenaPool() { return mCurrentPool; }
++  void SetCurrentArenaPool(PLArenaPool *aPool) { mCurrentPool = aPool; }
++
++  nsTArray<DisplayItemClip*> *GetCurrentDisplayItemClipsToDestroy() {
++    return mCurrentDisplayItemClipsToDestroy;
++  }
++  void
++  SetCurrentDisplayItemClipsToDestroy(nsTArray<DisplayItemClip*> *aCurrent) {
++    mCurrentDisplayItemClipsToDestroy = aCurrent;
++  }
++
+ private:
+   void MarkOutOfFlowFrameForDisplay(nsIFrame* aDirtyFrame, nsIFrame* aFrame,
+                                     const nsRect& aDirtyRect);
+ 
+   struct PresShellState {
+     nsIPresShell* mPresShell;
+     nsIFrame*     mCaretFrame;
+     uint32_t      mFirstFrameMarkedForDisplay;
+@@ -648,16 +663,17 @@ private:
+     NS_ASSERTION(mPresShellStates.Length() > 0,
+                  "Someone forgot to enter a presshell");
+     return &mPresShellStates[mPresShellStates.Length() - 1];
+   }
+ 
+   nsIFrame*                      mReferenceFrame;
+   nsIFrame*                      mIgnoreScrollFrame;
+   PLArenaPool                    mPool;
++  PLArenaPool                    *mCurrentPool;
+   nsCOMPtr<nsISelection>         mBoundingSelection;
+   nsAutoTArray<PresShellState,8> mPresShellStates;
+   nsAutoTArray<nsIFrame*,100>    mFramesMarkedForDisplay;
+   nsAutoTArray<ThemeGeometry,2>  mThemeGeometries;
+   nsDisplayTableItem*            mCurrentTableItem;
+   DisplayListClipState           mClipState;
+   const nsRegion*                mFinalTransparentRegion;
+   // When mCachedOffsetFrame is non-null, mCachedOffset is the offset from
+@@ -665,16 +681,17 @@ private:
+   const nsIFrame*                mCachedOffsetFrame;
+   const nsIFrame*                mCachedReferenceFrame;
+   nsPoint                        mCachedOffset;
+   nsRect                         mDisplayPort;
+   nsRegion                       mExcludedGlassRegion;
+   // The display item for the Windows window glass background, if any
+   nsDisplayItem*                 mGlassDisplayItem;
+   nsTArray<DisplayItemClip*>     mDisplayItemClipsToDestroy;
++  nsTArray<DisplayItemClip*>     *mCurrentDisplayItemClipsToDestroy;
+   Mode                           mMode;
+   bool                           mBuildCaret;
+   bool                           mIgnoreSuppression;
+   bool                           mHadToIgnoreSuppression;
+   bool                           mIsAtRootOfPseudoStackingContext;
+   bool                           mIncludeAllOutOfFlows;
+   bool                           mSelectedFramesOnly;
+   bool                           mAccurateVisibleRegions;
+@@ -686,16 +703,21 @@ private:
+   bool                           mSyncDecodeImages;
+   bool                           mIsPaintingToWindow;
+   bool                           mHasDisplayPort;
+   bool                           mHasFixedItems;
+   bool                           mIsInFixedPosition;
+   bool                           mIsCompositingCheap;
+   bool                           mContainsPluginItem;
+   bool                           mContainsBlendMode;
++  bool                           mIsInCacheScope;
++};
++
++struct nsDisplayReuseContext {
++  nsRect mDirtyRect;
+ };
+ 
+ class nsDisplayItem;
+ class nsDisplayList;
+ /**
+  * nsDisplayItems are put in singly-linked lists rooted in an nsDisplayList.
+  * nsDisplayItemLink holds the link. The lists are linked from lowest to
+  * highest in z-order.
+@@ -705,16 +727,29 @@ class nsDisplayItemLink {
+   // destructors.
+ protected:
+   nsDisplayItemLink() : mAbove(nullptr) {}
+   nsDisplayItem* mAbove;  
+   
+   friend class nsDisplayList;
+ };
+ 
++struct nsDisplayItemCacheInfo {
++  typedef mozilla::DisplayItemClip DisplayItemClip;
++
++  // Keep clip info for adjustments of reusing cache.
++  nsPoint   mSavedClipOffset;
++  const DisplayItemClip *mSavedClip;
++  
++  void* operator new(size_t aSize,
++                     nsDisplayListBuilder* aBuilder) CPP_THROW_NEW {
++    return aBuilder->Allocate(aSize);
++  }
++};
++
+ /**
+  * This is the unit of rendering and event testing. Each instance of this
+  * class represents an entity that can be drawn on the screen, e.g., a
+  * frame's CSS background, or a frame's text string.
+  * 
+  * nsDisplayListItems can be containers --- i.e., they can perform hit testing
+  * and painting by recursively traversing a list of child items.
+  * 
+@@ -734,55 +769,66 @@ public:
+   typedef mozilla::layers::LayerManager LayerManager;
+   typedef mozilla::LayerState LayerState;
+ 
+   // This is never instantiated directly (it has pure virtual methods), so no
+   // need to count constructors and destructors.
+   nsDisplayItem(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame)
+     : mFrame(aFrame)
+     , mClip(aBuilder->ClipState().GetCurrentCombinedClip(aBuilder))
++    , mCacheInfo(nullptr)
+ #ifdef MOZ_DUMP_PAINTING
+     , mPainted(false)
+ #endif
+   {
+     mReferenceFrame = aBuilder->FindReferenceFrameFor(aFrame);
+     mToReferenceFrame = aBuilder->ToReferenceFrame(aFrame);
+   }
+   nsDisplayItem(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
+                 const nsIFrame* aReferenceFrame,
+                 const nsPoint& aToReferenceFrame)
+     : mFrame(aFrame)
+     , mClip(aBuilder->ClipState().GetCurrentCombinedClip(aBuilder))
+     , mReferenceFrame(aReferenceFrame)
+     , mToReferenceFrame(aToReferenceFrame)
++    , mCacheInfo(nullptr)
+ #ifdef MOZ_DUMP_PAINTING
+     , mPainted(false)
+ #endif
+   {
+   }
+   /**
+    * This constructor is only used in rare cases when we need to construct
+    * temporary items.
+    */
+   nsDisplayItem(nsIFrame* aFrame)
+     : mFrame(aFrame)
+     , mClip(nullptr)
+     , mReferenceFrame(nullptr)
++    , mCacheInfo(nullptr)
+ #ifdef MOZ_DUMP_PAINTING
+     , mPainted(false)
+ #endif
+   {
+   }
+   virtual ~nsDisplayItem() {}
+   
+   void* operator new(size_t aSize,
+                      nsDisplayListBuilder* aBuilder) CPP_THROW_NEW {
+     return aBuilder->Allocate(aSize);
+   }
+ 
++  void Destroy() {
++    if (!IsInCache()) {
++      this->~nsDisplayItem();
++    } else {
++      AfterReuseCache();
++    }
++  }
++
+ // Contains all the type integers for each display list item type
+ #include "nsDisplayItemTypes.h"
+ 
+   struct HitTestState {
+     typedef nsTArray<ViewID> ShadowArray;
+ 
+     HitTestState(ShadowArray* aShadows = nullptr)
+       : mShadows(aShadows) {
+@@ -1185,16 +1231,21 @@ public:
+ 
+   /**
+    * Returns the result of aBuilder->ToReferenceFrame(GetUnderlyingFrame())
+    */
+   const nsPoint& ToReferenceFrame() const {
+     NS_ASSERTION(mFrame, "No frame?");
+     return mToReferenceFrame;
+   }
++
++  void SetToReferenceFrame(const nsPoint& aOffset) {
++    mToReferenceFrame = aOffset;
++  }
++
+   /**
+    * @return the root of the display list's frame (sub)tree, whose origin
+    * establishes the coordinate system for the display list
+    */
+   const nsIFrame* ReferenceFrame() const { return mReferenceFrame; }
+ 
+   /**
+    * Returns the reference frame for display item children of this item.
+@@ -1231,16 +1282,26 @@ public:
+   {
+     if (!aClip.HasClip()) {
+       mClip = nullptr;
+       return;
+     }
+     mClip = aBuilder->AllocateDisplayItemClip(aClip);
+   }
+ 
++  // Mark this item as in a cache.
++  virtual void MarkInCache(nsDisplayListBuilder* aBuilder);
++  bool IsInCache() { return mCacheInfo != nullptr; }
++
++  // Prepare itself before reusing the cache.
++  virtual void BeforeReuseCache(nsDisplayListBuilder* aBuilder,
++                                const nsDisplayReuseContext& aContext);
++  // Clear itself after resuing the cache.
++  virtual void AfterReuseCache();
++
+ protected:
+   friend class nsDisplayList;
+ 
+   nsDisplayItem() { mAbove = nullptr; }
+ 
+   nsIFrame* mFrame;
+   const DisplayItemClip* mClip;
+   // Result of FindReferenceFrameFor(mFrame), if mFrame is non-null
+@@ -1248,16 +1309,19 @@ protected:
+   // Result of ToReferenceFrame(mFrame), if mFrame is non-null
+   nsPoint   mToReferenceFrame;
+   // This is the rectangle that needs to be painted.
+   // nsDisplayList::ComputeVisibility sets this to the visible region
+   // of the item by intersecting the current visible region with the bounds
+   // of the item. Paint implementations can use this to limit their drawing.
+   // Guaranteed to be contained in GetBounds().
+   nsRect    mVisibleRect;
++
++  nsDisplayItemCacheInfo *mCacheInfo;
++
+ #ifdef MOZ_DUMP_PAINTING
+   // True if this frame has been painted.
+   bool      mPainted;
+ #endif
+ };
+ 
+ /**
+  * Manages a singly-linked list of display list items.
+@@ -1424,16 +1488,23 @@ public:
+    * themselves.
+    * aCmp(item1, item2) should return true if item1 <= item2. We sort the items
+    * into increasing order.
+    */
+   typedef bool (* SortLEQ)(nsDisplayItem* aItem1, nsDisplayItem* aItem2,
+                              void* aClosure);
+   void Sort(nsDisplayListBuilder* aBuilder, SortLEQ aCmp, void* aClosure);
+ 
++  void FlattenTArray(nsDisplayListBuilder* aBuilder,
++                     nsAutoTArray<nsDisplayItem*, 512> *aElement);
++  void Flatten(nsDisplayListBuilder* aBuilder) {
++    nsAutoTArray<nsDisplayItem*, 512> elements;
++    FlattenTArray(aBuilder, &elements);
++  }
++
+   /**
+    * Compute visiblity for the items in the list.
+    * We put this logic here so it can be shared by top-level
+    * painting and also display items that maintain child lists.
+    * This is also a good place to put ComputeVisibility-related logic
+    * that must be applied to every display item. In particular, this
+    * sets mVisibleRect on each display item.
+    * This sets mIsOpaque if the entire visible area of this list has
+@@ -1667,25 +1738,123 @@ struct nsDisplayListCollection : public 
+    * Sort all lists by content order.
+    */                     
+   void SortAllByContentOrder(nsDisplayListBuilder* aBuilder, nsIContent* aCommonAncestor) {
+     for (int32_t i = 0; i < 6; ++i) {
+       mLists[i].SortByContentOrder(aBuilder, aCommonAncestor);
+     }
+   }
+ 
++  // Remove all items without destroying them.
++  void ClearLists() {
++    for (int i = 0; i < 6; i++) {
++      while (mLists[i].RemoveBottom() != nullptr);
++    }
++  }
++
+ private:
+   // This class is only used on stack, so we don't have to worry about leaking
+   // it.  Don't let us be heap-allocated!
+   void* operator new(size_t sz) CPP_THROW_NEW;
+ 
+   nsDisplayList mLists[6];
+ };
+ 
+ 
++class nsItemsCacheState;
++
++/**
++ * A cache of nsDisplayItems.
++ */
++class nsItemsCache {
++  typedef mozilla::DisplayItemClip DisplayItemClip;
++
++  void Init(nsDisplayListBuilder* aBuilder,
++            const nsDisplayList& aList);
++
++  ~nsItemsCache() {}
++
++public:
++  nsItemsCache(nsDisplayListBuilder *aBuilder, nsItemsCacheState *aState);
++
++  static void Destroy(nsItemsCache *aCache);
++
++  void AppendTo(nsDisplayListBuilder *aBuilder,
++                nsDisplayList *aList,
++                const nsPoint &aNewOffset,
++                const nsRect &aDirtyArea);
++
++  const nsPoint &GetSavedOffset() { return mSavedOffset; }
++
++  void* operator new(size_t aSize,
++                     nsDisplayListBuilder* aBuilder) CPP_THROW_NEW {
++    return aBuilder->Allocate(aSize);
++  }
++
++private:
++  PLArenaPool *mPool;
++  nsTArray<DisplayItemClip*> *mDisplayItemClipsToDestroy;
++
++  nsDisplayItem **mItems;
++  int mNumItems;
++
++  nsPoint mSavedOffset;
++};
++
++
++/**
++ * State object for making a cache of nsDisplayItems.
++ */
++class nsItemsCacheState {
++  typedef mozilla::DisplayItemClip DisplayItemClip;
++
++  class DisplayItem : public nsDisplayItem {
++  public:
++    DisplayItem() {}
++    ~DisplayItem() {}
++
++    NS_DISPLAY_DECL_NAME("Dummy", TYPE_DUMMY)
++  };
++
++  struct TransactionInfo {
++    PLArenaPool *mPool;
++    PLArenaPool *mSavedPool;
++
++    nsPoint mOffset;
++
++    nsTArray<DisplayItemClip*> *mDisplayItemClipsToDestroy;
++    nsTArray<DisplayItemClip*> *mSavedDisplayItemClipsToDestroy;
++
++    nsDisplayList mItems;
++
++    TransactionInfo() : mPool(nullptr), mSavedPool(nullptr) {}
++    ~TransactionInfo() {
++      MOZ_ASSERT(mPool == nullptr, "mPool should be a nullptr!");
++    }
++  };
++
++  TransactionInfo *mTransInfo;
++
++  nsDisplayListBuilder *mBuilder;
++
++  friend class nsItemsCache;
++
++public:
++  nsItemsCacheState(nsDisplayListBuilder *aBuilder);
++
++  ~nsItemsCacheState() {
++    MOZ_ASSERT(mTransInfo == nullptr, "mTransInfo is not a nullptr!");
++  }
++
++  nsDisplayList *BeginTransaction(const nsPoint &aOffset);
++
++  nsItemsCache *EndTransaction();
++};
++
++
+ class nsDisplayImageContainer : public nsDisplayItem {
+ public:
+   typedef mozilla::layers::ImageContainer ImageContainer;
+   typedef mozilla::layers::ImageLayer ImageLayer;
+ 
+   nsDisplayImageContainer(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame)
+     : nsDisplayItem(aBuilder, aFrame)
+   {}
+@@ -2340,17 +2509,17 @@ public:
+    */
+   nsDisplayWrapList(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
+                     nsDisplayList* aList);
+   nsDisplayWrapList(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
+                     nsDisplayItem* aItem);
+   nsDisplayWrapList(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
+                     nsDisplayItem* aItem, const nsIFrame* aReferenceFrame, const nsPoint& aToReferenceFrame);
+   nsDisplayWrapList(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame)
+-    : nsDisplayItem(aBuilder, aFrame) {}
++    : nsDisplayItem(aBuilder, aFrame), mChildrenCache(nullptr) {}
+   virtual ~nsDisplayWrapList();
+   /**
+    * Call this if the wrapped list is changed.
+    */
+   virtual void UpdateBounds(nsDisplayListBuilder* aBuilder) MOZ_OVERRIDE
+   {
+     mBounds = mList.GetBounds(aBuilder);
+   }
+@@ -2422,18 +2591,27 @@ public:
+    * and they all have the given aActiveScrolledRoot.
+    */
+   static LayerState RequiredLayerStateForChildren(nsDisplayListBuilder* aBuilder,
+                                                   LayerManager* aManager,
+                                                   const ContainerParameters& aParameters,
+                                                   const nsDisplayList& aList,
+                                                   nsIFrame* aActiveScrolledRoot);
+ 
++private:
++  void MakeCache(nsDisplayListBuilder* aBuilder);
++
++public:
++  virtual void MarkInCache(nsDisplayListBuilder* aBuilder);
++  virtual void BeforeReuseCache(nsDisplayListBuilder* aBuilder,
++                                const nsDisplayReuseContext& aContext);
++  virtual void AfterReuseCache();
++
+ protected:
+-  nsDisplayWrapList() {}
++  nsDisplayWrapList() : mChildrenCache(nullptr), mChildrenNum(0) {}
+ 
+   void MergeFrom(nsDisplayWrapList* aOther)
+   {
+     mList.AppendToBottom(&aOther->mList);
+     mBounds.UnionRect(mBounds, aOther->mBounds);
+   }
+   void MergeFromTrackingMergedFrames(nsDisplayWrapList* aOther)
+   {
+@@ -2442,16 +2620,21 @@ protected:
+     mMergedFrames.MoveElementsFrom(aOther->mMergedFrames);
+   }
+ 
+   nsDisplayList mList;
+   // The frames from items that have been merged into this item, excluding
+   // this item's own frame.
+   nsTArray<nsIFrame*> mMergedFrames;
+   nsRect mBounds;
++
++private:
++  // The cache of children if this item itself is in a cache.
++  nsDisplayItem** mChildrenCache;
++  int mChildrenNum;
+ };
+ 
+ /**
+  * We call WrapDisplayList on the in-flow lists: BorderBackground(),
+  * BlockBorderBackgrounds() and Content().
+  * We call WrapDisplayItem on each item of Outlines(), PositionedDescendants(),
+  * and Floats(). This is done to support special wrapping processing for frames
+  * that may not be in-flow descendants of the current frame.
+diff --git a/layout/base/nsPresShell.cpp b/layout/base/nsPresShell.cpp
+--- a/layout/base/nsPresShell.cpp
++++ b/layout/base/nsPresShell.cpp
+@@ -4547,17 +4547,17 @@ PresShell::ClipListToRange(nsDisplayList
+       tmpList.AppendToTop(itemToInsert ? itemToInsert : i);
+       // if the item is a list, iterate over it as well
+       if (sublist)
+         surfaceRect.UnionRect(surfaceRect,
+           ClipListToRange(aBuilder, sublist, aRange));
+     }
+     else {
+       // otherwise, just delete the item and don't readd it to the list
+-      i->~nsDisplayItem();
++      i->Destroy();
+     }
+   }
+ 
+   // now add all the items back onto the original list again
+   aList->AppendToTop(&tmpList);
+ 
+   return surfaceRect;
+ }
+diff --git a/layout/generic/TextOverflow.cpp b/layout/generic/TextOverflow.cpp
+--- a/layout/generic/TextOverflow.cpp
++++ b/layout/generic/TextOverflow.cpp
+@@ -622,17 +622,17 @@ TextOverflow::PruneDisplayListContents(n
+                                        const FrameHashtable& aFramesToHide,
+                                        const nsRect&         aInsideMarkersArea)
+ {
+   nsDisplayList saved;
+   nsDisplayItem* item;
+   while ((item = aList->RemoveBottom())) {
+     nsIFrame* itemFrame = item->Frame();
+     if (IsFrameDescendantOfAny(itemFrame, aFramesToHide, mBlock)) {
+-      item->~nsDisplayItem();
++      item->Destroy();
+       continue;
+     }
+ 
+     nsDisplayList* wrapper = item->GetSameCoordinateSystemChildren();
+     if (wrapper) {
+       if (!itemFrame || GetSelfOrNearestBlock(itemFrame) == mBlock) {
+         PruneDisplayListContents(wrapper, aFramesToHide, aInsideMarkersArea);
+       }
+@@ -641,25 +641,25 @@ TextOverflow::PruneDisplayListContents(n
+     nsCharClipDisplayItem* charClip = itemFrame ? 
+       nsCharClipDisplayItem::CheckCast(item) : nullptr;
+     if (charClip && GetSelfOrNearestBlock(itemFrame) == mBlock) {
+       nsRect rect = itemFrame->GetScrollableOverflowRect() +
+                     itemFrame->GetOffsetTo(mBlock);
+       if (mLeft.IsNeeded() && rect.x < aInsideMarkersArea.x) {
+         nscoord left = aInsideMarkersArea.x - rect.x;
+         if (MOZ_UNLIKELY(left < 0)) {
+-          item->~nsDisplayItem();
++          item->Destroy();
+           continue;
+         }
+         charClip->mLeftEdge = left;
+       }
+       if (mRight.IsNeeded() && rect.XMost() > aInsideMarkersArea.XMost()) {
+         nscoord right = rect.XMost() - aInsideMarkersArea.XMost();
+         if (MOZ_UNLIKELY(right < 0)) {
+-          item->~nsDisplayItem();
++          item->Destroy();
+           continue;
+         }
+         charClip->mRightEdge = right;
+       }
+     }
+ 
+     saved.AppendToTop(item);
+   }
+diff --git a/layout/generic/nsContainerFrame.h b/layout/generic/nsContainerFrame.h
+--- a/layout/generic/nsContainerFrame.h
++++ b/layout/generic/nsContainerFrame.h
+@@ -23,16 +23,18 @@
+ // if the reflow is fully complete.
+ #define NS_FRAME_NO_DELETE_NEXT_IN_FLOW_CHILD 0x0010
+ 
+ class nsOverflowContinuationTracker;
+ namespace mozilla {
+ class FramePropertyTable;
+ }
+ 
++class nsItemsCache;
++
+ // Some macros for container classes to do sanity checking on
+ // width/height/x/y values computed during reflow.
+ // NOTE: AppUnitsPerCSSPixel value hardwired here to remove the
+ // dependency on nsDeviceContext.h.  It doesn't matter if it's a
+ // little off.
+ #ifdef DEBUG
+ #define CRAZY_W (1000000*60)
+ #define CRAZY_H CRAZY_W
+@@ -369,17 +371,17 @@ public:
+ #define NS_DECLARE_FRAME_PROPERTY_FRAMELIST(prop)                     \
+   NS_DECLARE_FRAME_PROPERTY(prop, nsContainerFrame::DestroyFrameList)
+ 
+   NS_DECLARE_FRAME_PROPERTY_FRAMELIST(OverflowProperty)
+   NS_DECLARE_FRAME_PROPERTY_FRAMELIST(OverflowContainersProperty)
+   NS_DECLARE_FRAME_PROPERTY_FRAMELIST(ExcessOverflowContainersProperty)
+ 
+ protected:
+-  nsContainerFrame(nsStyleContext* aContext) : nsSplittableFrame(aContext) {}
++    nsContainerFrame(nsStyleContext* aContext) : nsSplittableFrame(aContext) {}
+   ~nsContainerFrame();
+ 
+   /**
+    * Helper for DestroyFrom. DestroyAbsoluteFrames is called before
+    * destroying frames on lists that can contain placeholders.
+    * Derived classes must do that too, if they destroy such frame lists.
+    * See nsBlockFrame::DestroyFrom for an example.
+    */
+diff --git a/layout/generic/nsFrame.cpp b/layout/generic/nsFrame.cpp
+--- a/layout/generic/nsFrame.cpp
++++ b/layout/generic/nsFrame.cpp
+@@ -1703,17 +1703,17 @@ WrapPreserve3DListInternal(nsIFrame* aFr
+           }
+           aOutput->AppendToTop(item);
+           break;
+         }
+         case nsDisplayItem::TYPE_WRAP_LIST: {
+           nsDisplayWrapList *list = static_cast<nsDisplayWrapList*>(item);
+           rv = WrapPreserve3DListInternal(aFrame, aBuilder,
+               list->GetChildren(), aOutput, aIndex, aTemp);
+-          list->~nsDisplayWrapList();
++          list->Destroy();
+           break;
+         }
+         case nsDisplayItem::TYPE_OPACITY: {
+           if (!aTemp->IsEmpty()) {
+             aOutput->AppendToTop(new (aBuilder) nsDisplayTransform(aBuilder, aFrame, aTemp, aIndex++));
+           }
+           nsDisplayOpacity *opacity = static_cast<nsDisplayOpacity*>(item);
+           nsDisplayList output;
+@@ -2117,17 +2117,18 @@ nsIFrame::BuildDisplayListForChild(nsDis
+       child->IsLeaf() &&
+       !aChild->IsSelected()) {
+     return;
+   }
+ 
+   if (aBuilder->GetIncludeAllOutOfFlows() &&
+       (child->GetStateBits() & NS_FRAME_OUT_OF_FLOW)) {
+     dirty = child->GetVisualOverflowRect();
+-  } else if (!(child->GetStateBits() & NS_FRAME_FORCE_DISPLAY_LIST_DESCEND_INTO)) {
++  } else if (!(child->GetStateBits() & NS_FRAME_FORCE_DISPLAY_LIST_DESCEND_INTO) &&
++             !aBuilder->IsInCacheScope()) {
+     // No need to descend into child to catch placeholders for visible
+     // positioned stuff. So see if we can short-circuit frame traversal here.
+ 
+     // We can stop if child's frame subtree's intersection with the
+     // dirty area is empty.
+     // If the child is a scrollframe that we want to ignore, then we need
+     // to descend into it because its scrolled child may intersect the dirty
+     // area even if the scrollframe itself doesn't.
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -46,39 +46,45 @@
+ #include "mozilla/Attributes.h"
+ #include "ScrollbarActivity.h"
+ #include "nsRefreshDriver.h"
+ #include "nsThemeConstants.h"
+ #include "nsSVGIntegrationUtils.h"
+ #include "nsIScrollPositionListener.h"
+ #include "StickyScrollContainer.h"
+ #include "nsIFrameInlines.h"
++#include "nsRenderingContext.h"
+ #include <algorithm>
+ #include <cstdlib> // for std::abs(int/long)
+ #include <cmath> // for std::abs(float/double)
+ 
++#include "GeckoProfiler.h"
++
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::layout;
++using namespace mozilla::layers;
+ 
+ //----------------------------------------------------------------------
+ 
+ //----------nsHTMLScrollFrame-------------------------------------------
+ 
+ nsIFrame*
+ NS_NewHTMLScrollFrame(nsIPresShell* aPresShell, nsStyleContext* aContext, bool aIsRoot)
+ {
+   return new (aPresShell) nsHTMLScrollFrame(aPresShell, aContext, aIsRoot);
+ }
+ 
+ NS_IMPL_FRAMEARENA_HELPERS(nsHTMLScrollFrame)
+ 
+ nsHTMLScrollFrame::nsHTMLScrollFrame(nsIPresShell* aShell, nsStyleContext* aContext, bool aIsRoot)
+   : nsContainerFrame(aContext),
+-    mInner(ALLOW_THIS_IN_INITIALIZER_LIST(this), aIsRoot)
++    mInner(ALLOW_THIS_IN_INITIALIZER_LIST(this),
++           &ComputeCacheTransform,
++           aIsRoot)
+ {
+ }
+ 
+ void
+ nsHTMLScrollFrame::ScrollbarActivityStarted() const
+ {
+   if (mInner.mScrollbarActivity) {
+     mInner.mScrollbarActivity->ActivityStarted();
+@@ -164,16 +170,23 @@ nsHTMLScrollFrame::GetSplittableType() c
+ }
+ 
+ nsIAtom*
+ nsHTMLScrollFrame::GetType() const
+ {
+   return nsGkAtoms::scrollFrame;
+ }
+ 
++void
++nsHTMLScrollFrame::InvalidateFrame(uint32_t aDisplayItemKey)
++{
++  nsIFrame::InvalidateFrame(aDisplayItemKey);
++  mInner.InvalidateFrame(aDisplayItemKey);
++}
++
+ /**
+  HTML scrolling implementation
+ 
+  All other things being equal, we prefer layouts with fewer scrollbars showing.
+ */
+ 
+ struct MOZ_STACK_CLASS ScrollReflowState {
+   const nsHTMLReflowState& mReflowState;
+@@ -858,16 +871,23 @@ nsHTMLScrollFrame::Reflow(nsPresContext*
+   }
+ 
+   aStatus = NS_FRAME_COMPLETE;
+   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aDesiredSize);
+   mInner.PostOverflowEvent();
+   return rv;
+ }
+ 
++gfx3DMatrix
++nsHTMLScrollFrame::ComputeCacheTransform(nsIFrame* aFrame,
++                                         float aAppUnitsPerPixel) {
++  nsHTMLScrollFrame *frame = static_cast<nsHTMLScrollFrame*>(aFrame);
++  return frame->mInner.GetCacheTransform();
++}
++
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #ifdef DEBUG
+ NS_IMETHODIMP
+ nsHTMLScrollFrame::GetFrameName(nsAString& aResult) const
+ {
+   return MakeFrameName(NS_LITERAL_STRING("HTMLScroll"), aResult);
+@@ -907,17 +927,19 @@ NS_NewXULScrollFrame(nsIPresShell* aPres
+                                            aClipAllDescendants);
+ }
+ 
+ NS_IMPL_FRAMEARENA_HELPERS(nsXULScrollFrame)
+ 
+ nsXULScrollFrame::nsXULScrollFrame(nsIPresShell* aShell, nsStyleContext* aContext,
+                                    bool aIsRoot, bool aClipAllDescendants)
+   : nsBoxFrame(aShell, aContext, aIsRoot),
+-    mInner(ALLOW_THIS_IN_INITIALIZER_LIST(this), aIsRoot)
++    mInner(ALLOW_THIS_IN_INITIALIZER_LIST(this),
++           &ComputeCacheTransform,
++           aIsRoot)
+ {
+   SetLayoutManager(nullptr);
+   mInner.mClipAllDescendants = aClipAllDescendants;
+ }
+ 
+ void
+ nsXULScrollFrame::ScrollbarActivityStarted() const
+ {
+@@ -1086,16 +1108,23 @@ nsXULScrollFrame::GetPadding(nsMargin& a
+ }
+ 
+ nsIAtom*
+ nsXULScrollFrame::GetType() const
+ {
+   return nsGkAtoms::scrollFrame;
+ }
+ 
++void
++nsXULScrollFrame::InvalidateFrame(uint32_t aDisplayItemKey)
++{
++  nsIFrame::InvalidateFrame(aDisplayItemKey);
++  mInner.InvalidateFrame(aDisplayItemKey);
++}
++
+ nscoord
+ nsXULScrollFrame::GetBoxAscent(nsBoxLayoutState& aState)
+ {
+   if (!mInner.mScrolledFrame)
+     return 0;
+ 
+   nscoord ascent = mInner.mScrolledFrame->GetBoxAscent(aState);
+   nsMargin m(0,0,0,0);
+@@ -1524,16 +1553,17 @@ public:
+     RemoveObject(aObject);
+     aObject->MarkInactive();
+   }
+ };
+ 
+ static ScrollFrameActivityTracker *gScrollFrameActivityTracker = nullptr;
+ 
+ nsGfxScrollFrameInner::nsGfxScrollFrameInner(nsContainerFrame* aOuter,
++                                             ComputeTransformFunction aCacheTransformGetter,
+                                              bool aIsRoot)
+   : mHScrollbarBox(nullptr)
+   , mVScrollbarBox(nullptr)
+   , mScrolledFrame(nullptr)
+   , mScrollCornerBox(nullptr)
+   , mResizerBox(nullptr)
+   , mOuter(aOuter)
+   , mAsyncScroll(nullptr)
+@@ -1557,16 +1587,18 @@ nsGfxScrollFrameInner::nsGfxScrollFrameI
+   , mHorizontalOverflow(false)
+   , mVerticalOverflow(false)
+   , mPostedReflowCallback(false)
+   , mMayHaveDirtyFixedChildren(false)
+   , mUpdateScrollbarAttributes(false)
+   , mCollapsedResizer(false)
+   , mShouldBuildLayer(false)
+   , mHasBeenScrolled(false)
++  , mItemsCache(nullptr)
++  , mCacheTransformGetter(aCacheTransformGetter)
+ {
+   mScrollingActive = IsAlwaysActive();
+ 
+   if (LookAndFeel::GetInt(LookAndFeel::eIntID_UseOverlayScrollbars) != 0) {
+     mScrollbarActivity = new ScrollbarActivity(do_QueryFrame(aOuter));
+   }
+ 
+   EnsureImageVisPrefsCached();
+@@ -1582,16 +1614,21 @@ nsGfxScrollFrameInner::~nsGfxScrollFrame
+     delete gScrollFrameActivityTracker;
+     gScrollFrameActivityTracker = nullptr;
+   }
+ 
+   if (mScrollActivityTimer) {
+     mScrollActivityTimer->Cancel();
+     mScrollActivityTimer = nullptr;
+   }
++
++  if (mItemsCache != nullptr) {
++    nsItemsCache::Destroy(mItemsCache);
++    mItemsCache = nullptr;
++  }
+ }
+ 
+ /*
+  * Callback function from AsyncScroll, used in nsGfxScrollFrameInner::ScrollTo
+  */
+ void
+ nsGfxScrollFrameInner::AsyncScrollCallback(void* anInstance, mozilla::TimeStamp aTime)
+ {
+@@ -2223,21 +2260,88 @@ nsGfxScrollFrameInner::ExpandRect(const 
+     expand.right = horzShift;
+   }
+ 
+   nsRect rect = aRect;
+   rect.Inflate(expand);
+   return rect;
+ }
+ 
++int gDoDisplayCache = false;
++int gDoDisplayCacheKeep = false;
++int gHitCache = 0;
++
++void
++nsGfxScrollFrameInner::AppendCacheToContent(const nsDisplayListSet &aLists,
++                                            nsDisplayListBuilder *aBuilder,
++                                            const nsRect &aDirtyArea) {
++  nsDisplayList list;
++  nsPoint newOffset = GetScrollPosition();
++
++  mItemsCache->AppendTo(aBuilder, &list, newOffset, aDirtyArea);
++
++  nsDisplayTransform *item =
++    new (aBuilder) nsDisplayTransform(aBuilder, mOuter,
++                                      &list, mCacheTransformGetter);
++
++  aLists.Content()->AppendToTop(item);
++}
++
++void
++nsGfxScrollFrameInner::CreateCache(nsDisplayListBuilder *aBuilder) {
++  DisplayListClipState::AutoSaveRestore clipState(aBuilder);
++  nsItemsCacheState state(aBuilder);
++
++  /*
++   * Make the clip covering whole mScrolledFrame that every descendat
++   * has a clip that cover its visible part.
++   */
++  nsRect dirty = mScrolledFrame->GetScrollableOverflowRect() +
++    mScrolledFrame->GetPosition();
++  clipState.Clear();
++  clipState.ClipContentDescendants(dirty, nullptr);
++
++  nsDisplayList *list = state.BeginTransaction(GetScrollPosition());
++  nsDisplayListSet lists(list, list, list, list, list, list);;
++  mOuter->BuildDisplayListForChild(aBuilder, mScrolledFrame,
++                                   dirty, lists,
++                                   nsIFrame::DISPLAY_CHILD_FORCE_PSEUDO_STACKING_CONTEXT);
++  mItemsCache = state.EndTransaction();
++}
++
++void
++nsGfxScrollFrameInner::UseOrCreateCache(const nsDisplayListSet &aLists,
++                                        nsDisplayListBuilder *aBuilder,
++                                        const nsRect &aDirtyArea) {
++  if (mItemsCache) {
++    gHitCache++;
++  } else {
++    CreateCache(aBuilder);
++  }
++  AppendCacheToContent(aLists, aBuilder, aDirtyArea);
++}
++
+ void
+ nsGfxScrollFrameInner::BuildDisplayList(nsDisplayListBuilder*   aBuilder,
+                                         const nsRect&           aDirtyRect,
+                                         const nsDisplayListSet& aLists)
+ {
++  PROFILER_LABEL("nsGfxScrollFrame",
++                 "nsGfxScrollFrameInner::BuildDisplayList");
++  bool doCache =
++    !aBuilder->IsInCacheScope() &&
++    aBuilder->IsForPainting() &&
++    aBuilder->IsPaintingToWindow() &&
++    gDoDisplayCache;
++
++  if (mItemsCache != nullptr && doCache && !gDoDisplayCacheKeep) {
++    nsItemsCache::Destroy(mItemsCache);
++    mItemsCache = nullptr;
++  }
++
+   if (aBuilder->IsForImageVisibility()) {
+     mLastUpdateImagesPos = GetScrollPosition();
+   }
+ 
+   mOuter->DisplayBorderBackgroundOutline(aBuilder, aLists);
+ 
+   if (aBuilder->IsPaintingToWindow()) {
+     mScrollPosAtLastPaint = GetScrollPosition();
+@@ -2249,16 +2353,21 @@ nsGfxScrollFrameInner::BuildDisplayList(
+         mScrollPosForLayerPixelAlignment = mScrollPosAtLastPaint;
+       }
+     } else {
+       mScrollPosForLayerPixelAlignment = nsPoint(-1,-1);
+     }
+   }
+ 
+   if (aBuilder->GetIgnoreScrollFrame() == mOuter || IsIgnoringViewportClipping()) {
++    if (doCache) {
++      UseOrCreateCache(aLists, aBuilder, aDirtyRect);
++      return;
++    }
++
+     // Don't clip the scrolled child, and don't paint scrollbars/scrollcorner.
+     // The scrolled frame shouldn't have its own background/border, so we
+     // can just pass aLists directly.
+     mOuter->BuildDisplayListForChild(aBuilder, mScrolledFrame,
+                                      aDirtyRect, aLists);
+     return;
+   }
+ 
+@@ -2282,21 +2391,21 @@ nsGfxScrollFrameInner::BuildDisplayList(
+   // to AppendScrollPartsTo(..., true) further down.
+   AppendScrollPartsTo(aBuilder, aDirtyRect, aLists, createLayersForScrollbars,
+                       false);
+ 
+   // Overflow clipping can never clip frames outside our subtree, so there
+   // is no need to worry about whether we are a moving frame that might clip
+   // non-moving frames.
+   nsRect dirtyRect;
+-  // Not all our descendants will be clipped by overflow clipping, but all
+-  // the ones that aren't clipped will be out of flow frames that have already
+-  // had dirty rects saved for them by their parent frames calling
+-  // MarkOutOfFlowChildrenForDisplayList, so it's safe to restrict our
+-  // dirty rect here.
++  // Not all our descendants will be clipped by overflow clipping,
++  // but all the ones that aren't clipped will be out of flow frames
++  // that have already had dirty rects saved for them by their
++  // parent frames calling MarkOutOfFlowChildrenForDisplayList, so
++  // it's safe to restrict our dirty rect here.
+   dirtyRect.IntersectRect(aDirtyRect, mScrollPort);
+ 
+   // Override the dirty rectangle if the displayport has been set.
+   nsRect displayPort;
+   bool usingDisplayport =
+     nsLayoutUtils::GetDisplayPort(mOuter->GetContent(), &displayPort) &&
+     !aBuilder->IsForEventDelivery();
+   if (usingDisplayport) {
+@@ -2330,17 +2439,21 @@ nsGfxScrollFrameInner::BuildDisplayList(
+       // the corners where we have a scrollbar.
+       if (mClipAllDescendants) {
+         clipState.ClipContentDescendants(clip, haveRadii ? radii : nullptr);
+       } else {
+         clipState.ClipContainingBlockDescendants(clip, haveRadii ? radii : nullptr);
+       }
+     }
+ 
+-    mOuter->BuildDisplayListForChild(aBuilder, mScrolledFrame, dirtyRect, scrolledContent);
++    if (doCache) {
++      UseOrCreateCache(aLists, aBuilder, dirtyRect);
++    } else {
++      mOuter->BuildDisplayListForChild(aBuilder, mScrolledFrame, dirtyRect, aLists);
++    }
+   }
+ 
+   // Since making new layers is expensive, only use nsDisplayScrollLayer
+   // if the area is scrollable and we're the content process.
+   // When a displayport is being used, force building of a layer so that
+   // CompositorParent can always find the scrollable layer for the root content
+   // document.
+   if (usingDisplayport) {
+@@ -2356,16 +2469,17 @@ nsGfxScrollFrameInner::BuildDisplayList(
+     bool wantSubAPZC = (XRE_GetProcessType() == GeckoProcessType_Content);
+     mShouldBuildLayer =
+       wantSubAPZC &&
+       hasScrollableOverflow &&
+       (!mIsRoot || !mOuter->PresContext()->IsRootContentDocument());
+   }
+ 
+   if (ShouldBuildLayer()) {
++    nsPoint translate = mItemsCache->GetSavedOffset() - GetScrollPosition();
+     // ScrollLayerWrapper must always be created because it initializes the
+     // scroll layer count. The display lists depend on this.
+     ScrollLayerWrapper wrapper(mOuter, mScrolledFrame);
+ 
+     if (usingDisplayport) {
+       // Once a displayport is set, assume that scrolling needs to be fast
+       // so create a layer with all the content inside. The compositor
+       // process will be able to scroll the content asynchronously.
+@@ -2851,16 +2965,18 @@ nsGfxScrollFrameInner::ReloadChildFrames
+         // probably a scrollcorner
+         NS_ASSERTION(!mScrollCornerBox, "Found multiple scrollcorners");
+         mScrollCornerBox = frame;
+       }
+     }
+ 
+     frame = frame->GetNextSibling();
+   }
++
++  ClearDisplayItemCache();
+ }
+ 
+ nsresult
+ nsGfxScrollFrameInner::CreateAnonymousContent(
+   nsTArray<nsIAnonymousContentCreator::ContentInfo>& aElements)
+ {
+   nsPresContext* presContext = mOuter->PresContext();
+   nsIFrame* parent = mOuter->GetParent();
+@@ -3623,16 +3739,23 @@ nsXULScrollFrame::Layout(nsBoxLayoutStat
+     clippedRect.MoveTo(origRect.TopLeft());
+     f->SetRect(clippedRect);
+   }
+ 
+   mInner.PostOverflowEvent();
+   return NS_OK;
+ }
+ 
++gfx3DMatrix
++nsXULScrollFrame::ComputeCacheTransform(nsIFrame* aFrame,
++                                        float aAppUnitsPerPixel) {
++  nsXULScrollFrame *frame = static_cast<nsXULScrollFrame*>(aFrame);
++  return frame->mInner.GetCacheTransform();
++}
++
+ void
+ nsGfxScrollFrameInner::FinishReflowForScrollbar(nsIContent* aContent,
+                                                 nscoord aMinXY, nscoord aMaxXY,
+                                                 nscoord aCurPosXY,
+                                                 nscoord aPageIncrement,
+                                                 nscoord aIncrement)
+ {
+   // Scrollbars assume zero is the minimum position, so translate for them.
+@@ -3644,16 +3767,18 @@ nsGfxScrollFrameInner::FinishReflowForSc
+ }
+ 
+ bool
+ nsGfxScrollFrameInner::ReflowFinished()
+ {
+   nsAutoScriptBlocker scriptBlocker;
+   mPostedReflowCallback = false;
+ 
++  ClearDisplayItemCache();
++
+   ScrollToRestoredPosition();
+ 
+   // Clamp current scroll position to new bounds. Normally this won't
+   // do anything.
+   nsPoint currentScrollPos = GetScrollPosition();
+   ScrollToImpl(currentScrollPos, nsRect(currentScrollPos, nsSize(0, 0)));
+   if (!mAsyncScroll) {
+     // We need to have mDestination track the current scroll position,
+@@ -3755,16 +3880,30 @@ nsGfxScrollFrameInner::ReflowFinished()
+ }
+ 
+ void
+ nsGfxScrollFrameInner::ReflowCallbackCanceled()
+ {
+   mPostedReflowCallback = false;
+ }
+ 
++void
++nsGfxScrollFrameInner::ClearDisplayItemCache()
++{
++  if (mItemsCache != nullptr) {
++    nsItemsCache::Destroy(mItemsCache);
++    mItemsCache = nullptr;
++  }
++}
++
++void
++nsGfxScrollFrameInner::ChildIsDirty(nsIFrame* aChild) {
++  ClearDisplayItemCache();
++}
++
+ bool
+ nsGfxScrollFrameInner::UpdateOverflow()
+ {
+   nsIScrollableFrame* sf = do_QueryFrame(mOuter);
+   ScrollbarStyles ss = sf->GetScrollbarStyles();
+ 
+   if (ss.mVertical != NS_STYLE_OVERFLOW_HIDDEN ||
+       ss.mHorizontal != NS_STYLE_OVERFLOW_HIDDEN ||
+@@ -4252,8 +4391,19 @@ nsIScrollableFrame::GetPerceivedScrollin
+   if (scrollRange.width >= oneDevPixel) {
+     directions |= HORIZONTAL;
+   }
+   if (scrollRange.height >= oneDevPixel) {
+     directions |= VERTICAL;
+   }
+   return directions;
+ }
++
++gfx3DMatrix
++nsGfxScrollFrameInner::GetCacheTransform() {
++  int32_t appUnitsPerDevPixel = mOuter->PresContext()->AppUnitsPerDevPixel();
++  nsPoint delta2D = GetScrollPosition() - mItemsCache->GetSavedOffset();
++  gfxPoint3D delta3D(delta2D.x / appUnitsPerDevPixel,
++                     delta2D.y / appUnitsPerDevPixel, 0);
++  gfx3DMatrix transform;
++  transform.Translate(-delta3D);
++  return transform;
++}
+diff --git a/layout/generic/nsGfxScrollFrame.h b/layout/generic/nsGfxScrollFrame.h
+--- a/layout/generic/nsGfxScrollFrame.h
++++ b/layout/generic/nsGfxScrollFrame.h
+@@ -14,25 +14,27 @@
+ #include "nsBoxFrame.h"
+ #include "nsIScrollableFrame.h"
+ #include "nsIStatefulFrame.h"
+ #include "nsThreadUtils.h"
+ #include "nsIReflowCallback.h"
+ #include "nsBoxLayoutState.h"
+ #include "nsQueryFrame.h"
+ #include "nsExpirationTracker.h"
++#include "nsDisplayList.h"
+ 
+ class nsPresContext;
+ class nsIPresShell;
+ class nsIContent;
+ class nsIAtom;
+ class nsIScrollFrameInternal;
+ class nsPresState;
+ class nsIScrollPositionListener;
+ struct ScrollReflowState;
++class nsItemsCache;
+ 
+ namespace mozilla {
+ namespace layout {
+ class ScrollbarActivity;
+ }
+ }
+ 
+ // When set, the next scroll operation on the scrollframe will invalidate its
+@@ -40,20 +42,23 @@ class ScrollbarActivity;
+ // This bit is cleared after each time the scrollframe is scrolled. Whoever
+ // needs to set it should set it again on each paint.
+ #define NS_SCROLLFRAME_INVALIDATE_CONTENTS_ON_SCROLL NS_FRAME_STATE_BIT(20)
+ 
+ class nsGfxScrollFrameInner : public nsIReflowCallback {
+ public:
+   typedef mozilla::CSSIntPoint CSSIntPoint;
+   typedef mozilla::layout::ScrollbarActivity ScrollbarActivity;
++  typedef nsDisplayTransform::ComputeTransformFunction ComputeTransformFunction;
+ 
+   class AsyncScroll;
+ 
+-  nsGfxScrollFrameInner(nsContainerFrame* aOuter, bool aIsRoot);
++  nsGfxScrollFrameInner(nsContainerFrame* aOuter,
++                        ComputeTransformFunction aCacheTransformGetter,
++                        bool aIsRoot);
+   ~nsGfxScrollFrameInner();
+ 
+   mozilla::ScrollbarStyles GetScrollbarStylesFromFrame() const;
+ 
+   // If a child frame was added or removed on the scrollframe,
+   // reload our child frame list.
+   // We need this if a scrollbar frame is recreated.
+   void ReloadChildFrames();
+@@ -78,16 +83,25 @@ public:
+                            bool                    aPositioned);
+ 
+   bool GetBorderRadii(nscoord aRadii[8]) const;
+ 
+   // nsIReflowCallback
+   virtual bool ReflowFinished() MOZ_OVERRIDE;
+   virtual void ReflowCallbackCanceled() MOZ_OVERRIDE;
+ 
++private:
++  void ClearDisplayItemCache();
++
++public:
++  void ChildIsDirty(nsIFrame* aChild);
++  void InvalidateFrame(uint32_t aDisplayItemKey = 0) {
++    ClearDisplayItemCache();
++  }
++
+   /**
+    * @note This method might destroy the frame, pres shell and other objects.
+    * Called when the 'curpos' attribute on one of the scrollbars changes.
+    */
+   void CurPosAttributeChanged(nsIContent* aChild);
+ 
+   void PostScrollEvent();
+   void FireScrollEvent();
+@@ -300,16 +314,18 @@ public:
+   void MarkInactive();
+   nsExpirationState* GetExpirationState() { return &mActivityExpirationState; }
+ 
+   void ScheduleSyntheticMouseMove();
+   static void ScrollActivityCallback(nsITimer *aTimer, void* anInstance);
+ 
+   void HandleScrollbarStyleSwitching();
+ 
++  gfx3DMatrix GetCacheTransform();
++
+   // owning references to the nsIAnonymousContentCreator-built content
+   nsCOMPtr<nsIContent> mHScrollbarContent;
+   nsCOMPtr<nsIContent> mVScrollbarContent;
+   nsCOMPtr<nsIContent> mScrollCornerContent;
+   nsCOMPtr<nsIContent> mResizerContent;
+ 
+   nsRevocableEventPtr<ScrollEvent> mScrollEvent;
+   nsRevocableEventPtr<AsyncScrollPortEvent> mAsyncScrollPortEvent;
+@@ -407,16 +423,31 @@ protected:
+   static bool sImageVisPrefsCached;
+   // The number of scrollports wide/high to expand when looking for images.
+   static uint32_t sHorzExpandScrollPort;
+   static uint32_t sVertExpandScrollPort;
+   // The fraction of the scrollport we allow to scroll by before we schedule
+   // an update of image visibility.
+   static int32_t sHorzScrollFraction;
+   static int32_t sVertScrollFraction;
++
++  nsItemsCache *mItemsCache;
++
++private:
++  // The getter function of the transform applied to the items from
++  // the cache.
++  ComputeTransformFunction mCacheTransformGetter;
++
++  void AppendCacheToContent(const nsDisplayListSet &aLists,
++                            nsDisplayListBuilder *aBuilder,
++                            const nsRect &aDirtyArea);
++  void CreateCache(nsDisplayListBuilder *aBuilder);
++  void UseOrCreateCache(const nsDisplayListSet &aLists,
++                        nsDisplayListBuilder *aBuilder,
++                        const nsRect &aDirtyArea);
+ };
+ 
+ /**
+  * The scroll frame creates and manages the scrolling view
+  *
+  * It only supports having a single child frame that typically is an area
+  * frame, but doesn't have to be. The child frame must have a view, though
+  *
+@@ -635,16 +666,21 @@ public:
+   }
+   virtual void ClearDidHistoryRestore() MOZ_OVERRIDE {
+     mInner.mDidHistoryRestore = false;
+   }
+   virtual bool IsRectNearlyVisible(const nsRect& aRect) MOZ_OVERRIDE {
+     return mInner.IsRectNearlyVisible(aRect);
+   }
+ 
++  virtual void ChildIsDirty(nsIFrame* aChild) MOZ_OVERRIDE {
++    nsContainerFrame::ChildIsDirty(aChild);
++    mInner.ChildIsDirty(aChild);
++  }
++
+   // nsIStatefulFrame
+   NS_IMETHOD SaveState(nsPresState** aState) MOZ_OVERRIDE {
+     NS_ENSURE_ARG_POINTER(aState);
+     *aState = mInner.SaveState();
+     return NS_OK;
+   }
+   NS_IMETHOD RestoreState(nsPresState* aState) MOZ_OVERRIDE {
+     NS_ENSURE_ARG_POINTER(aState);
+@@ -653,17 +689,19 @@ public:
+   }
+ 
+   /**
+    * Get the "type" of the frame
+    *
+    * @see nsGkAtoms::scrollFrame
+    */
+   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
+-  
++
++  virtual void InvalidateFrame(uint32_t aDisplayItemKey = 0);
++
+ #ifdef DEBUG
+   NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+ #endif
+ 
+ #ifdef ACCESSIBILITY
+   virtual mozilla::a11y::AccType AccessibleType() MOZ_OVERRIDE;
+ #endif
+ 
+@@ -686,16 +724,23 @@ protected:
+   /**
+    * Override this to return false if computed height/min-height/max-height
+    * should NOT be propagated to child content.
+    * nsListControlFrame uses this.
+    */
+   virtual bool ShouldPropagateComputedHeightToScrolledContent() const { return true; }
+ 
+ private:
++  /**
++   * Compute a transform matrix that should be applied on items from
++   * the cache.
++   */
++  static gfx3DMatrix ComputeCacheTransform(nsIFrame* aFrame,
++                                           float aAppUnitsPerPixel);
++
+   friend class nsGfxScrollFrameInner;
+   nsGfxScrollFrameInner mInner;
+ };
+ 
+ /**
+  * The scroll frame creates and manages the scrolling view
+  *
+  * It only supports having a single child frame that typically is an area
+@@ -924,16 +969,20 @@ public:
+     return mInner.mDidHistoryRestore;
+   }
+   virtual void ClearDidHistoryRestore() MOZ_OVERRIDE {
+     mInner.mDidHistoryRestore = false;
+   }
+   virtual bool IsRectNearlyVisible(const nsRect& aRect) MOZ_OVERRIDE {
+     return mInner.IsRectNearlyVisible(aRect);
+   }
++  virtual void ChildIsDirty(nsIFrame* aChild) MOZ_OVERRIDE {
++    nsContainerFrame::ChildIsDirty(aChild);
++    mInner.ChildIsDirty(aChild);
++  }
+ 
+   // nsIStatefulFrame
+   NS_IMETHOD SaveState(nsPresState** aState) MOZ_OVERRIDE {
+     NS_ENSURE_ARG_POINTER(aState);
+     *aState = mInner.SaveState();
+     return NS_OK;
+   }
+   NS_IMETHOD RestoreState(nsPresState* aState) MOZ_OVERRIDE {
+@@ -944,16 +993,18 @@ public:
+ 
+   /**
+    * Get the "type" of the frame
+    *
+    * @see nsGkAtoms::scrollFrame
+    */
+   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
+   
++  virtual void InvalidateFrame(uint32_t aDisplayItemKey = 0);
++
+   virtual bool IsFrameOfType(uint32_t aFlags) const MOZ_OVERRIDE
+   {
+     // Override bogus IsFrameOfType in nsBoxFrame.
+     if (aFlags & (nsIFrame::eReplacedContainsBlock | nsIFrame::eReplaced))
+       return false;
+     return nsBoxFrame::IsFrameOfType(aFlags);
+   }
+ 
+@@ -975,13 +1026,20 @@ protected:
+      */
+     if (!mInner.IsLTR()) {
+       aRect.x = mInner.mScrollPort.XMost() - aScrollPosition.x - aRect.width;
+     }
+     mInner.mScrolledFrame->SetBounds(aState, aRect, aRemoveOverflowAreas);
+   }
+ 
+ private:
++  /**
++   * Compute a transform matrix that should be applied on items from
++   * the cache.
++   */
++  static gfx3DMatrix ComputeCacheTransform(nsIFrame* aFrame,
++                                           float aAppUnitsPerPixel);
++
+   friend class nsGfxScrollFrameInner;
+   nsGfxScrollFrameInner mInner;
+ };
+ 
+ #endif /* nsGfxScrollFrame_h___ */
+diff --git a/layout/generic/nsPageFrame.cpp b/layout/generic/nsPageFrame.cpp
+--- a/layout/generic/nsPageFrame.cpp
++++ b/layout/generic/nsPageFrame.cpp
+@@ -402,17 +402,17 @@ PruneDisplayListForExtraPage(nsDisplayLi
+     if (subList) {
+       PruneDisplayListForExtraPage(aBuilder, aPage, aExtraPage, subList);
+       i->UpdateBounds(aBuilder);
+     } else {
+       nsIFrame* f = i->Frame();
+       if (!nsLayoutUtils::IsProperAncestorFrameCrossDoc(aPage, f)) {
+         // We're throwing this away so call its destructor now. The memory
+         // is owned by aBuilder which destroys all items at once.
+-        i->~nsDisplayItem();
++        i->Destroy();
+         continue;
+       }
+     }
+     newList.AppendToTop(i);
+   }
+   aList->AppendToTop(&newList);
+ }
+ 

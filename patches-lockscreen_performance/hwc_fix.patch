@@ -1,0 +1,41 @@
+# HG changeset patch
+# Parent a8a87b5771a8f426ebb9935c5e234a8d0849af88
+# User Jerry Shih <hshih@mozilla.com>
+Bug 975974 - [Flatfish] Cannot boot up successfully and screen is black
+
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -89,21 +89,27 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+ 
+     nsIntSize screenSize;
+ 
+     mozilla::Framebuffer::GetSize(&screenSize);
+     mScreenRect  = nsIntRect(nsIntPoint(0, 0), screenSize);
+ 
+ #if ANDROID_VERSION >= 17
+     int supported = 0;
+-    if (mHwc->query(mHwc, HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
+-        mColorFill = supported ? true : false;
+-    }
+-    if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+-        mRBSwapSupport = supported ? true : false;
++
++    if (mHwc->query) {
++        if (mHwc->query(mHwc, HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
++            mColorFill = !!supported;
++        }
++        if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
++            mRBSwapSupport = !!supported;
++        }
++    } else {
++        mColorFill = false;
++        mRBSwapSupport = false;
+     }
+ #else
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+     mRBSwapSupport = true;
+ #endif
+ 

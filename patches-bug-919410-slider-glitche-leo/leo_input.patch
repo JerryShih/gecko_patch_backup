@@ -1,0 +1,53 @@
+# HG changeset patch
+# Parent c45605e15c1463b5f54129f81354440a8069a46b
+# User Jerry Shih <hshih@mozilla.com>
+for leo input
+
+diff --git a/widget/gonk/libui/InputReader.cpp b/widget/gonk/libui/InputReader.cpp
+--- a/widget/gonk/libui/InputReader.cpp
++++ b/widget/gonk/libui/InputReader.cpp
+@@ -43,17 +43,17 @@
+ #include "VirtualKeyMap.h"
+ 
+ #include <stddef.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <errno.h>
+ #include <limits.h>
+ #include <math.h>
+-
++#include "cutils/properties.h"
+ #define INDENT "  "
+ #define INDENT2 "    "
+ #define INDENT3 "      "
+ #define INDENT4 "        "
+ #define INDENT5 "          "
+ 
+ namespace android {
+ 
+@@ -5602,16 +5602,25 @@ void MultiTouchInputMapper::syncTouch(ns
+         outPointer.touchMajor = inSlot->getTouchMajor();
+         outPointer.touchMinor = inSlot->getTouchMinor();
+         outPointer.toolMajor = inSlot->getToolMajor();
+         outPointer.toolMinor = inSlot->getToolMinor();
+         outPointer.orientation = inSlot->getOrientation();
+         outPointer.distance = inSlot->getDistance();
+         outPointer.tiltX = 0;
+         outPointer.tiltY = 0;
++        // Mozilla bug 739417
++
++        char prop[PROPERTY_VALUE_MAX];
++        property_get("debug.gfx.leo", prop, "1");
++        if (atoi(prop)) {
++          if (!outPointer.touchMajor)
++            continue;
++        }
++
+ 
+         outPointer.toolType = inSlot->getToolType();
+         if (outPointer.toolType == AMOTION_EVENT_TOOL_TYPE_UNKNOWN) {
+             outPointer.toolType = mTouchButtonAccumulator.getToolType();
+             if (outPointer.toolType == AMOTION_EVENT_TOOL_TYPE_UNKNOWN) {
+                 outPointer.toolType = AMOTION_EVENT_TOOL_TYPE_FINGER;
+             }
+         }

@@ -1,0 +1,4 @@
+gfx_trace_makefile.patch
+limit_display_port.patch
+dump_layer.patch
+disable_dump_layer.patch

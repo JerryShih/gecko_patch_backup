@@ -1,0 +1,1383 @@
+From 534d87ebbfa6ab192a0c97d73eb53d7b949f01e1 Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Wed, 2 Oct 2013 15:51:05 +0800
+Subject: [PATCH 2/2] wip v3
+
+---
+ b2g/app/Makefile.in                                |    2 +-
+ configure.in                                       |    2 +-
+ content/media/omx/OmxDecoder.cpp                   |    2 +-
+ dom/camera/GonkCameraHwMgr.cpp                     |    2 +-
+ dom/camera/GonkCameraSource.cpp                    |    4 +-
+ widget/gonk/nativewindow/GonkBufferQueue.cpp       |   44 ++-
+ widget/gonk/nativewindow/GonkBufferQueue.h         |   16 +
+ widget/gonk/nativewindow/GonkConsumerBase.cpp      |   18 +
+ widget/gonk/nativewindow/GonkConsumerBase.h        |   10 +
+ widget/gonk/nativewindow/GonkNativeWindow.h        |    2 +-
+ widget/gonk/nativewindow/GonkNativeWindowClient.h  |    2 +-
+ .../gonk/nativewindow/GonkNativeWindowClientJB.cpp |   92 +++++-
+ .../gonk/nativewindow/GonkNativeWindowClientJB.h   |   21 +-
+ .../gonk/nativewindow/JB42/GonkNativeWindowJB.cpp  |  287 ++++++++++++++++
+ widget/gonk/nativewindow/JB42/GonkNativeWindowJB.h |  347 ++++++++++++++++++++
+ widget/gonk/nativewindow/moz.build                 |   14 +
+ 16 files changed, 835 insertions(+), 30 deletions(-)
+ create mode 100755 widget/gonk/nativewindow/JB42/GonkNativeWindowJB.cpp
+ create mode 100755 widget/gonk/nativewindow/JB42/GonkNativeWindowJB.h
+
+diff --git a/b2g/app/Makefile.in b/b2g/app/Makefile.in
+index 2a03c4e..e67a17f 100644
+--- a/b2g/app/Makefile.in
++++ b/b2g/app/Makefile.in
+@@ -24,7 +24,7 @@ LIBS += \
+   $(DEPTH)/widget/gonk/libdisplay/$(LIB_PREFIX)display.$(LIB_SUFFIX) \
+   $(MOZ_ZLIB_LIBS) \
+   $(NULL)
+-ifeq (18,$(ANDROID_VERSION))
++ifeq ($(ANDROID_VERSION),$(findstring $(ANDROID_VERSION),17 18))
+ LIBS += \
+   -lgui \
+   -lsuspend \
+diff --git a/configure.in b/configure.in
+index 61a7718..ffb9c90 100644
+--- a/configure.in
++++ b/configure.in
+@@ -213,7 +213,7 @@ if test -n "$gonkdir" ; then
+         MOZ_OMX_DECODER=1
+         AC_SUBST(MOZ_OMX_DECODER)
+         ;;
+-    18)
++    17|18)
+         GONK_INCLUDES="-I$gonkdir/frameworks/native/include -I$gonkdir/frameworks/av/include -I$gonkdir/frameworks/av/include/media -I$gonkdir/frameworks/av/include/camera -I$gonkdir/frameworks/native/include/media/openmax -I$gonkdir/frameworks/av/media/libstagefright/include"
+         if test -d "$gonkdir/external/bluetooth/bluez"; then
+             GONK_INCLUDES+=" -I$gonkdir/external/dbus -I$gonkdir/external/bluetooth/bluez/lib"
+diff --git a/content/media/omx/OmxDecoder.cpp b/content/media/omx/OmxDecoder.cpp
+index 3bcb6c5..d03737c 100644
+--- a/content/media/omx/OmxDecoder.cpp
++++ b/content/media/omx/OmxDecoder.cpp
+@@ -479,7 +479,7 @@ bool OmxDecoder::AllocateMediaResources()
+ 
+   if ((mVideoTrack != nullptr) && (mVideoSource == nullptr)) {
+     mNativeWindow = new GonkNativeWindow();
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+     mNativeWindowClient = new GonkNativeWindowClient(mNativeWindow->getBufferQueue());
+ #else
+     mNativeWindowClient = new GonkNativeWindowClient(mNativeWindow);
+diff --git a/dom/camera/GonkCameraHwMgr.cpp b/dom/camera/GonkCameraHwMgr.cpp
+index 540d783..56cea5d 100644
+--- a/dom/camera/GonkCameraHwMgr.cpp
++++ b/dom/camera/GonkCameraHwMgr.cpp
+@@ -183,7 +183,7 @@ GonkCameraHardware::Init()
+   mNativeWindow = new GonkNativeWindow();
+   mNativeWindow->setNewFrameCallback(this);
+   mCamera->setListener(this);
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+   mCamera->setPreviewTexture(mNativeWindow->getBufferQueue());
+ #else
+   mCamera->setPreviewTexture(mNativeWindow);
+diff --git a/dom/camera/GonkCameraSource.cpp b/dom/camera/GonkCameraSource.cpp
+index 181b127..778219a 100644
+--- a/dom/camera/GonkCameraSource.cpp
++++ b/dom/camera/GonkCameraSource.cpp
+@@ -130,7 +130,7 @@ static int32_t getColorFormat(const char* colorFormat) {
+     if (!strcmp(colorFormat, "OMX_TI_COLOR_FormatYUV420PackedSemiPlanar")) {
+        return OMX_TI_COLOR_FormatYUV420PackedSemiPlanar;
+     }
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+     if (!strcmp(colorFormat, CameraParameters::PIXEL_FORMAT_ANDROID_OPAQUE)) {
+         return OMX_COLOR_FormatAndroidOpaque;
+     }
+@@ -542,7 +542,7 @@ status_t GonkCameraSource::start(MetaData *meta) {
+         if (meta->findInt64(kKeyTime, &startTimeUs)) {
+             mStartTimeUs = startTimeUs;
+         }
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+         int32_t nBuffers;
+         if (meta->findInt32(kKeyNumBuffers, &nBuffers)) {
+             CHECK_GT(nBuffers, 0);
+diff --git a/widget/gonk/nativewindow/GonkBufferQueue.cpp b/widget/gonk/nativewindow/GonkBufferQueue.cpp
+index f3779e4..f0d4910 100755
+--- a/widget/gonk/nativewindow/GonkBufferQueue.cpp
++++ b/widget/gonk/nativewindow/GonkBufferQueue.cpp
+@@ -1,3 +1,4 @@
++
+ /*
+  * Copyright (C) 2012 The Android Open Source Project
+  * Copyright (C) 2013 Mozilla Foundation
+@@ -261,8 +262,11 @@ status_t GonkBufferQueue::requestBuffer(int slot, sp<GraphicBuffer>* buf) {
+     *buf = mSlots[slot].mGraphicBuffer;
+     return NO_ERROR;
+ }
+-
++#if ANDROID_VERSION == 17
++status_t GonkBufferQueue::dequeueBuffer(int *outBuf, sp<Fence>& outFence,
++#else
+ status_t GonkBufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence,
++#endif
+         uint32_t w, uint32_t h, uint32_t format, uint32_t usage) {
+     ST_LOGV("dequeueBuffer: w=%d h=%d fmt=%#x usage=%#x", w, h, format, usage);
+ 
+@@ -391,21 +395,37 @@ status_t GonkBufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence,
+             mSlots[buf].mAcquireCalled = false;
+             mSlots[buf].mGraphicBuffer = NULL;
+             mSlots[buf].mRequestBufferCalled = false;
++#if ANDROID_VERSION == 17
++            mSlots[buf].mFence.clear();
++#else
+             mSlots[buf].mFence = Fence::NO_FENCE;
++#endif
+             descOld = mSlots[buf].mSurfaceDescriptor;
+             mSlots[buf].mSurfaceDescriptor = SurfaceDescriptor();
+-
++#if ANDROID_VERSION == 17
++            returnFlags |= ISurfaceTexture::BUFFER_NEEDS_REALLOCATION;
++#else
+             returnFlags |= IGraphicBufferProducer::BUFFER_NEEDS_REALLOCATION;
++#endif
+         }
+ 
++#if ANDROID_VERSION == 17
++        outFence = mSlots[buf].mFence;
++        mSlots[buf].mFence.clear();
++#else
+         *outFence = mSlots[buf].mFence;
+         mSlots[buf].mFence = Fence::NO_FENCE;
++#endif
+     }  // end lock scope
+ 
+     SurfaceDescriptor desc;
+     ImageBridgeChild* ibc;
+     sp<GraphicBuffer> graphicBuffer;
++#if ANDROID_VERSION == 17
++    if (returnFlags & ISurfaceTexture::BUFFER_NEEDS_REALLOCATION) {
++#else
+     if (returnFlags & IGraphicBufferProducer::BUFFER_NEEDS_REALLOCATION) {
++#endif
+         usage |= GraphicBuffer::USAGE_HW_TEXTURE;
+         status_t error;
+         ibc = ImageBridgeChild::GetSingleton();
+@@ -480,10 +500,12 @@ status_t GonkBufferQueue::queueBuffer(int buf,
+ 
+     input.deflate(&timestamp, &crop, &scalingMode, &transform, &fence);
+ 
++#if ANDROID_VERSION >= 18
+     if (fence == NULL) {
+         ST_LOGE("queueBuffer: fence is NULL");
+         return BAD_VALUE;
+     }
++#endif
+ 
+     ST_LOGV("queueBuffer: slot=%d time=%#llx crop=[%d,%d,%d,%d] tr=%#x "
+             "scale=%s",
+@@ -583,7 +605,11 @@ status_t GonkBufferQueue::queueBuffer(int buf,
+     return NO_ERROR;
+ }
+ 
++#if ANDROID_VERSION == 17
++void GonkBufferQueue::cancelBuffer(int buf, sp<Fence> fence) {
++#else
+ void GonkBufferQueue::cancelBuffer(int buf, const sp<Fence>& fence) {
++#endif
+     ST_LOGV("cancelBuffer: slot=%d", buf);
+     Mutex::Autolock lock(mMutex);
+ 
+@@ -601,9 +627,11 @@ void GonkBufferQueue::cancelBuffer(int buf, const sp<Fence>& fence) {
+         ST_LOGE("cancelBuffer: slot %d is not owned by the client (state=%d)",
+                 buf, mSlots[buf].mBufferState);
+         return;
++#if ANDROID_VERSION >= 18
+     } else if (fence == NULL) {
+         ST_LOGE("cancelBuffer: fence is NULL");
+         return;
++#endif
+     }
+     mSlots[buf].mBufferState = BufferSlot::FREE;
+     mSlots[buf].mFrameNumber = 0;
+@@ -804,7 +832,11 @@ void GonkBufferQueue::freeAllBuffersLocked(nsTArray<SurfaceDescriptor>& freeList
+         mSlots[i].mFrameNumber = 0;
+         mSlots[i].mAcquireCalled = false;
+         // destroy fence as GonkBufferQueue now takes ownership
++#if ANDROID_VERSION == 17
++        mSlots[i].mFence.clear();
++#else
+         mSlots[i].mFence = Fence::NO_FENCE;
++#endif
+     }
+ }
+ 
+@@ -858,7 +890,11 @@ status_t GonkBufferQueue::acquireBuffer(BufferItem *buffer) {
+         mSlots[buf].mAcquireCalled = true;
+         mSlots[buf].mNeedsCleanupOnRelease = false;
+         mSlots[buf].mBufferState = BufferSlot::ACQUIRED;
++#if ANDROID_VERSION == 17
++        mSlots[buf].mFence.clear();
++#else
+         mSlots[buf].mFence = Fence::NO_FENCE;
++#endif
+ 
+         mQueue.erase(front);
+         mDequeueCondition.broadcast();
+@@ -872,7 +908,11 @@ status_t GonkBufferQueue::acquireBuffer(BufferItem *buffer) {
+ status_t GonkBufferQueue::releaseBuffer(int buf, const sp<Fence>& fence) {
+     Mutex::Autolock _l(mMutex);
+ 
++#if ANDROID_VERSION == 17
++    if (buf == INVALID_BUFFER_SLOT) {
++#else
+     if (buf == INVALID_BUFFER_SLOT || fence == NULL) {
++#endif
+         return BAD_VALUE;
+     }
+ 
+diff --git a/widget/gonk/nativewindow/GonkBufferQueue.h b/widget/gonk/nativewindow/GonkBufferQueue.h
+index d300a27..7a90854 100755
+--- a/widget/gonk/nativewindow/GonkBufferQueue.h
++++ b/widget/gonk/nativewindow/GonkBufferQueue.h
+@@ -19,7 +19,11 @@
+ #define NATIVEWINDOW_GONKBUFFERQUEUE_H
+ 
+ #include <gui/IGraphicBufferAlloc.h>
++#if ANDROID_VERSION == 17
++#include <gui/ISurfaceTexture.h>
++#else
+ #include <gui/IGraphicBufferProducer.h>
++#endif
+ 
+ #include <ui/Fence.h>
+ #include <ui/GraphicBuffer.h>
+@@ -33,7 +37,11 @@
+ namespace android {
+ // ----------------------------------------------------------------------------
+ 
++#if ANDROID_VERSION == 17
++class GonkBufferQueue : public BnSurfaceTexture {
++#else
+ class GonkBufferQueue : public BnGraphicBufferProducer {
++#endif
+     typedef mozilla::layers::SurfaceDescriptor SurfaceDescriptor;
+ 
+ public:
+@@ -171,7 +179,11 @@ public:
+     //
+     // In both cases, the producer will need to call requestBuffer to get a
+     // GraphicBuffer handle for the returned slot.
++#if ANDROID_VERSION == 17
++    virtual status_t dequeueBuffer(int *buf, sp<Fence>& fence,
++#else
+     virtual status_t dequeueBuffer(int *buf, sp<Fence>* fence,
++#endif
+             uint32_t width, uint32_t height, uint32_t format, uint32_t usage);
+ 
+     // queueBuffer returns a filled buffer to the GonkBufferQueue.
+@@ -197,7 +209,11 @@ public:
+     //
+     // The buffer will not be overwritten until the fence signals.  The fence
+     // will usually be the one obtained from dequeueBuffer.
++#if ANDROID_VERSION == 17
++    virtual void cancelBuffer(int buf, sp<Fence> fence);
++#else
+     virtual void cancelBuffer(int buf, const sp<Fence>& fence);
++#endif
+ 
+     // setSynchronousMode sets whether dequeueBuffer is synchronous or
+     // asynchronous. In synchronous mode, dequeueBuffer blocks until
+diff --git a/widget/gonk/nativewindow/GonkConsumerBase.cpp b/widget/gonk/nativewindow/GonkConsumerBase.cpp
+index da480e3..5f075bf 100755
+--- a/widget/gonk/nativewindow/GonkConsumerBase.cpp
++++ b/widget/gonk/nativewindow/GonkConsumerBase.cpp
+@@ -80,14 +80,20 @@ GonkConsumerBase::~GonkConsumerBase() {
+         "consumer is not abandoned!", mName.string());
+ }
+ 
++#if ANDROID_VERSION >=18
+ void GonkConsumerBase::onLastStrongRef(const void* id) {
+     abandon();
+ }
++#endif
+ 
+ void GonkConsumerBase::freeBufferLocked(int slotIndex) {
+     CB_LOGV("freeBufferLocked: slotIndex=%d", slotIndex);
+     mSlots[slotIndex].mGraphicBuffer = 0;
++#if ANDROID_VERSION == 17
++    mSlots[slotIndex].mFence = 0;
++#else
+     mSlots[slotIndex].mFence = Fence::NO_FENCE;
++#endif
+ }
+ 
+ // Used for refactoring, should not be in final interface
+@@ -102,7 +108,11 @@ void GonkConsumerBase::onFrameAvailable() {
+     sp<FrameAvailableListener> listener;
+     { // scope for the lock
+         Mutex::Autolock lock(mMutex);
++#if ANDROID_VERSION == 17
++        listener = mFrameAvailableListener;
++#else
+         listener = mFrameAvailableListener.promote();
++#endif
+     }
+ 
+     if (listener != NULL) {
+@@ -151,7 +161,11 @@ void GonkConsumerBase::abandonLocked() {
+ }
+ 
+ void GonkConsumerBase::setFrameAvailableListener(
++#if ANDROID_VERSION == 17
++        const sp<FrameAvailableListener>& listener) {
++#else
+         const wp<FrameAvailableListener>& listener) {
++#endif
+     CB_LOGV("setFrameAvailableListener");
+     Mutex::Autolock lock(mMutex);
+     mFrameAvailableListener = listener;
+@@ -229,7 +243,11 @@ status_t GonkConsumerBase::releaseBufferLocked(int slot) {
+         freeBufferLocked(slot);
+     }
+ 
++#if ANDROID_VERSION == 17
++    mSlots[slot].mFence.clear();
++#else
+     mSlots[slot].mFence = Fence::NO_FENCE;
++#endif
+ 
+     return err;
+ }
+diff --git a/widget/gonk/nativewindow/GonkConsumerBase.h b/widget/gonk/nativewindow/GonkConsumerBase.h
+index 72ecdf1..94ae2a0 100755
+--- a/widget/gonk/nativewindow/GonkConsumerBase.h
++++ b/widget/gonk/nativewindow/GonkConsumerBase.h
+@@ -78,7 +78,11 @@ public:
+ 
+     // setFrameAvailableListener sets the listener object that will be notified
+     // when a new frame becomes available.
++#if ANDROID_VERSION == 17
++    void setFrameAvailableListener(const sp<FrameAvailableListener>& listener);
++#else
+     void setFrameAvailableListener(const wp<FrameAvailableListener>& listener);
++#endif
+ 
+ private:
+     GonkConsumerBase(const GonkConsumerBase&);
+@@ -100,7 +104,9 @@ protected:
+     // This methods should not need to be overridden by derived classes, but
+     // if they are overridden the GonkConsumerBase implementation must be called
+     // from the derived class.
++#if ANDROID_VERSION >=18
+     virtual void onLastStrongRef(const void* id);
++#endif
+ 
+     // Implementation of the GonkBufferQueue::ConsumerListener interface.  These
+     // calls are used to notify the GonkConsumerBase of asynchronous events in the
+@@ -210,7 +216,11 @@ protected:
+     // mFrameAvailableListener is the listener object that will be called when a
+     // new frame becomes available. If it is not NULL it will be called from
+     // queueBuffer.
++#if ANDROID_VERSION == 17
++    sp<FrameAvailableListener> mFrameAvailableListener;
++#else
+     wp<FrameAvailableListener> mFrameAvailableListener;
++#endif
+ 
+     // The GonkConsumerBase has-a GonkBufferQueue and is responsible for creating this object
+     // if none is supplied
+diff --git a/widget/gonk/nativewindow/GonkNativeWindow.h b/widget/gonk/nativewindow/GonkNativeWindow.h
+index 11a6e2c..5cad649 100644
+--- a/widget/gonk/nativewindow/GonkNativeWindow.h
++++ b/widget/gonk/nativewindow/GonkNativeWindow.h
+@@ -13,7 +13,7 @@
+  * limitations under the License.
+  */
+ 
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >=  18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+ # include "GonkNativeWindowJB.h"
+ #elif defined(MOZ_WIDGET_GONK) && ANDROID_VERSION == 15
+ # include "GonkNativeWindowICS.h"
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowClient.h b/widget/gonk/nativewindow/GonkNativeWindowClient.h
+index b1a24f0..ce33c24 100644
+--- a/widget/gonk/nativewindow/GonkNativeWindowClient.h
++++ b/widget/gonk/nativewindow/GonkNativeWindowClient.h
+@@ -13,7 +13,7 @@
+  * limitations under the License.
+  */
+ 
+-#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >=  18
++#if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >=  17
+ # include "GonkNativeWindowClientJB.h"
+ #elif defined(MOZ_WIDGET_GONK) && ANDROID_VERSION == 15
+ # include "GonkNativeWindowClientICS.h"
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+index 5ad2e9c..27d1d94 100755
+--- a/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
++++ b/widget/gonk/nativewindow/GonkNativeWindowClientJB.cpp
+@@ -20,7 +20,11 @@
+ //#define LOG_NDEBUG 0
+ 
+ #include <android/native_window.h>
++#if ANDROID_VERSION == 17
++#include <utils/Trace.h>
++#else
+ #include <cutils/trace.h>
++#endif
+ 
+ #include <binder/Parcel.h>
+ #include <utils/Log.h>
+@@ -31,8 +35,13 @@
+ namespace android {
+ 
+ GonkNativeWindowClient::GonkNativeWindowClient(
++#if ANDROID_VERSION == 17
++        const sp<ISurfaceTexture>& surfaceTexture)
++    : mBufferProducer(surfaceTexture)
++#else
+         const sp<IGraphicBufferProducer>& bufferProducer)
+-    : mGraphicBufferProducer(bufferProducer)
++    : mBufferProducer(bufferProducer)
++#endif
+ {
+     // Initialize the ANativeWindow function pointers.
+     ANativeWindow::setSwapInterval  = hook_setSwapInterval;
+@@ -72,9 +81,12 @@ GonkNativeWindowClient::~GonkNativeWindowClient() {
+         GonkNativeWindowClient::disconnect(NATIVE_WINDOW_API_CPU);
+     }
+ }
+-
++#if ANDROID_VERSION == 17
++sp<ISurfaceTexture> GonkNativeWindowClient::getISurfaceTexture() const {
++#else
+ sp<IGraphicBufferProducer> GonkNativeWindowClient::getIGraphicBufferProducer() const {
+-    return mGraphicBufferProducer;
++#endif
++    return mBufferProducer;
+ }
+ 
+ int GonkNativeWindowClient::hook_setSwapInterval(ANativeWindow* window, int interval) {
+@@ -107,7 +119,11 @@ int GonkNativeWindowClient::hook_dequeueBuffer_DEPRECATED(ANativeWindow* window,
+     int fenceFd = -1;
+     int result = c->dequeueBuffer(&buf, &fenceFd);
+     sp<Fence> fence(new Fence(fenceFd));
++#if ANDROID_VERSION == 17
++    int waitResult = fence->waitForever(1000, "dequeueBuffer_DEPRECATED");
++#else
+     int waitResult = fence->waitForever("dequeueBuffer_DEPRECATED");
++#endif
+     if (waitResult != OK) {
+         ALOGE("dequeueBuffer_DEPRECATED: Fence::wait returned an error: %d",
+                 waitResult);
+@@ -161,7 +177,7 @@ int GonkNativeWindowClient::setSwapInterval(int interval) {
+     if (interval > maxSwapInterval)
+         interval = maxSwapInterval;
+ 
+-    status_t res = mGraphicBufferProducer->setSynchronousMode(interval ? true : false);
++    status_t res = mBufferProducer->setSynchronousMode(interval ? true : false);
+ 
+     return res;
+ }
+@@ -174,29 +190,45 @@ int GonkNativeWindowClient::dequeueBuffer(android_native_buffer_t** buffer,
+     int reqW = mReqWidth ? mReqWidth : mUserWidth;
+     int reqH = mReqHeight ? mReqHeight : mUserHeight;
+     sp<Fence> fence;
+-    status_t result = mGraphicBufferProducer->dequeueBuffer(&buf, &fence,
++#if ANDROID_VERSION == 17
++    status_t result = mBufferProducer->dequeueBuffer(&buf, fence,
++            reqW, reqH, mReqFormat, mReqUsage);
++#else
++    status_t result = mBufferProducer->dequeueBuffer(&buf, &fence,
+             reqW, reqH, mReqFormat, mReqUsage);
++#endif
+     if (result < 0) {
+-        ALOGV("dequeueBuffer: IGraphicBufferProducer::dequeueBuffer(%d, %d, %d, %d)"
++        ALOGV("dequeueBuffer: dequeueBuffer(%d, %d, %d, %d)"
+              "failed: %d", mReqWidth, mReqHeight, mReqFormat, mReqUsage,
+              result);
+         return result;
+     }
+     sp<GraphicBuffer>& gbuf(mSlots[buf].buffer);
++#if ANDROID_VERSION == 17
++    if (result & ISurfaceTexture::RELEASE_ALL_BUFFERS) {
++#else
+     if (result & IGraphicBufferProducer::RELEASE_ALL_BUFFERS) {
++#endif
+         freeAllBuffers();
+     }
+-
++#if ANDROID_VERSION == 17
++    if ((result & ISurfaceTexture::BUFFER_NEEDS_REALLOCATION) || gbuf == 0) {
++#else
+     if ((result & IGraphicBufferProducer::BUFFER_NEEDS_REALLOCATION) || gbuf == 0) {
+-        result = mGraphicBufferProducer->requestBuffer(buf, &gbuf);
++#endif
++        result = mBufferProducer->requestBuffer(buf, &gbuf);
++
+         if (result != NO_ERROR) {
+-            ALOGE("dequeueBuffer: IGraphicBufferProducer::requestBuffer failed: %d",
++            ALOGE("dequeueBuffer: requestBuffer failed: %d",
+                     result);
+             return result;
+         }
+     }
+-
++#if ANDROID_VERSION == 17
++    if (fence.get()) {
++#else
+     if (fence->isValid()) {
++#endif
+         *fenceFd = fence->dup();
+         if (*fenceFd == -1) {
+             ALOGE("dequeueBuffer: error duping fence: %d", errno);
+@@ -220,8 +252,12 @@ int GonkNativeWindowClient::cancelBuffer(android_native_buffer_t* buffer,
+     if (i < 0) {
+         return i;
+     }
++#if ANDROID_VERSION == 17
++    sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : NULL);
++#else
+     sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : Fence::NO_FENCE);
+-    mGraphicBufferProducer->cancelBuffer(i, fence);
++#endif
++    mBufferProducer->cancelBuffer(i, fence);
+     return OK;
+ }
+ 
+@@ -265,11 +301,18 @@ int GonkNativeWindowClient::queueBuffer(android_native_buffer_t* buffer, int fen
+     Rect crop;
+     mCrop.intersect(Rect(buffer->width, buffer->height), &crop);
+ 
++#if ANDROID_VERSION == 17
++    sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : NULL);
++    ISurfaceTexture::QueueBufferOutput output;
++    ISurfaceTexture::QueueBufferInput input(timestamp, crop, mScalingMode,
++            mTransform, fence);
++#else
+     sp<Fence> fence(fenceFd >= 0 ? new Fence(fenceFd) : Fence::NO_FENCE);
+     IGraphicBufferProducer::QueueBufferOutput output;
+     IGraphicBufferProducer::QueueBufferInput input(timestamp, crop, mScalingMode,
+             mTransform, fence);
+-    status_t err = mGraphicBufferProducer->queueBuffer(i, input, &output);
++#endif
++    status_t err = mBufferProducer->queueBuffer(i, input, &output);
+     if (err != OK)  {
+         ALOGE("queueBuffer: error queuing buffer to SurfaceTexture, %d", err);
+     }
+@@ -296,7 +339,7 @@ int GonkNativeWindowClient::query(int what, int* value) const {
+             case NATIVE_WINDOW_QUEUES_TO_WINDOW_COMPOSER: {
+                 //sp<ISurfaceComposer> composer(
+                 //        ComposerService::getComposerService());
+-                //if (composer->authenticateSurfaceTexture(mGraphicBufferProducer)) {
++                //if (composer->authenticateSurfaceTexture(mBufferProducer)) {
+                 //    *value = 1;
+                 //} else {
+                     *value = 0;
+@@ -304,7 +347,11 @@ int GonkNativeWindowClient::query(int what, int* value) const {
+                 return NO_ERROR;
+             }
+             case NATIVE_WINDOW_CONCRETE_TYPE:
++#if ANDROID_VERSION == 17
++                *value = NATIVE_WINDOW_SURFACE_TEXTURE_CLIENT;
++#else
+                 *value = NATIVE_WINDOW_SURFACE;
++#endif
+                 return NO_ERROR;
+             case NATIVE_WINDOW_DEFAULT_WIDTH:
+                 *value = mUserWidth ? mUserWidth : mDefaultWidth;
+@@ -320,7 +367,7 @@ int GonkNativeWindowClient::query(int what, int* value) const {
+                 if (!mConsumerRunningBehind) {
+                     *value = 0;
+                 } else {
+-                    err = mGraphicBufferProducer->query(what, value);
++                    err = mBufferProducer->query(what, value);
+                     if (err == NO_ERROR) {
+                         mConsumerRunningBehind = *value;
+                     }
+@@ -329,7 +376,8 @@ int GonkNativeWindowClient::query(int what, int* value) const {
+             }
+         }
+     }
+-    return mGraphicBufferProducer->query(what, value);
++
++    return mBufferProducer->query(what, value);
+ }
+ 
+ int GonkNativeWindowClient::perform(int operation, va_list args)
+@@ -473,8 +521,13 @@ int GonkNativeWindowClient::dispatchUnlockAndPost(va_list args) {
+ int GonkNativeWindowClient::connect(int api) {
+     ALOGV("GonkNativeWindowClient::connect");
+     Mutex::Autolock lock(mMutex);
++#if ANDROID_VERSION == 17
++    ISurfaceTexture::QueueBufferOutput output;
++#else
+     IGraphicBufferProducer::QueueBufferOutput output;
+-    int err = mGraphicBufferProducer->connect(api, &output);
++#endif
++    int err = mBufferProducer->connect(api, &output);
++
+     if (err == NO_ERROR) {
+         uint32_t numPendingBuffers = 0;
+         output.deflate(&mDefaultWidth, &mDefaultHeight, &mTransformHint,
+@@ -491,7 +544,9 @@ int GonkNativeWindowClient::disconnect(int api) {
+     ALOGV("GonkNativeWindowClient::disconnect");
+     Mutex::Autolock lock(mMutex);
+     freeAllBuffers();
+-    int err = mGraphicBufferProducer->disconnect(api);
++
++    int err = mBufferProducer->disconnect(api);
++
+     if (!err) {
+         mReqFormat = 0;
+         mReqWidth = 0;
+@@ -535,9 +590,10 @@ int GonkNativeWindowClient::setCrop(Rect const* rect)
+ int GonkNativeWindowClient::setBufferCount(int bufferCount)
+ {
+     ALOGV("GonkNativeWindowClient::setBufferCount");
++
+     Mutex::Autolock lock(mMutex);
+ 
+-    status_t err = mGraphicBufferProducer->setBufferCount(bufferCount);
++    status_t err = mBufferProducer->setBufferCount(bufferCount);
+     ALOGE_IF(err, "IGraphicBufferProducer::setBufferCount(%d) returned %s",
+             bufferCount, strerror(-err));
+ 
+diff --git a/widget/gonk/nativewindow/GonkNativeWindowClientJB.h b/widget/gonk/nativewindow/GonkNativeWindowClientJB.h
+index ca67d62..d0ccc1a 100755
+--- a/widget/gonk/nativewindow/GonkNativeWindowClientJB.h
++++ b/widget/gonk/nativewindow/GonkNativeWindowClientJB.h
+@@ -18,7 +18,11 @@
+ #ifndef NATIVEWINDOW_GONKNATIVEWINDOWCLIENT_JB_H
+ #define NATIVEWINDOW_GONKNATIVEWINDOWCLIENT_JB_H
+ 
++#if ANDROID_VERSION == 17
++#include <gui/ISurfaceTexture.h>
++#else
+ #include <gui/IGraphicBufferProducer.h>
++#endif
+ 
+ #include <ui/ANativeObjectBase.h>
+ #include <ui/Region.h>
+@@ -63,19 +67,29 @@ public:
+      * referring to the same IGraphicBufferProducer to become connected and
+      * therefore prevent them to be used as actual producers of buffers.
+      */
++#if ANDROID_VERSION == 17
++    GonkNativeWindowClient(const sp<ISurfaceTexture>& surfaceTexture);
++#else
+     GonkNativeWindowClient(const sp<IGraphicBufferProducer>& bufferProducer);
++#endif
+ 
+     /* getIGraphicBufferProducer() returns the IGraphicBufferProducer this
+      * GonkNativeWindowClient was created with. Usually it's an error to use the
+      * IGraphicBufferProducer while the GonkNativeWindowClient is connected.
+      */
++#if ANDROID_VERSION == 17
++    sp<ISurfaceTexture> getISurfaceTexture() const;
++#else
+     sp<IGraphicBufferProducer> getIGraphicBufferProducer() const;
++#endif
+ 
+     /* convenience function to check that the given surface is non NULL as
+      * well as its IGraphicBufferProducer */
++#if ANDROID_VERSION >= 18
+     static bool isValid(const sp<GonkNativeWindowClient>& surface) {
+         return surface != NULL && surface->getIGraphicBufferProducer() != NULL;
+     }
++#endif
+ 
+ protected:
+     virtual ~GonkNativeWindowClient();
+@@ -163,8 +177,11 @@ private:
+     // mSurfaceTexture is the interface to the surface texture server. All
+     // operations on the surface texture client ultimately translate into
+     // interactions with the server using this interface.
+-    // TODO: rename to mBufferProducer
+-    sp<IGraphicBufferProducer> mGraphicBufferProducer;
++#if ANDROID_VERSION == 17
++    sp<ISurfaceTexture> mBufferProducer;
++#else
++    sp<IGraphicBufferProducer> mBufferProducer;
++#endif
+ 
+     // mSlots stores the buffers that have been allocated for each buffer slot.
+     // It is initialized to null pointers, and gets filled in with the result of
+diff --git a/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.cpp b/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.cpp
+new file mode 100755
+index 0000000..c49a972
+--- /dev/null
++++ b/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.cpp
+@@ -0,0 +1,287 @@
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ * Copyright (C) 2013 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_TAG "GonkNativeWindow"
++#define ATRACE_TAG ATRACE_TAG_GRAPHICS
++//#define LOG_NDEBUG 0
++
++#include <hardware/hardware.h>
++#include <gui/IGraphicBufferAlloc.h>
++#include <utils/Log.h>
++#include <utils/String8.h>
++#include <utils/Trace.h>
++
++#include "GonkNativeWindowJB.h"
++
++// Macros for including the SurfaceTexture name in log messages
++#define ST_LOGV(x, ...) ALOGV("[%s] "x, mName.string(), ##__VA_ARGS__)
++#define ST_LOGD(x, ...) ALOGD("[%s] "x, mName.string(), ##__VA_ARGS__)
++#define ST_LOGI(x, ...) ALOGI("[%s] "x, mName.string(), ##__VA_ARGS__)
++#define ST_LOGW(x, ...) ALOGW("[%s] "x, mName.string(), ##__VA_ARGS__)
++#define ST_LOGE(x, ...) ALOGE("[%s] "x, mName.string(), ##__VA_ARGS__)
++
++using namespace mozilla::layers;
++
++namespace android {
++
++GonkNativeWindow::GonkNativeWindow(bool allowSynchronousMode, bool useFenceSync, const sp<GonkBufferQueue> &bufferQueue) :
++    GonkConsumerBase(bufferQueue == 0 ? new GonkBufferQueue(allowSynchronousMode) : bufferQueue),
++    mCurrentTransform(0),
++    mCurrentTimestamp(0),
++    mFilteringEnabled(true),
++    mUseFenceSync(false),
++    mNewFrameCallback(nullptr)
++{
++    ST_LOGV("GonkNativeWindow");
++    mBufferQueue->setConsumerUsageBits(DEFAULT_USAGE_FLAGS);
++    mBufferQueue->setMaxAcquiredBufferCount(GonkBufferQueue::MIN_UNDEQUEUED_BUFFERS);
++}
++
++GonkNativeWindow::~GonkNativeWindow() {
++}
++
++void GonkNativeWindow::setName(const String8& name) {
++    Mutex::Autolock _l(mMutex);
++    mName = name;
++    mBufferQueue->setConsumerName(name);
++}
++
++status_t GonkNativeWindow::setDefaultBufferSize(uint32_t w, uint32_t h)
++{
++    Mutex::Autolock lock(mMutex);
++    mDefaultWidth = w;
++    mDefaultHeight = h;
++    return mBufferQueue->setDefaultBufferSize(w, h);
++}
++
++status_t GonkNativeWindow::setDefaultBufferFormat(uint32_t defaultFormat) {
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->setDefaultBufferFormat(defaultFormat);
++}
++
++bool GonkNativeWindow::isExternalFormat(uint32_t format)
++{
++    switch (format) {
++    // supported YUV formats
++    case HAL_PIXEL_FORMAT_YV12:
++    // Legacy/deprecated YUV formats
++    case HAL_PIXEL_FORMAT_YCbCr_422_SP:
++    case HAL_PIXEL_FORMAT_YCrCb_420_SP:
++    case HAL_PIXEL_FORMAT_YCbCr_422_I:
++        return true;
++    }
++
++    // Any OEM format needs to be considered
++    if (format>=0x100 && format<=0x1FF)
++        return true;
++
++    return false;
++}
++
++void GonkNativeWindow::getTransformMatrix(float mtx[16]) {
++    Mutex::Autolock lock(mMutex);
++    memcpy(mtx, mCurrentTransformMatrix, sizeof(mCurrentTransformMatrix));
++}
++
++void GonkNativeWindow::setFilteringEnabled(bool enabled) {
++    Mutex::Autolock lock(mMutex);
++    if (mAbandoned) {
++        ST_LOGE("setFilteringEnabled: SurfaceTexture is abandoned!");
++        return;
++    }
++}
++
++void GonkNativeWindow::computeCurrentTransformMatrixLocked() {
++}
++
++nsecs_t GonkNativeWindow::getTimestamp() {
++    ST_LOGV("getTimestamp");
++    Mutex::Autolock lock(mMutex);
++    return mCurrentTimestamp;
++}
++
++status_t GonkNativeWindow::setDefaultMaxBufferCount(int bufferCount) {
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->setDefaultMaxBufferCount(bufferCount);
++}
++
++already_AddRefed<GraphicBufferLocked>
++GonkNativeWindow::getCurrentBuffer()
++{
++    Mutex::Autolock _l(mMutex);
++    GonkBufferQueue::BufferItem item;
++
++    // In asynchronous mode the list is guaranteed to be one buffer
++    // deep, while in synchronous mode we use the oldest buffer.
++    status_t err = acquireBufferLocked(&item);
++    if (err != NO_ERROR) {
++        return NULL;
++    }
++
++  nsRefPtr<GraphicBufferLocked> ret =
++    new CameraGraphicBuffer(this, item.mBuf, mBufferQueue->getGeneration(), item.mSurfaceDescriptor);
++  return ret.forget();
++}
++
++bool
++GonkNativeWindow::returnBuffer(uint32_t aIndex, uint32_t aGeneration) {
++    ST_LOGD("GonkNativeWindow::returnBuffer: slot=%d (generation=%d)", aIndex, aGeneration);
++    Mutex::Autolock lock(mMutex);
++
++    if (aGeneration != mBufferQueue->getGeneration()) {
++        ST_LOGD("returnBuffer: buffer is from generation %d (current is %d)",
++          aGeneration, mBufferQueue->getGeneration());
++        return false;
++    }
++
++    status_t err = releaseBufferLocked(aIndex);
++    if (err != NO_ERROR) {
++        return false;
++    }
++  return true;
++}
++
++Rect GonkNativeWindow::getCurrentCrop() const {
++    Mutex::Autolock lock(mMutex);
++
++    Rect outCrop = mCurrentCrop;
++    if (mCurrentScalingMode == NATIVE_WINDOW_SCALING_MODE_SCALE_CROP) {
++        int32_t newWidth = mCurrentCrop.width();
++        int32_t newHeight = mCurrentCrop.height();
++
++        if (newWidth * mDefaultHeight > newHeight * mDefaultWidth) {
++            newWidth = newHeight * mDefaultWidth / mDefaultHeight;
++            ST_LOGV("too wide: newWidth = %d", newWidth);
++        } else if (newWidth * mDefaultHeight < newHeight * mDefaultWidth) {
++            newHeight = newWidth * mDefaultHeight / mDefaultWidth;
++            ST_LOGV("too tall: newHeight = %d", newHeight);
++        }
++
++        // The crop is too wide
++        if (newWidth < mCurrentCrop.width()) {
++            int32_t dw = (newWidth - mCurrentCrop.width())/2;
++            outCrop.left -=dw;
++            outCrop.right += dw;
++        // The crop is too tall
++        } else if (newHeight < mCurrentCrop.height()) {
++            int32_t dh = (newHeight - mCurrentCrop.height())/2;
++            outCrop.top -= dh;
++            outCrop.bottom += dh;
++        }
++
++        ST_LOGV("getCurrentCrop final crop [%d,%d,%d,%d]",
++            outCrop.left, outCrop.top,
++            outCrop.right,outCrop.bottom);
++    }
++
++    return outCrop;
++}
++
++uint32_t GonkNativeWindow::getCurrentTransform() const {
++    Mutex::Autolock lock(mMutex);
++    return mCurrentTransform;
++}
++
++uint32_t GonkNativeWindow::getCurrentScalingMode() const {
++    Mutex::Autolock lock(mMutex);
++    return mCurrentScalingMode;
++}
++
++sp<Fence> GonkNativeWindow::getCurrentFence() const {
++    Mutex::Autolock lock(mMutex);
++    return mCurrentFence;
++}
++
++bool GonkNativeWindow::isSynchronousMode() const {
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->isSynchronousMode();
++}
++
++void GonkNativeWindow::freeBufferLocked(int slotIndex) {
++    ST_LOGV("freeBufferLocked: slotIndex=%d", slotIndex);
++    //if (slotIndex == mCurrentTexture) {
++    //    mCurrentTexture = GonkBufferQueue::INVALID_BUFFER_SLOT;
++    //}
++    //EGLImageKHR img = mEglSlots[slotIndex].mEglImage;
++    //if (img != EGL_NO_IMAGE_KHR) {
++    //    ST_LOGV("destroying EGLImage dpy=%p img=%p", mEglDisplay, img);
++    //    eglDestroyImageKHR(mEglDisplay, img);
++    //}
++    //mEglSlots[slotIndex].mEglImage = EGL_NO_IMAGE_KHR;
++    GonkConsumerBase::freeBufferLocked(slotIndex);
++}
++
++void GonkNativeWindow::abandonLocked() {
++    ST_LOGV("abandonLocked");
++    mCurrentTextureBuf.clear();
++    GonkConsumerBase::abandonLocked();
++}
++
++status_t GonkNativeWindow::setConsumerUsageBits(uint32_t usage) {
++    Mutex::Autolock lock(mMutex);
++    usage |= DEFAULT_USAGE_FLAGS;
++    return mBufferQueue->setConsumerUsageBits(usage);
++}
++
++status_t GonkNativeWindow::setTransformHint(uint32_t hint) {
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->setTransformHint(hint);
++}
++
++// Used for refactoring GonkBufferQueue from SurfaceTexture
++// Should not be in final interface once users of SurfaceTexture are clean up.
++status_t GonkNativeWindow::setSynchronousMode(bool enabled) {
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->setSynchronousMode(enabled);
++}
++
++mozilla::layers::SurfaceDescriptor *
++GonkNativeWindow::getSurfaceDescriptorFromBuffer(ANativeWindowBuffer* buffer)
++{
++    Mutex::Autolock lock(mMutex);
++    return mBufferQueue->getSurfaceDescriptorFromBuffer(buffer);
++}
++void GonkNativeWindow::setNewFrameCallback(
++        GonkNativeWindowNewFrameCallback* aCallback) {
++    ST_LOGD("setNewFrameCallback");
++    Mutex::Autolock lock(mMutex);
++    mNewFrameCallback = aCallback;
++}
++
++void GonkNativeWindow::onFrameAvailable() {
++    GonkConsumerBase::onFrameAvailable();
++
++    if (mNewFrameCallback) {
++      mNewFrameCallback->OnNewFrame();
++    }
++}
++
++void GonkNativeWindow::dumpLocked(String8& result, const char* prefix,
++        char* buffer, size_t size) const
++{
++//    snprintf(buffer, size,
++//       "%smTexName=%d mCurrentTexture=%d\n"
++//       "%smCurrentCrop=[%d,%d,%d,%d] mCurrentTransform=%#x\n",
++//       prefix, mTexName, mCurrentTexture, prefix, mCurrentCrop.left,
++//       mCurrentCrop.top, mCurrentCrop.right, mCurrentCrop.bottom,
++//       mCurrentTransform);
++//    result.append(buffer);
++
++    GonkConsumerBase::dumpLocked(result, prefix, buffer, size);
++}
++
++}; // namespace android
+diff --git a/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.h b/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.h
+new file mode 100755
+index 0000000..e7230bc
+--- /dev/null
++++ b/widget/gonk/nativewindow/JB42/GonkNativeWindowJB.h
+@@ -0,0 +1,347 @@
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ * Copyright (C) 2013 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef NATIVEWINDOW_GONKNATIVEWINDOW_JB_H
++#define NATIVEWINDOW_GONKNATIVEWINDOW_JB_H
++
++#include <gui/ISurfaceTexture.h>
++#include <ui/GraphicBuffer.h>
++#include <utils/String8.h>
++#include <utils/Vector.h>
++#include <utils/threads.h>
++
++#include "CameraCommon.h"
++#include "GonkConsumerBase.h"
++#include "GrallocImages.h"
++#include "mozilla/layers/ImageBridgeChild.h"
++#include "mozilla/layers/LayersSurfaces.h"
++
++namespace mozilla {
++namespace layers {
++    class PGrallocBufferChild;
++}
++}
++
++namespace android {
++// ----------------------------------------------------------------------------
++
++
++class String8;
++
++// The user of GonkNativeWindow who wants to receive notification of
++// new frames should implement this interface.
++class GonkNativeWindowNewFrameCallback {
++public:
++    virtual void OnNewFrame() = 0;
++};
++
++class GonkNativeWindow : public GonkConsumerBase {
++
++    typedef mozilla::layers::GraphicBufferLocked GraphicBufferLocked;
++    typedef mozilla::layers::PGrallocBufferChild PGrallocBufferChild;
++    typedef mozilla::layers::SurfaceDescriptor SurfaceDescriptor;
++
++public:
++    typedef GonkConsumerBase::FrameAvailableListener FrameAvailableListener;
++
++    // GonkNativeWindow constructs a new GonkNativeWindow object. tex indicates the
++    // name of the OpenGL ES texture to which images are to be streamed.
++    // allowSynchronousMode specifies whether or not synchronous mode can be
++    // enabled. texTarget specifies the OpenGL ES texture target to which the
++    // texture will be bound in updateTexImage. useFenceSync specifies whether
++    // fences should be used to synchronize access to buffers if that behavior
++    // is enabled at compile-time. A custom bufferQueue can be specified
++    // if behavior for queue/dequeue/connect etc needs to be customized.
++    // Otherwise a default GonkBufferQueue will be created and used.
++    //
++    // For legacy reasons, the GonkNativeWindow is created in a state where it is
++    // considered attached to an OpenGL ES context for the purposes of the
++    // attachToContext and detachFromContext methods. However, despite being
++    // considered "attached" to a context, the specific OpenGL ES context
++    // doesn't get latched until the first call to updateTexImage. After that
++    // point, all calls to updateTexImage must be made with the same OpenGL ES
++    // context current.
++    //
++    // A GonkNativeWindow may be detached from one OpenGL ES context and then
++    // attached to a different context using the detachFromContext and
++    // attachToContext methods, respectively. The intention of these methods is
++    // purely to allow a GonkNativeWindow to be transferred from one consumer
++    // context to another. If such a transfer is not needed there is no
++    // requirement that either of these methods be called.
++    GonkNativeWindow(bool allowSynchronousMode = true, bool useFenceSync = true,
++            const sp<GonkBufferQueue> &bufferQueue = 0);
++
++    ~GonkNativeWindow();
++    // setReleaseFence stores a fence file descriptor that will signal when the
++    // current buffer is no longer being read. This fence will be returned to
++    // the producer when the current buffer is released by updateTexImage().
++    // Multiple fences can be set for a given buffer; they will be merged into
++    // a single union fence. The GonkNativeWindow will close the file descriptor
++    // when finished with it.
++    void setReleaseFence(int fenceFd);
++
++    // setDefaultMaxBufferCount sets the default limit on the maximum number
++    // of buffers that will be allocated at one time. The image producer may
++    // override the limit.
++    status_t setDefaultMaxBufferCount(int bufferCount);
++
++    // getTransformMatrix retrieves the 4x4 texture coordinate transform matrix
++    // associated with the texture image set by the most recent call to
++    // updateTexImage.
++    //
++    // This transform matrix maps 2D homogeneous texture coordinates of the form
++    // (s, t, 0, 1) with s and t in the inclusive range [0, 1] to the texture
++    // coordinate that should be used to sample that location from the texture.
++    // Sampling the texture outside of the range of this transform is undefined.
++    //
++    // This transform is necessary to compensate for transforms that the stream
++    // content producer may implicitly apply to the content. By forcing users of
++    // a GonkNativeWindow to apply this transform we avoid performing an extra
++    // copy of the data that would be needed to hide the transform from the
++    // user.
++    //
++    // The matrix is stored in column-major order so that it may be passed
++    // directly to OpenGL ES via the glLoadMatrixf or glUniformMatrix4fv
++    // functions.
++    void getTransformMatrix(float mtx[16]);
++
++    // getTimestamp retrieves the timestamp associated with the texture image
++    // set by the most recent call to updateTexImage.
++    //
++    // The timestamp is in nanoseconds, and is monotonically increasing. Its
++    // other semantics (zero point, etc) are source-dependent and should be
++    // documented by the source.
++    int64_t getTimestamp();
++
++    // setDefaultBufferSize is used to set the size of buffers returned by
++    // requestBuffers when a with and height of zero is requested.
++    // A call to setDefaultBufferSize() may trigger requestBuffers() to
++    // be called from the client.
++    // The width and height parameters must be no greater than the minimum of
++    // GL_MAX_VIEWPORT_DIMS and GL_MAX_TEXTURE_SIZE (see: glGetIntegerv).
++    // An error due to invalid dimensions might not be reported until
++    // updateTexImage() is called.
++    status_t setDefaultBufferSize(uint32_t width, uint32_t height);
++
++    // setFilteringEnabled sets whether the transform matrix should be computed
++    // for use with bilinear filtering.
++    void setFilteringEnabled(bool enabled);
++
++    // getCurrentBuffer returns the buffer associated with the current image.
++    //sp<GraphicBuffer> getCurrentBuffer() const;
++
++    // Get next frame from the queue, caller owns the returned buffer.
++    already_AddRefed<GraphicBufferLocked> getCurrentBuffer();
++
++    // Return the buffer to the queue and mark it as FREE. After that
++    // the buffer is useable again for the decoder.
++    bool returnBuffer(uint32_t index, uint32_t generation);
++
++    // getCurrentCrop returns the cropping rectangle of the current buffer.
++    Rect getCurrentCrop() const;
++
++    // getCurrentTransform returns the transform of the current buffer.
++    uint32_t getCurrentTransform() const;
++
++    // getCurrentScalingMode returns the scaling mode of the current buffer.
++    uint32_t getCurrentScalingMode() const;
++
++    // getCurrentFence returns the fence indicating when the current buffer is
++    // ready to be read from.
++    sp<Fence> getCurrentFence() const;
++
++    // isSynchronousMode returns whether the GonkNativeWindow is currently in
++    // synchronous mode.
++    bool isSynchronousMode() const;
++
++    // set the name of the GonkNativeWindow that will be used to identify it in
++    // log messages.
++    void setName(const String8& name);
++
++    // These functions call the corresponding GonkBufferQueue implementation
++    // so the refactoring can proceed smoothly
++    status_t setDefaultBufferFormat(uint32_t defaultFormat);
++    status_t setConsumerUsageBits(uint32_t usage);
++    status_t setTransformHint(uint32_t hint);
++    virtual status_t setSynchronousMode(bool enabled);
++
++    // getBufferQueue returns the GonkBufferQueue object to which this
++    // GonkNativeWindow is connected.
++    sp<GonkBufferQueue> getBufferQueue() const {
++        return mBufferQueue;
++    }
++
++    SurfaceDescriptor *getSurfaceDescriptorFromBuffer(ANativeWindowBuffer* buffer);
++
++    void setNewFrameCallback(GonkNativeWindowNewFrameCallback* aCallback);
++
++protected:
++
++    virtual void onFrameAvailable();
++
++    // abandonLocked overrides the GonkConsumerBase method to clear
++    // mCurrentTextureBuf in addition to the GonkConsumerBase behavior.
++    virtual void abandonLocked();
++
++    // dumpLocked overrides the GonkConsumerBase method to dump GonkNativeWindow-
++    // specific info in addition to the GonkConsumerBase behavior.
++    virtual void dumpLocked(String8& result, const char* prefix, char* buffer,
++           size_t size) const;
++
++    // acquireBufferLocked overrides the GonkConsumerBase method to update the
++    // mEglSlots array in addition to the GonkConsumerBase behavior.
++    //virtual status_t acquireBufferLocked(GonkBufferQueue::BufferItem *item);
++
++    // releaseBufferLocked overrides the GonkConsumerBase method to update the
++    // mEglSlots array in addition to the GonkConsumerBase.
++    //virtual status_t releaseBufferLocked(int buf);
++
++    static bool isExternalFormat(uint32_t format);
++
++private:
++    // this version of updateTexImage() takes a functor used to reject or not
++    // the newly acquired buffer.
++    // this API is TEMPORARY and intended to be used by SurfaceFlinger only,
++    // which is why class Layer is made a friend of GonkNativeWindow below.
++    class BufferRejecter {
++        friend class GonkNativeWindow;
++        virtual bool reject(const sp<GraphicBuffer>& buf,
++                const GonkBufferQueue::BufferItem& item) = 0;
++    protected:
++        virtual ~BufferRejecter() { }
++    };
++//    friend class Layer;
++
++    // freeBufferLocked frees up the given buffer slot.  If the slot has been
++    // initialized this will release the reference to the GraphicBuffer in that
++    // slot and destroy the EGLImage in that slot.  Otherwise it has no effect.
++    //
++    // This method must be called with mMutex locked.
++    virtual void freeBufferLocked(int slotIndex);
++
++    // computeCurrentTransformMatrixLocked computes the transform matrix for the
++    // current texture.  It uses mCurrentTransform and the current GraphicBuffer
++    // to compute this matrix and stores it in mCurrentTransformMatrix.
++    // mCurrentTextureBuf must not be NULL.
++    void computeCurrentTransformMatrixLocked();
++
++    // The default consumer usage flags that GonkNativeWindow always sets on its
++    // GonkBufferQueue instance; these will be OR:d with any additional flags passed
++    // from the GonkNativeWindow user. In particular, GonkNativeWindow will always
++    // consume buffers as hardware textures.
++    static const uint32_t DEFAULT_USAGE_FLAGS = GraphicBuffer::USAGE_HW_TEXTURE;
++
++    // mCurrentTextureBuf is the graphic buffer of the current texture. It's
++    // possible that this buffer is not associated with any buffer slot, so we
++    // must track it separately in order to support the getCurrentBuffer method.
++    sp<GraphicBuffer> mCurrentTextureBuf;
++
++    // mCurrentCrop is the crop rectangle that applies to the current texture.
++    // It gets set each time updateTexImage is called.
++    Rect mCurrentCrop;
++
++    // mCurrentTransform is the transform identifier for the current texture. It
++    // gets set each time updateTexImage is called.
++    uint32_t mCurrentTransform;
++
++    // mCurrentScalingMode is the scaling mode for the current texture. It gets
++    // set to each time updateTexImage is called.
++    uint32_t mCurrentScalingMode;
++
++    // mCurrentFence is the fence received from GonkBufferQueue in updateTexImage.
++    sp<Fence> mCurrentFence;
++
++    // mCurrentTransformMatrix is the transform matrix for the current texture.
++    // It gets computed by computeTransformMatrix each time updateTexImage is
++    // called.
++    float mCurrentTransformMatrix[16];
++
++    // mCurrentTimestamp is the timestamp for the current texture. It
++    // gets set each time updateTexImage is called.
++    int64_t mCurrentTimestamp;
++
++    uint32_t mDefaultWidth, mDefaultHeight;
++
++    // mFilteringEnabled indicates whether the transform matrix is computed for
++    // use with bilinear filtering. It defaults to true and is changed by
++    // setFilteringEnabled().
++    bool mFilteringEnabled;
++
++    // mUseFenceSync indicates whether creation of the EGL_KHR_fence_sync
++    // extension should be used to prevent buffers from being dequeued before
++    // it's safe for them to be written. It gets set at construction time and
++    // never changes.
++    const bool mUseFenceSync;
++
++    GonkNativeWindowNewFrameCallback* mNewFrameCallback;
++};
++
++// CameraGraphicBuffer maintains the buffer returned from GonkNativeWindow
++class CameraGraphicBuffer : public mozilla::layers::GraphicBufferLocked
++{
++    typedef mozilla::layers::SurfaceDescriptor SurfaceDescriptor;
++    typedef mozilla::layers::ImageBridgeChild ImageBridgeChild;
++
++public:
++    CameraGraphicBuffer(GonkNativeWindow* aNativeWindow,
++                        uint32_t aIndex,
++                        uint32_t aGeneration,
++                        SurfaceDescriptor aBuffer)
++        : GraphicBufferLocked(aBuffer)
++        , mNativeWindow(aNativeWindow)
++        , mIndex(aIndex)
++        , mGeneration(aGeneration)
++        , mLocked(true)
++    {
++        DOM_CAMERA_LOGT("%s:%d : this=%p\n", __func__, __LINE__, this);
++    }
++
++    virtual ~CameraGraphicBuffer()
++    {
++        DOM_CAMERA_LOGT("%s:%d : this=%p\n", __func__, __LINE__, this);
++    }
++
++    // Unlock either returns the buffer to the native window or
++    // destroys the buffer if the window is already released.
++    virtual void Unlock() MOZ_OVERRIDE
++    {
++        if (mLocked) {
++            // The window might have been destroyed. The buffer is no longer
++            // valid at that point.
++            sp<GonkNativeWindow> window = mNativeWindow.promote();
++            if (window.get() && window->returnBuffer(mIndex, mGeneration)) {
++                mLocked = false;
++            } else {
++                // If the window doesn't exist any more, release the buffer
++                // directly.
++                ImageBridgeChild *ibc = ImageBridgeChild::GetSingleton();
++                ibc->DeallocSurfaceDescriptorGralloc(mSurfaceDescriptor);
++            }
++        }
++    }
++
++protected:
++    wp<GonkNativeWindow> mNativeWindow;
++    uint32_t mIndex;
++    uint32_t mGeneration;
++    bool mLocked;
++};
++
++// ----------------------------------------------------------------------------
++}; // namespace android
++
++#endif // NATIVEWINDOW_GONKNATIVEWINDOW_JB_H
+diff --git a/widget/gonk/nativewindow/moz.build b/widget/gonk/nativewindow/moz.build
+index d2a84f5..b8f8de4 100644
+--- a/widget/gonk/nativewindow/moz.build
++++ b/widget/gonk/nativewindow/moz.build
+@@ -28,6 +28,13 @@ if CONFIG['ANDROID_VERSION'] == '18':
+         'GonkNativeWindowClientJB.h',
+         'GonkNativeWindowJB.h',
+     ]
++elif CONFIG['ANDROID_VERSION'] == '17':
++    EXPORTS += [
++        'GonkBufferQueue.h',
++        'GonkConsumerBase.h',
++        'GonkNativeWindowClientJB.h',
++        'JB42/GonkNativeWindowJB.h',
++    ]
+ elif CONFIG['ANDROID_VERSION'] == '15':
+     EXPORTS += [
+         'GonkNativeWindowClientICS.h',
+@@ -42,6 +49,13 @@ if CONFIG['MOZ_B2G_CAMERA'] or CONFIG['MOZ_OMX_DECODER']:
+             'GonkNativeWindowJB.cpp',
+             'GonkNativeWindowClientJB.cpp',
+         ]
++    if CONFIG['ANDROID_VERSION'] == '17':
++        CPP_SOURCES += [
++            'GonkBufferQueue.cpp',
++            'GonkConsumerBase.cpp',
++            'JB42/GonkNativeWindowJB.cpp',
++            'GonkNativeWindowClientJB.cpp',
++        ]
+     elif CONFIG['ANDROID_VERSION'] == '15':
+         CPP_SOURCES += [
+             'GonkNativeWindowClientICS.cpp',
+-- 
+1.7.9.5
+

@@ -1,0 +1,434 @@
+# HG changeset patch
+# Parent 83a0640b3e1bac97c85777d7cf5787d63b04b18d
+# User Jerry Shih <hshih@mozilla.com>
+elapsed time class
+
+diff --git a/gfx/layers/ElapsedTimer.cpp b/gfx/layers/ElapsedTimer.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ElapsedTimer.cpp
+@@ -0,0 +1,195 @@
++#include <ElapsedTimer.h>
++#include <nsDebug.h>
++
++#include "cutils/properties.h"
++
++static bool CheckTimerEnable(const char *tag,uint32_t level)
++{
++  char prop[PROPERTY_VALUE_MAX];
++
++  property_get("debug.log_enable",prop,"1");
++  if(atoi(prop)==0){
++    return false;
++  }
++
++  if(tag!=NULL){
++    int prop_length=property_get(tag,prop,NULL);
++
++    if(prop_length!=0){
++      if(atoi(prop)!=1){
++        return false;
++      }
++    }
++  }
++  else{
++    property_get("debug.log_level",prop,"9");
++    if(atoi(prop)<level){
++      return false;
++    }
++  }
++
++  return true;
++}
++
++static uint32_t GetElapsedMicrosecond(const timespec &start,const timespec &end)
++{
++  int64_t diff=(end.tv_sec*1000000000LL+end.tv_nsec)-(start.tv_sec*1000000000LL+start.tv_nsec);
++
++  return diff/1000LL;
++}
++
++static uint32_t GetElapsedMillisecond(const timespec &start,const timespec &end)
++{
++  int64_t diff=(end.tv_sec*1000000000LL+end.tv_nsec)-(start.tv_sec*1000000000LL+start.tv_nsec);
++
++  return diff/1000000LL;
++}
++
++ElapsedTimerBase::ElapsedTimerBase(const char *msg,uint32_t msg_level,const char *tag)
++:mMsg(msg)
++{
++  mEnable=CheckTimerEnable(tag,msg_level);
++}
++
++ElapsedTimerBase::~ElapsedTimerBase()
++{
++
++}
++
++ScopeElapsedTimer::ScopeElapsedTimer(const char *msg,uint32_t msg_level,const char *tag)
++:ElapsedTimerBase(msg,msg_level,tag)
++{
++  if(mEnable){
++    clock_gettime(CLOCK_MONOTONIC,&mStartTime);
++  }
++}
++
++ScopeElapsedTimer::~ScopeElapsedTimer()
++{
++  if(mEnable){
++    timespec end_time;
++    clock_gettime(CLOCK_MONOTONIC,&end_time);
++
++    printf_stderr("%s: %u us",mMsg.c_str(),GetElapsedMicrosecond(mStartTime,end_time));
++  }
++}
++
++FrameElapsedTimer::FrameElapsedTimer(const char *msg,uint32_t msg_level,const char *tag)
++:ElapsedTimerBase(msg,msg_level,tag),mFirstTime(true)
++{
++  if(mEnable){
++    clock_gettime(CLOCK_MONOTONIC,&mStartTime);
++  }
++}
++
++FrameElapsedTimer::~FrameElapsedTimer()
++{
++
++}
++
++void FrameElapsedTimer::Update(void)
++{
++  if(mEnable){
++    if(!mFirstTime){
++      timespec end_time;
++      clock_gettime(CLOCK_MONOTONIC,&end_time);
++
++      printf_stderr("%s: %u us",mMsg.c_str(),GetElapsedMicrosecond(mStartTime,end_time));
++      mFirstTime=false;
++      mStartTime=end_time;
++
++      return;
++    }
++    mFirstTime=false;
++  }
++}
++
++StatisticFrameElapsedTimer::StatisticFrameElapsedTimer(const char *msg,uint32_t msg_level,const char *tag)
++:ElapsedTimerBase(msg,msg_level,tag),mFirstTime(true)
++{
++  if(mEnable){
++    clock_gettime(CLOCK_MONOTONIC,&mStartTime);
++  }
++}
++
++StatisticFrameElapsedTimer::~StatisticFrameElapsedTimer()
++{
++
++}
++
++void StatisticFrameElapsedTimer::Update(void)
++{
++  if(mEnable){
++    if(!mFirstTime){
++      timespec end_time;
++      clock_gettime(CLOCK_MONOTONIC,&end_time);
++
++      if(!mData.PushData(GetElapsedMicrosecond(mStartTime,end_time))){
++        printf_stderr("%s:\tavg:%f us, max:%u us, min:%u us, std:%f",mMsg.c_str(),mData.GetAVG(),mData.GetMax(),
++            mData.GetMin(),mData.GetSTD());
++        mData.Reset();
++      }
++      mFirstTime=false;
++      mStartTime=end_time;
++
++      return;
++    }
++    mFirstTime=false;
++  }
++}
++
++StatisticScopeElapsedTimer::StatisticScopeElapsedTimer(const char *msg,uint32_t msg_level,const char *tag)
++:ElapsedTimerBase(msg,msg_level,tag)
++{
++
++}
++
++StatisticScopeElapsedTimer::~StatisticScopeElapsedTimer()
++{
++
++}
++
++void StatisticScopeElapsedTimer::Start(void)
++{
++  if(mEnable){
++    clock_gettime(CLOCK_MONOTONIC,&mStartTime);
++  }
++}
++
++void StatisticScopeElapsedTimer::End(void)
++{
++  if(mEnable){
++    timespec end_time;
++    clock_gettime(CLOCK_MONOTONIC,&end_time);
++
++    if(!mData.PushData(GetElapsedMicrosecond(mStartTime,end_time))){
++      printf_stderr("%s:\tavg:%f us, max:%u us, min:%u us, std:%f",mMsg.c_str(),mData.GetAVG(),mData.GetMax(),
++          mData.GetMin(),mData.GetSTD());
++      mData.Reset();
++    }
++  }
++}
++
++StatisticScopeElapsedTimerHelper::StatisticScopeElapsedTimerHelper(StatisticScopeElapsedTimer &timer)
++:mTimer(timer),mEnd(false)
++{
++
++}
++
++StatisticScopeElapsedTimerHelper::~StatisticScopeElapsedTimerHelper()
++{
++  if(!mEnd){
++    mTimer.End();
++  }
++}
++
++void StatisticScopeElapsedTimerHelper::Start()
++{
++  mTimer.Start();
++}
++
++void StatisticScopeElapsedTimerHelper::End()
++{
++  mTimer.End();
++  mEnd=true;
++}
+diff --git a/gfx/layers/ElapsedTimer.h b/gfx/layers/ElapsedTimer.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ElapsedTimer.h
+@@ -0,0 +1,185 @@
++#ifndef ELAPSED_TIMER_H
++#define ELAPSED_TIMER_H
++
++#include <string>
++#include <cmath>
++#include <stdint.h>
++#include <time.h>
++
++template<int DATA_SIZE=1>
++class TimeData
++{
++public:
++  TimeData(){ Reset(); };
++  ~TimeData(){};
++
++  void Reset(void)
++  {
++    mMax=0;
++    mMin=UINT32_MAX;
++    mTotal=0;
++    mNum=0;
++  }
++
++  //return false if data full
++  bool PushData(uint32_t us_time)
++  {
++    if(mNum<DATA_SIZE){
++      if(mMax<us_time){
++        mMax=us_time;
++      }
++      if(mMin>us_time){
++        mMin=us_time;
++      }
++      mTotal+=us_time;
++      mDataArray[mNum++]=us_time;
++
++      return true;
++    }
++
++    return false;
++  }
++
++  uint32_t GetMax(void)
++  {
++    return mMax;
++  }
++  uint32_t GetMin(void)
++  {
++    return mMin;
++  }
++  float GetAVG(void)
++  {
++    return (float)mTotal/mNum;
++  }
++  float GetSTD(void)
++  {
++    float variance=0.0f;
++    float avg=GetAVG();
++
++    for(int i=0;i<mNum;++i){
++      float delta=mDataArray[i]-avg;
++      variance+=delta*delta;
++    }
++    return std::sqrt(variance/mNum);
++  }
++
++private:
++  uint32_t mMax;
++  uint32_t mMin;
++  uint32_t mTotal;
++  uint32_t mNum;
++  uint32_t mDataArray[DATA_SIZE];
++};
++
++class ElapsedTimerBase
++{
++public:
++  ElapsedTimerBase(const char *msg,uint32_t msg_level,const char *tag);
++  virtual ~ElapsedTimerBase();
++
++protected:
++  std::string mMsg;
++  bool mEnable;
++};
++
++//output the elapsed time in a scope
++//usage:
++//  func(){
++//    ScopeElapsedTimer scope_timer("msg");
++//  }
++//
++class ScopeElapsedTimer : public ElapsedTimerBase
++{
++public:
++  ScopeElapsedTimer(const char *msg="",uint32_t msg_level=0,const char *tag=NULL);
++  ~ScopeElapsedTimer();
++
++private:
++  timespec mStartTime;
++};
++
++//output the elapsed time for one frame update
++//usage:
++//  func(){
++//    static FrameElapsedTimer timer("msg");
++//    timer.Update();
++//  }
++//
++class FrameElapsedTimer : public ElapsedTimerBase
++{
++public:
++  FrameElapsedTimer(const char *msg="",uint32_t msg_level=0,const char *tag=NULL);
++  virtual ~FrameElapsedTimer();
++
++  void Update(void);
++
++protected:
++  timespec mStartTime;
++  bool mFirstTime;
++};
++
++//output the avg, max,min, std of elapsed time for one frame update
++//usage:
++//  func(){
++//    static StatisticFrameElapsedTimer timer("msg");
++//    timer.Update();
++//    .....
++//  }
++//
++class StatisticFrameElapsedTimer : public ElapsedTimerBase
++{
++public:
++  StatisticFrameElapsedTimer(const char *msg="",uint32_t msg_level=0,const char *tag=NULL);
++  ~StatisticFrameElapsedTimer();
++
++  void Update(void);
++
++private:
++  timespec mStartTime;
++  bool mFirstTime;
++
++  TimeData<100> mData;
++};
++
++//output the avg, max,min, std of elapsed time in a scope
++//usage:
++//  func(){
++//    static StatisticScopeElapsedTimer timer("msg");
++//    StatisticScopeElapsedTimerHelper timer_helper(timer);
++//    timer_helper.Start();
++//    .....
++//    timer_helper.End();
++//  }
++//
++class StatisticScopeElapsedTimer;
++
++class StatisticScopeElapsedTimerHelper
++{
++public:
++  StatisticScopeElapsedTimerHelper(StatisticScopeElapsedTimer &timer);
++  ~StatisticScopeElapsedTimerHelper();
++
++  void Start(void);
++  void End(void);
++
++private:
++  StatisticScopeElapsedTimer &mTimer;
++  bool mEnd;
++};
++
++class StatisticScopeElapsedTimer : public ElapsedTimerBase
++{
++public:
++  StatisticScopeElapsedTimer(const char *msg="",uint32_t msg_level=0,const char *tag=NULL);
++  ~StatisticScopeElapsedTimer();
++
++  void Start(void);
++  void End(void);
++
++private:
++  timespec mStartTime;
++  TimeData<100> mData;
++};
++
++#endif	//ELAPSED_TIMER_H
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -14,16 +14,17 @@ EXPORTS += [
+     'client/ClientContainerLayer.h',
+     'client/ClientLayerManager.h',
+     'client/ClientThebesLayer.h',
+     'client/ClientTiledThebesLayer.h',
+     'composite/CompositableHost.h',
+     'composite/ImageHost.h',
+     'CopyableCanvasLayer.h',
+     'D3D9SurfaceImage.h',
++    'ElapsedTimer.h',
+     'FrameMetrics.h',
+     'GrallocImages.h',
+     'ImageContainer.h',
+     'ImageLayers.h',
+     'ImageTypes.h',
+     'ipc/CompositorChild.h',
+     'ipc/CompositorParent.h',
+     'ipc/ShadowLayersManager.h',
+@@ -226,16 +227,17 @@ UNIFIED_SOURCES += [
+     'composite/ImageLayerComposite.cpp',
+     'composite/LayerManagerComposite.cpp',
+     'composite/TextureHost.cpp',
+     'composite/ThebesLayerComposite.cpp',
+     'composite/TiledContentHost.cpp',
+     'Compositor.cpp',
+     'CopyableCanvasLayer.cpp',
+     'Effects.cpp',
++    'ElapsedTimer.cpp',
+     'ImageDataSerializer.cpp',
+     'ImageLayers.cpp',
+     'ipc/AsyncPanZoomController.cpp',
+     'ipc/Axis.cpp',
+     'ipc/CompositableTransactionParent.cpp',
+     'ipc/CompositorChild.cpp',
+     'ipc/CompositorCocoaWidgetHelper.cpp',
+     'ipc/CompositorParent.cpp',

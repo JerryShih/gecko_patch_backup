@@ -1,0 +1,134 @@
+# HG changeset patch
+# Parent d812f80a0f1da4944281547f40059a2145137107
+# User Jerry Shih <hshih@mozilla.com>
+Bug 970794 - support hardware composer base on android JB 4.2.2
+
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -23,17 +23,17 @@
+ #include "HwcComposer2D.h"
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/PLayerTransaction.h"
+ #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ #include "mozilla/StaticPtr.h"
+ #include "cutils/properties.h"
+ #include "gfx2DGlue.h"
+ 
+-#if ANDROID_VERSION >= 18
++#if ANDROID_VERSION >= 17
+ #include "libdisplay/FramebufferSurface.h"
+ #ifndef HWC_BLIT
+ #define HWC_BLIT (HWC_FRAMEBUFFER_TARGET + 1)
+ #endif
+ #endif
+ 
+ #define LOG_TAG "HWComposer"
+ 
+@@ -87,17 +87,17 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+         return -1;
+     }
+ 
+     nsIntSize screenSize;
+ 
+     mozilla::Framebuffer::GetSize(&screenSize);
+     mScreenRect  = nsIntRect(nsIntPoint(0, 0), screenSize);
+ 
+-#if ANDROID_VERSION >= 18
++#if ANDROID_VERSION >= 17
+     int supported = 0;
+     if (mHwc->query(mHwc, HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
+         mColorFill = supported ? true : false;
+     }
+     if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+         mRBSwapSupport = supported ? true : false;
+     }
+ #else
+@@ -298,22 +298,24 @@ HwcComposer2D::PrepareLayerList(Layer* a
+     hwcLayer.handle = handle;
+ 
+     hwcLayer.flags = 0;
+     hwcLayer.hints = 0;
+     hwcLayer.blending = HWC_BLENDING_PREMULT;
+     if ((opacity == 0xFF) && (aLayer->GetContentFlags() & Layer::CONTENT_OPAQUE)) {
+         hwcLayer.blending = HWC_BLENDING_NONE;
+     }
+-#if ANDROID_VERSION >= 18
++#if ANDROID_VERSION >= 17
+     hwcLayer.compositionType = HWC_FRAMEBUFFER;
+ 
+     hwcLayer.acquireFenceFd = -1;
+     hwcLayer.releaseFenceFd = -1;
++#if ANDROID_VERSION >= 18
+     hwcLayer.planeAlpha = opacity;
++#endif
+ #else
+     hwcLayer.compositionType = HwcUtils::HWC_USE_COPYBIT;
+ #endif
+ 
+     if (!fillColor) {
+         if (state.FormatRBSwapped()) {
+             if (!mRBSwapSupport) {
+                 LOGD("No R/B swap support in H/W Composer");
+@@ -467,17 +469,17 @@ HwcComposer2D::PrepareLayerList(Layer* a
+     }
+ 
+     mHwcLayerMap.AppendElement(static_cast<LayerComposite*>(aLayer->ImplData()));
+     mList->numHwLayers++;
+     return true;
+ }
+ 
+ 
+-#if ANDROID_VERSION >= 18
++#if ANDROID_VERSION >= 17
+ bool
+ HwcComposer2D::TryHwComposition()
+ {
+     FramebufferSurface* fbsurface = (FramebufferSurface*)(GetGonkDisplay()->GetFBSurface());
+ 
+     if (!(fbsurface && fbsurface->lastHandle)) {
+         LOGD("H/W Composition failed. FBSurface not initialized.");
+         return false;
+@@ -623,18 +625,19 @@ HwcComposer2D::Prepare(buffer_handle_t f
+     mList->hwLayers[idx].blending = HWC_BLENDING_PREMULT;
+     mList->hwLayers[idx].compositionType = HWC_FRAMEBUFFER_TARGET;
+     setCrop(&mList->hwLayers[idx], r);
+     mList->hwLayers[idx].displayFrame = r;
+     mList->hwLayers[idx].visibleRegionScreen.numRects = 1;
+     mList->hwLayers[idx].visibleRegionScreen.rects = &mList->hwLayers[idx].displayFrame;
+     mList->hwLayers[idx].acquireFenceFd = fence;
+     mList->hwLayers[idx].releaseFenceFd = -1;
++#if ANDROID_VERSION >= 18
+     mList->hwLayers[idx].planeAlpha = 0xFF;
+-
++#endif
+     if (mPrepared) {
+         LOGE("Multiple hwc prepare calls!");
+     }
+     mHwc->prepare(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+     mPrepared = true;
+ }
+ 
+ bool
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -29,17 +29,17 @@ namespace mozilla {
+ namespace layers {
+ class ContainerLayer;
+ class Layer;
+ }
+ 
+ //Holds a dynamically allocated vector of rectangles
+ //used to decribe the complex visible region of a layer
+ typedef std::vector<hwc_rect_t> RectVector;
+-#if ANDROID_VERSION >= 18
++#if ANDROID_VERSION >= 17
+ typedef hwc_composer_device_1_t HwcDevice;
+ typedef hwc_display_contents_1_t HwcList;
+ typedef hwc_layer_1_t HwcLayer;
+ #else
+ typedef hwc_composer_device_t HwcDevice;
+ typedef hwc_layer_list_t HwcList;
+ typedef hwc_layer_t HwcLayer;
+ #endif

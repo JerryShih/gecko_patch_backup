@@ -1,0 +1,608 @@
+# HG changeset patch
+# User Benoit Girard <b56girard@gmail.com>
+# Date 1385138907 18000
+#      Fri Nov 22 11:48:27 2013 -0500
+# Node ID fdeacd0f31cd52f12551c3df33204fd8920eaf27
+# Parent 6cf96847f204dc59bc719616d9a5a2dae6287179
+[mq]: Part1CSSProp
+* * *
+[mq]: Part2ForceLayer
+
+diff --git a/layout/base/ActiveLayerTracker.cpp b/layout/base/ActiveLayerTracker.cpp
+--- a/layout/base/ActiveLayerTracker.cpp
++++ b/layout/base/ActiveLayerTracker.cpp
+@@ -201,16 +201,26 @@ ActiveLayerTracker::NotifyInlineStyleRul
+     return;
+   }
+   NotifyAnimated(aFrame, aProperty);
+ }
+ 
+ /* static */ bool
+ ActiveLayerTracker::IsStyleAnimated(nsIFrame* aFrame, nsCSSProperty aProperty)
+ {
++  // TODO: Add some abuse restrictions
++  if ((aFrame->StyleDisplay()->mWillAnimate & NS_STYLE_WILL_ANIMATE_TRANSFORM) &&
++      aProperty == eCSSProperty_transform) {
++    return true;
++  }
++  if ((aFrame->StyleDisplay()->mWillAnimate & NS_STYLE_WILL_ANIMATE_OPACITY) &&
++      aProperty == eCSSProperty_opacity) {
++    return true;
++  }
++
+   LayerActivity* layerActivity = GetLayerActivity(aFrame);
+   if (layerActivity) {
+     if (layerActivity->RestyleCountForProperty(aProperty) >= 2) {
+       return true;
+     }
+   }
+   if (aProperty == eCSSProperty_transform && aFrame->Preserves3D()) {
+     return IsStyleAnimated(aFrame->GetParent(), aProperty);
+diff --git a/layout/base/nsDisplayList.cpp b/layout/base/nsDisplayList.cpp
+--- a/layout/base/nsDisplayList.cpp
++++ b/layout/base/nsDisplayList.cpp
+@@ -4252,16 +4252,22 @@ nsDisplayTransform::GetLayerState(nsDisp
+       !IsItemTooSmallForActiveLayer(this))
+     return LAYER_ACTIVE;
+   if (mFrame->GetContent()) {
+     if (nsLayoutUtils::HasAnimationsForCompositor(mFrame->GetContent(),
+                                                   eCSSProperty_transform)) {
+       return LAYER_ACTIVE;
+     }
+   }
++
++  const nsStyleDisplay* disp = mFrame->StyleDisplay();
++  if ((disp->mWillAnimate & NS_STYLE_WILL_ANIMATE_TRANSFORM)) {
++    return LAYER_ACTIVE;
++  }
++
+   return mStoredList.RequiredLayerStateForChildren(aBuilder,
+                                                    aManager,
+                                                    aParameters,
+                                                    *mStoredList.GetChildren(),
+                                                    mFrame);
+ }
+ 
+ bool nsDisplayTransform::ComputeVisibility(nsDisplayListBuilder *aBuilder,
+diff --git a/layout/generic/nsFrame.cpp b/layout/generic/nsFrame.cpp
+--- a/layout/generic/nsFrame.cpp
++++ b/layout/generic/nsFrame.cpp
+@@ -1004,17 +1004,20 @@ nsIFrame::IsTransformed() const
+                                                       eCSSProperty_transform) &&
+             IsFrameOfType(eSupportsCSSTransforms) &&
+             mContent->GetPrimaryFrame() == this)));
+ }
+ 
+ bool
+ nsIFrame::HasOpacity() const
+ {
+-  return StyleDisplay()->mOpacity < 1.0f || (mContent &&
++  const nsStyleDisplay* displayStyle = StyleDisplay();
++  return StyleDisplay()->mOpacity < 1.0f ||
++         (displayStyle->mWillAnimate & NS_STYLE_WILL_ANIMATE_OPACITY) ||
++         (mContent &&
+            nsLayoutUtils::HasAnimationsForCompositor(mContent,
+                                                      eCSSProperty_opacity) &&
+            mContent->GetPrimaryFrame() == this);
+ }
+ 
+ bool
+ nsIFrame::IsSVGTransformed(gfxMatrix *aOwnTransforms,
+                            gfxMatrix *aFromParentTransforms) const
+@@ -1793,16 +1796,17 @@ nsIFrame::BuildDisplayListForStackingCon
+ 
+   const nsStyleDisplay* disp = StyleDisplay();
+   // We can stop right away if this is a zero-opacity stacking context and
+   // we're painting, and we're not animating opacity. Don't do this
+   // if we're going to compute plugin geometry, since opacity-0 plugins
+   // need to have display items built for them.
+   if (disp->mOpacity == 0.0 && aBuilder->IsForPainting() &&
+       !aBuilder->WillComputePluginGeometry() &&
++      !(disp->mWillAnimate & NS_STYLE_WILL_ANIMATE_OPACITY) &&
+       !nsLayoutUtils::HasAnimations(mContent, eCSSProperty_opacity)) {
+     return;
+   }
+ 
+   nsRect dirtyRect = aDirtyRect;
+ 
+   bool inTransform = aBuilder->IsInTransform();
+   bool isTransformed = IsTransformed();
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -1797,16 +1797,21 @@ bool ScrollFrameHelper::ShouldClampScrol
+ }
+ 
+ bool ScrollFrameHelper::IsAlwaysActive() const
+ {
+   if (nsDisplayItem::ForceActiveLayers()) {
+     return true;
+   }
+ 
++  const nsStyleDisplay* disp = mOuter->StyleDisplay();
++  if (disp && (disp->mWillAnimate & NS_STYLE_WILL_ANIMATE_SCROLL)) {
++    return true;
++  }
++
+   // Unless this is the root scrollframe for a non-chrome document
+   // which is the direct child of a chrome document, we default to not
+   // being "active".
+   if (!(mIsRoot && mOuter->PresContext()->IsRootContentDocument())) {
+      return false;
+   }
+ 
+   // If we have scrolled before, then we should stay active.
+diff --git a/layout/style/nsCSSKeywordList.h b/layout/style/nsCSSKeywordList.h
+--- a/layout/style/nsCSSKeywordList.h
++++ b/layout/style/nsCSSKeywordList.h
+@@ -539,16 +539,17 @@ CSS_KEY(threedlightshadow, threedlightsh
+ CSS_KEY(threedshadow, threedshadow)
+ CSS_KEY(titling-caps, titling_caps)
+ CSS_KEY(toggle, toggle)
+ CSS_KEY(top, top)
+ CSS_KEY(top-outside, top_outside)
+ CSS_KEY(trad-chinese-formal, trad_chinese_formal)
+ CSS_KEY(trad-chinese-informal, trad_chinese_informal)
+ CSS_KEY(traditional, traditional)
++CSS_KEY(transform, transform)
+ CSS_KEY(translate, translate)
+ CSS_KEY(translate3d, translate3d)
+ CSS_KEY(translatex, translatex)
+ CSS_KEY(translatey, translatey)
+ CSS_KEY(translatez, translatez)
+ CSS_KEY(transparent, transparent) // for nsComputedDOMStyle only
+ CSS_KEY(tri-state, tri_state)
+ CSS_KEY(true, true)
+diff --git a/layout/style/nsCSSParser.cpp b/layout/style/nsCSSParser.cpp
+--- a/layout/style/nsCSSParser.cpp
++++ b/layout/style/nsCSSParser.cpp
+@@ -496,16 +496,17 @@ protected:
+   bool ParseFontFeatureSettings(nsCSSValue& aValue);
+   bool ParseFontSrc(nsCSSValue& aValue);
+   bool ParseFontSrcFormat(InfallibleTArray<nsCSSValue>& values);
+   bool ParseFontRanges(nsCSSValue& aValue);
+   bool ParseListStyle();
+   bool ParseMargin();
+   bool ParseMarks(nsCSSValue& aValue);
+   bool ParseTransform(bool aIsPrefixed);
++  bool ParseWillAnimate();
+   bool ParseOutline();
+   bool ParseOverflow();
+   bool ParsePadding();
+   bool ParseQuotes();
+   bool ParseSize();
+   bool ParseTextAlign(nsCSSValue& aValue, const int32_t aTable[]);
+   bool ParseTextAlign(nsCSSValue& aValue);
+   bool ParseTextAlignLast(nsCSSValue& aValue);
+@@ -6622,16 +6623,18 @@ CSSParserImpl::ParsePropertyByFunction(n
+   case eCSSProperty_quotes:
+     return ParseQuotes();
+   case eCSSProperty_size:
+     return ParseSize();
+   case eCSSProperty_text_decoration:
+     return ParseTextDecoration();
+   case eCSSProperty_transform:
+     return ParseTransform(false);
++  case eCSSProperty_will_animate:
++    return ParseWillAnimate();
+   case eCSSProperty__moz_transform:
+     return ParseTransform(true);
+   case eCSSProperty_transform_origin:
+     return ParseTransformOrigin(false);
+   case eCSSProperty_perspective_origin:
+     return ParseTransformOrigin(true);
+   case eCSSProperty_transition:
+     return ParseTransition();
+@@ -10209,16 +10212,66 @@ static bool GetFunctionParseInformation(
+ #endif
+ 
+   // Convert the index into a mask.
+   aVariantMask = kVariantMasks[variantIndex];
+ 
+   return true;
+ }
+ 
++bool CSSParserImpl::ParseWillAnimate()
++{
++  uint8_t value = 0;
++  int values = 0;
++  for (;;) {
++
++    if (!GetToken(true)) {
++      return false;
++    }
++
++    if (mToken.mType != eCSSToken_Ident) {
++      UngetToken();
++      return false;
++    }
++
++    nsCSSKeyword keyword = nsCSSKeywords::LookupKeyword(mToken.mIdent);
++
++    // 'default' must be alone
++    if (keyword == eCSSKeyword_default) {
++      if (values != 0 || !CheckEndProperty()) {
++        return false;
++      } else {
++        value = NS_STYLE_WILL_ANIMATE_DEFAULT;
++        break;
++      }
++    }
++
++    if (keyword == eCSSKeyword_transform) {
++      value |= NS_STYLE_WILL_ANIMATE_TRANSFORM;
++    } else if (keyword == eCSSKeyword_scroll) {
++      value |= NS_STYLE_WILL_ANIMATE_SCROLL;
++    } else if (keyword == eCSSKeyword_opacity) {
++      value |= NS_STYLE_WILL_ANIMATE_OPACITY;
++    } else {
++      return false;
++    }
++
++    if (CheckEndProperty()) {
++      break;
++    }
++    values++;
++  }
++
++  nsCSSValue cssValue;
++  cssValue.SetIntValue(value, eCSSUnit_Enumerated);
++  AppendValue(eCSSProperty_will_animate, cssValue);
++
++  return true;
++}
++
+ /* Reads a single transform function from the tokenizer stream, reporting an
+  * error if something goes wrong.
+  */
+ bool
+ CSSParserImpl::ParseSingleTransform(bool aIsPrefixed, nsCSSValue& aValue)
+ {
+   if (!GetToken(true))
+     return false;
+diff --git a/layout/style/nsCSSPropList.h b/layout/style/nsCSSPropList.h
+--- a/layout/style/nsCSSPropList.h
++++ b/layout/style/nsCSSPropList.h
+@@ -34,22 +34,22 @@
+   InterCaps and all hyphens ('-') must be removed.  Callers using this
+   parameter must also define the CSS_PROP_PUBLIC_OR_PRIVATE(publicname_,
+   privatename_) macro to yield either publicname_ or privatename_.
+   The names differ in that publicname_ has Moz prefixes where they are
+   used, and also in CssFloat vs. Float.  The caller's choice depends on
+   whether the use is for internal use such as eCSSProperty_* or
+   nsRuleData::ValueFor* or external use such as exposing DOM properties.
+ 
++  -. 'flags', a bitfield containing CSS_PROPERTY_* flags.
++
+   -. 'pref' is the name of a pref that controls whether the property
+   is enabled.  The property is enabled if 'pref' is an empty string,
+   or if the boolean property whose name is 'pref' is set to true.
+ 
+-  -. 'flags', a bitfield containing CSS_PROPERTY_* flags.
+-
+   -. 'parsevariant', to be passed to ParseVariant in the parser.
+ 
+   -. 'kwtable', which is either nullptr or the name of the appropriate
+   keyword table member of class nsCSSProps, for use in
+   nsCSSProps::LookupPropertyValue.
+ 
+   -. 'stylestruct_' [used only for CSS_PROP, not CSS_PROP_*] gives the
+   name of the style struct.  Can be used to make nsStyle##stylestruct_
+@@ -3692,16 +3692,28 @@ CSS_PROP_SVGRESET(
+     VectorEffect,
+     CSS_PROPERTY_PARSE_VALUE,
+     "",
+     VARIANT_HK,
+     kVectorEffectKTable,
+     offsetof(nsStyleSVGReset, mVectorEffect),
+     eStyleAnimType_EnumU8)
+ 
++CSS_PROP_DISPLAY(
++    will-animate,
++    will_animate,
++    WillAnimate,
++    CSS_PROPERTY_PARSE_FUNCTION |
++        CSS_PROPERTY_GETCS_NEEDS_LAYOUT_FLUSH,
++    "",
++    VARIANT_HK,
++    kWillAnimateKTable,
++    offsetof(nsStyleDisplay, mWillAnimate),
++    eStyleAnimType_Custom)
++
+ // The shorthands below are essentially aliases, but they require different
+ // parsing rules, and are therefore implemented as shorthands.
+ CSS_PROP_SHORTHAND(
+     -moz-transform,
+     _moz_transform,
+     MozTransform,
+     CSS_PROPERTY_PARSE_FUNCTION |
+         CSS_PROPERTY_IS_ALIAS,
+diff --git a/layout/style/nsCSSProps.cpp b/layout/style/nsCSSProps.cpp
+--- a/layout/style/nsCSSProps.cpp
++++ b/layout/style/nsCSSProps.cpp
+@@ -1648,16 +1648,24 @@ const int32_t nsCSSProps::kWindowShadowK
+ 
+ const int32_t nsCSSProps::kWordBreakKTable[] = {
+   eCSSKeyword_normal, NS_STYLE_WORDBREAK_NORMAL,
+   eCSSKeyword_break_all, NS_STYLE_WORDBREAK_BREAK_ALL,
+   eCSSKeyword_keep_all, NS_STYLE_WORDBREAK_KEEP_ALL,
+   eCSSKeyword_UNKNOWN,-1
+ };
+ 
++const int32_t nsCSSProps::kWillAnimateKTable[] = {
++  eCSSKeyword_default, NS_STYLE_WILL_ANIMATE_DEFAULT,
++  eCSSKeyword_transform, NS_STYLE_WILL_ANIMATE_TRANSFORM,
++  eCSSKeyword_scroll, NS_STYLE_WILL_ANIMATE_SCROLL,
++  eCSSKeyword_opacity, NS_STYLE_WILL_ANIMATE_OPACITY,
++  eCSSKeyword_UNKNOWN,-1
++};
++
+ const int32_t nsCSSProps::kWordWrapKTable[] = {
+   eCSSKeyword_normal, NS_STYLE_WORDWRAP_NORMAL,
+   eCSSKeyword_break_word, NS_STYLE_WORDWRAP_BREAK_WORD,
+   eCSSKeyword_UNKNOWN,-1
+ };
+ 
+ const int32_t nsCSSProps::kWritingModeKTable[] = {
+   eCSSKeyword_horizontal_tb, NS_STYLE_WRITING_MODE_HORIZONTAL_TB,
+diff --git a/layout/style/nsCSSProps.h b/layout/style/nsCSSProps.h
+--- a/layout/style/nsCSSProps.h
++++ b/layout/style/nsCSSProps.h
+@@ -499,16 +499,17 @@ public:
+   static const int32_t kFontVariantEastAsianKTable[];
+   static const int32_t kFontVariantLigaturesKTable[];
+   static const int32_t kFontVariantNumericKTable[];
+   static const int32_t kFontVariantPositionKTable[];
+   static const int32_t kFontWeightKTable[];
+   static const int32_t kImageOrientationKTable[];
+   static const int32_t kImageOrientationFlipKTable[];
+   static const int32_t kIMEModeKTable[];
++  static const int32_t kWillAnimateKTable[];
+   static const int32_t kLineHeightKTable[];
+   static const int32_t kListStylePositionKTable[];
+   static const int32_t kListStyleKTable[];
+   static const int32_t kMaskTypeKTable[];
+   static const int32_t kMathVariantKTable[];
+   static const int32_t kContextOpacityKTable[];
+   static const int32_t kContextPatternKTable[];
+   static const int32_t kOrientKTable[];
+diff --git a/layout/style/nsComputedDOMStyle.cpp b/layout/style/nsComputedDOMStyle.cpp
+--- a/layout/style/nsComputedDOMStyle.cpp
++++ b/layout/style/nsComputedDOMStyle.cpp
+@@ -3605,16 +3605,28 @@ nsComputedDOMStyle::DoGetClip()
+     }
+     val->SetRect(domRect);
+   }
+ 
+   return val;
+ }
+ 
+ CSSValue*
++nsComputedDOMStyle::DoGetWillAnimate()
++{
++  const nsStyleDisplay* display = StyleDisplay();
++
++  nsROCSSPrimitiveValue* val = new nsROCSSPrimitiveValue;
++  val->SetIdent(nsCSSProps::ValueToKeywordEnum(display->mWillAnimate,
++                                               nsCSSProps::kWillAnimateKTable));
++
++  return val;
++}
++
++CSSValue*
+ nsComputedDOMStyle::DoGetOverflow()
+ {
+   const nsStyleDisplay* display = StyleDisplay();
+ 
+   if (display->mOverflowX != display->mOverflowY) {
+     // No value to return.  We can't express this combination of
+     // values as a shorthand.
+     return nullptr;
+diff --git a/layout/style/nsComputedDOMStyle.h b/layout/style/nsComputedDOMStyle.h
+--- a/layout/style/nsComputedDOMStyle.h
++++ b/layout/style/nsComputedDOMStyle.h
+@@ -384,16 +384,17 @@ private:
+   /* Display properties */
+   mozilla::dom::CSSValue* DoGetBinding();
+   mozilla::dom::CSSValue* DoGetClear();
+   mozilla::dom::CSSValue* DoGetFloat();
+   mozilla::dom::CSSValue* DoGetDisplay();
+   mozilla::dom::CSSValue* DoGetPosition();
+   mozilla::dom::CSSValue* DoGetClip();
+   mozilla::dom::CSSValue* DoGetImageOrientation();
++  mozilla::dom::CSSValue* DoGetWillAnimate();
+   mozilla::dom::CSSValue* DoGetOverflow();
+   mozilla::dom::CSSValue* DoGetOverflowX();
+   mozilla::dom::CSSValue* DoGetOverflowY();
+   mozilla::dom::CSSValue* DoGetResize();
+   mozilla::dom::CSSValue* DoGetPageBreakAfter();
+   mozilla::dom::CSSValue* DoGetPageBreakBefore();
+   mozilla::dom::CSSValue* DoGetPageBreakInside();
+   mozilla::dom::CSSValue* DoGetTransform();
+diff --git a/layout/style/nsComputedDOMStylePropertyList.h b/layout/style/nsComputedDOMStylePropertyList.h
+--- a/layout/style/nsComputedDOMStylePropertyList.h
++++ b/layout/style/nsComputedDOMStylePropertyList.h
+@@ -126,16 +126,17 @@ COMPUTED_STYLE_PROP(font_variant_east_as
+ COMPUTED_STYLE_PROP(font_variant_ligatures,        FontVariantLigatures)
+ COMPUTED_STYLE_PROP(font_variant_numeric,          FontVariantNumeric)
+ COMPUTED_STYLE_PROP(font_variant_position,         FontVariantPosition)
+ COMPUTED_STYLE_PROP(font_weight,                   FontWeight)
+ COMPUTED_STYLE_PROP(height,                        Height)
+ COMPUTED_STYLE_PROP(image_orientation,             ImageOrientation)
+ COMPUTED_STYLE_PROP(ime_mode,                      IMEMode)
+ COMPUTED_STYLE_PROP(justify_content,               JustifyContent)
++COMPUTED_STYLE_PROP(will_animate,                  WillAnimate)
+ COMPUTED_STYLE_PROP(left,                          Left)
+ COMPUTED_STYLE_PROP(letter_spacing,                LetterSpacing)
+ COMPUTED_STYLE_PROP(line_height,                   LineHeight)
+ //// COMPUTED_STYLE_PROP(list_style,               ListStyle)
+ COMPUTED_STYLE_PROP(list_style_image,              ListStyleImage)
+ COMPUTED_STYLE_PROP(list_style_position,           ListStylePosition)
+ COMPUTED_STYLE_PROP(list_style_type,               ListStyleType)
+ //// COMPUTED_STYLE_PROP(margin,                   Margin)
+diff --git a/layout/style/nsRuleNode.cpp b/layout/style/nsRuleNode.cpp
+--- a/layout/style/nsRuleNode.cpp
++++ b/layout/style/nsRuleNode.cpp
+@@ -5031,16 +5031,22 @@ nsRuleNode::ComputeDisplayData(void* aSt
+     }
+   }
+ 
+   // opacity: factor, inherit, initial
+   SetFactor(*aRuleData->ValueForOpacity(), display->mOpacity, canStoreInRuleTree,
+             parentDisplay->mOpacity, 1.0f,
+             SETFCT_OPACITY | SETFCT_UNSET_INITIAL);
+ 
++  // layer: enum, inherit, initial
++  SetDiscrete(*aRuleData->ValueForWillAnimate(), display->mWillAnimate, canStoreInRuleTree,
++              SETDSC_ENUMERATED | SETDSC_UNSET_INITIAL,
++              parentDisplay->mWillAnimate,
++              NS_STYLE_WILL_ANIMATE_DEFAULT, 0, 0, 0, 0);
++
+   // display: enum, inherit, initial
+   SetDiscrete(*aRuleData->ValueForDisplay(), display->mDisplay, canStoreInRuleTree,
+               SETDSC_ENUMERATED | SETDSC_UNSET_INITIAL,
+               parentDisplay->mDisplay,
+               NS_STYLE_DISPLAY_INLINE, 0, 0, 0, 0);
+ 
+   // mix-blend-mode: enum, inherit, initial
+   SetDiscrete(*aRuleData->ValueForMixBlendMode(), display->mMixBlendMode,
+diff --git a/layout/style/nsStyleConsts.h b/layout/style/nsStyleConsts.h
+--- a/layout/style/nsStyleConsts.h
++++ b/layout/style/nsStyleConsts.h
+@@ -207,16 +207,22 @@ static inline mozilla::css::Side operato
+ #define NS_COLOR_MOZ_HYPERLINKTEXT              -4
+ #define NS_COLOR_MOZ_VISITEDHYPERLINKTEXT       -5
+ #define NS_COLOR_MOZ_ACTIVEHYPERLINKTEXT        -6
+ // Only valid as paints in SVG glyphs
+ #define NS_COLOR_CONTEXT_FILL                   -7
+ #define NS_COLOR_CONTEXT_STROKE                 -8
+ 
+ // See nsStyleDisplay
++#define NS_STYLE_WILL_ANIMATE_DEFAULT            0x00
++#define NS_STYLE_WILL_ANIMATE_TRANSFORM          0x01
++#define NS_STYLE_WILL_ANIMATE_SCROLL             0x02
++#define NS_STYLE_WILL_ANIMATE_OPACITY            0x04
++
++// See nsStyleDisplay
+ #define NS_STYLE_ANIMATION_DIRECTION_NORMAL       0
+ #define NS_STYLE_ANIMATION_DIRECTION_REVERSE      1
+ #define NS_STYLE_ANIMATION_DIRECTION_ALTERNATE    2
+ #define NS_STYLE_ANIMATION_DIRECTION_ALTERNATE_REVERSE    3
+ 
+ // See nsStyleDisplay
+ #define NS_STYLE_ANIMATION_FILL_MODE_NONE         0
+ #define NS_STYLE_ANIMATION_FILL_MODE_FORWARDS     1
+diff --git a/layout/style/nsStyleStruct.cpp b/layout/style/nsStyleStruct.cpp
+--- a/layout/style/nsStyleStruct.cpp
++++ b/layout/style/nsStyleStruct.cpp
+@@ -2311,16 +2311,17 @@ nsStyleDisplay::nsStyleDisplay()
+   mTransformOrigin[2].SetCoordValue(0);
+   mPerspectiveOrigin[0].SetPercentValue(0.5f);
+   mPerspectiveOrigin[1].SetPercentValue(0.5f);
+   mChildPerspective.SetCoordValue(0);
+   mBackfaceVisibility = NS_STYLE_BACKFACE_VISIBILITY_VISIBLE;
+   mTransformStyle = NS_STYLE_TRANSFORM_STYLE_FLAT;
+   mOrient = NS_STYLE_ORIENT_AUTO;
+   mMixBlendMode = NS_STYLE_BLEND_NORMAL;
++  mWillAnimate = NS_STYLE_WILL_ANIMATE_DEFAULT;
+ 
+   mTransitions.AppendElement();
+   NS_ABORT_IF_FALSE(mTransitions.Length() == 1,
+                     "appending within auto buffer should never fail");
+   mTransitions[0].SetInitialValues();
+   mTransitionTimingFunctionCount = 1;
+   mTransitionDurationCount = 1;
+   mTransitionDelayCount = 1;
+@@ -2355,16 +2356,17 @@ nsStyleDisplay::nsStyleDisplay(const nsS
+   , mBreakBefore(aSource.mBreakBefore)
+   , mBreakAfter(aSource.mBreakAfter)
+   , mOverflowX(aSource.mOverflowX)
+   , mOverflowY(aSource.mOverflowY)
+   , mResize(aSource.mResize)
+   , mClipFlags(aSource.mClipFlags)
+   , mOrient(aSource.mOrient)
+   , mMixBlendMode(aSource.mMixBlendMode)
++  , mWillAnimate(aSource.mWillAnimate)
+   , mBackfaceVisibility(aSource.mBackfaceVisibility)
+   , mTransformStyle(aSource.mTransformStyle)
+   , mSpecifiedTransform(aSource.mSpecifiedTransform)
+   , mChildPerspective(aSource.mChildPerspective)
+   , mTransitions(aSource.mTransitions)
+   , mTransitionTimingFunctionCount(aSource.mTransitionTimingFunctionCount)
+   , mTransitionDurationCount(aSource.mTransitionDurationCount)
+   , mTransitionDelayCount(aSource.mTransitionDelayCount)
+diff --git a/layout/style/nsStyleStruct.h b/layout/style/nsStyleStruct.h
+--- a/layout/style/nsStyleStruct.h
++++ b/layout/style/nsStyleStruct.h
+@@ -1713,16 +1713,17 @@ struct nsStyleDisplay {
+   bool mBreakBefore;    // [reset]
+   bool mBreakAfter;     // [reset]
+   uint8_t mOverflowX;           // [reset] see nsStyleConsts.h
+   uint8_t mOverflowY;           // [reset] see nsStyleConsts.h
+   uint8_t mResize;              // [reset] see nsStyleConsts.h
+   uint8_t mClipFlags;           // [reset] see nsStyleConsts.h
+   uint8_t mOrient;              // [reset] see nsStyleConsts.h
+   uint8_t mMixBlendMode;        // [reset] see nsStyleConsts.h
++  uint8_t mWillAnimate;         // see nsStyleConsts.h
+ 
+   // mSpecifiedTransform is the list of transform functions as
+   // specified, or null to indicate there is no transform.  (inherit or
+   // initial are replaced by an actual list of transform functions, or
+   // null, as appropriate.) (owned by the style rule)
+   uint8_t mBackfaceVisibility;
+   uint8_t mTransformStyle;
+   const nsCSSValueList *mSpecifiedTransform; // [reset]
+@@ -1814,19 +1815,20 @@ struct nsStyleDisplay {
+     // NS_STYLE_OVERFLOW_VISIBLE or NS_STYLE_OVERFLOW_CLIP.
+     return mOverflowX != NS_STYLE_OVERFLOW_VISIBLE &&
+            mOverflowX != NS_STYLE_OVERFLOW_CLIP;
+   }
+ 
+   /* Returns whether the element has the -moz-transform property
+    * or a related property. */
+   bool HasTransformStyle() const {
+-    return mSpecifiedTransform != nullptr || 
++    return mSpecifiedTransform != nullptr ||
+            mTransformStyle == NS_STYLE_TRANSFORM_STYLE_PRESERVE_3D ||
+-           mBackfaceVisibility == NS_STYLE_BACKFACE_VISIBILITY_HIDDEN;
++           mBackfaceVisibility == NS_STYLE_BACKFACE_VISIBILITY_HIDDEN ||
++           (mWillAnimate & NS_STYLE_WILL_ANIMATE_TRANSFORM);
+   }
+ 
+   // These are defined in nsStyleStructInlines.h.
+ 
+   // The aContextFrame argument on each of these is the frame this
+   // style struct is for.  If the frame is for SVG text, the return
+   // value will be massaged to be something that makes sense for
+   // SVG text.
+diff --git a/layout/style/test/property_database.js b/layout/style/test/property_database.js
+--- a/layout/style/test/property_database.js
++++ b/layout/style/test/property_database.js
+@@ -4760,16 +4760,27 @@ if (SpecialPowers.getBoolPref("layout.cs
+ 		type: CSS_TYPE_LONGHAND,
+ 		initial_values: [ "normal" ],
+ 		other_values: [ "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn",
+ 			"hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity" ],
+ 		invalid_values: []
+ 	};
+ }
+ 
++if (SpecialPowers.getBoolPref("layout.css.willanimate.enabled")) {
++	gCSSProperties["will-animate"] = {
++		domProp: "willAnimate",
++		inherited: false,
++		type: CSS_TYPE_LONGHAND,
++		initial_values: [ "default" ],
++		other_values: [ "scroll", "transform", "opacity", "scroll transform", "transform opacity" ],
++		invalid_values: [ "default scroll", "scroll default", "transform default", "scroll transform opacity default" ]
++	};
++}
++
+ if (SpecialPowers.getBoolPref("layout.css.unset-value.enabled")) {
+   gCSSProperties["animation-direction"].invalid_values.push("normal, unset");
+   gCSSProperties["animation-name"].invalid_values.push("bounce, unset", "unset, bounce");
+   gCSSProperties["-moz-border-bottom-colors"].invalid_values.push("red unset", "unset red");
+   gCSSProperties["-moz-border-left-colors"].invalid_values.push("red unset", "unset red");
+   gCSSProperties["border-radius"].invalid_values.push("unset 2px", "unset / 2px", "2px unset", "2px / unset");
+   gCSSProperties["border-bottom-left-radius"].invalid_values.push("unset 2px", "2px unset");
+   gCSSProperties["border-bottom-right-radius"].invalid_values.push("unset 2px", "2px unset");

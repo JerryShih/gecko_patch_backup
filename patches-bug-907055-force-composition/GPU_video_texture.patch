@@ -1,0 +1,224 @@
+From: Chiajung Hung <chung@mozilla.com>
+
+diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext.h
+--- a/content/canvas/src/WebGLContext.h
++++ b/content/canvas/src/WebGLContext.h
+@@ -17,27 +17,36 @@
+ 
+ #include "nsIDOMWebGLRenderingContext.h"
+ #include "nsICanvasRenderingContextInternal.h"
+ #include "mozilla/dom/HTMLCanvasElement.h"
+ #include "nsWrapperCache.h"
+ #include "nsIObserver.h"
+ 
+ #include "GLContextProvider.h"
++#include "GLContext.h"
+ 
+ #include "mozilla/LinkedList.h"
+ #include "mozilla/CheckedInt.h"
+ 
+ #ifdef XP_MACOSX
+ #include "ForceDiscreteGPUHelperCGL.h"
+ #endif
+ 
+ #include "mozilla/dom/TypedArray.h"
+ #include "mozilla/ErrorResult.h"
+ 
++#include "mozilla/dom/HTMLVideoElement.h"
++#include "ImageContainer.h"
++#ifdef MOZ_WIDGET_GONK
++#include "GrallocImages.h"
++#endif
++ 
++#include "LayerManagerOGLShaders.h"
++
+ class nsIDocShell;
+ 
+ /* 
+  * Minimum value constants defined in 6.2 State Tables of OpenGL ES - 2.0.25
+  *   https://bugzilla.mozilla.org/show_bug.cgi?id=686732
+  * 
+  * Exceptions: some of the following values are set to higher values than in the spec because
+  * the values in the spec are ridiculously low. They are explicitly marked below
+@@ -398,25 +407,142 @@ public:
+                     GLenum internalformat, GLsizei width,
+                     GLsizei height, GLint border, GLenum format,
+                     GLenum type,
+                     const Nullable<dom::ArrayBufferView> &pixels,
+                     ErrorResult& rv);
+     void TexImage2D(GLenum target, GLint level,
+                     GLenum internalformat, GLenum format, GLenum type,
+                     dom::ImageData* pixels, ErrorResult& rv);
++    bool TexImageFromVideo(GLenum target, GLint level,
++                           GLenum internalformat, GLenum format, GLenum type,
++                           mozilla::dom::HTMLVideoElement* aElement, ErrorResult& rv)
++    {
++        uint16_t readyState;
++        if (NS_SUCCEEDED(aElement->GetReadyState(&readyState)) &&
++            (readyState == nsIDOMHTMLMediaElement::HAVE_NOTHING ||
++             readyState == nsIDOMHTMLMediaElement::HAVE_METADATA)) {
++            return false;
++        }
++
++        // If it doesn't have a principal, just bail
++        nsCOMPtr<nsIPrincipal> principal = aElement->GetCurrentPrincipal();
++        if (!principal)
++            return false;
++
++        mozilla::layers::ImageContainer *container = aElement->GetImageContainer();
++        if (!container)
++          return false;
++        already_AddRefed<mozilla::layers::Image> image = container->LockCurrentImage();
++
++        // Perpare for color conversion output
++        GLuint tempFBO;
++        GLuint tempTexture;
++        GLuint tempProgram = gl->fCreateProgram();
++        GLuint tempVertShader = gl->fCreateShader(LOCAL_GL_VERTEX_SHADER);
++        GLuint tempFragShader = gl->fCreateShader(LOCAL_GL_FRAGMENT_SHADER);
++        gl->fGenFramebuffers(1, &tempFBO);
++        gl->fGenTextures(1, &tempTexture);
++
++        if (!gl->fIsFramebuffer(tempFBO) || !gl->fIsTexture(tempTexture) || !tempVertShader || !tempFragShader || !tempProgram)
++            return false;
++
++        // Record original states: FBO, program, bind to new one
++        GLint originFBO;
++        gl->fGetIntegerv(LOCAL_GL_FRAMEBUFFER_BINDING, &originFBO);
++        gl->fBindFramebuffer(LOCAL_GL_FRAMEBUFFER, tempFBO);
++        gl->fFramebufferTexture2D(LOCAL_GL_FRAMEBUFFER, LOCAL_GL_COLOR_ATTACHMENT0, LOCAL_GL_TEXTURE_2D, tempTexture, 0);
++
++        GLint originProgram;
++        gl->fGetIntegerv(LOCAL_GL_CURRENT_PROGRAM, &originProgram);
++
++        int vsSize = sizeof(sLayerVS);
++        int fsSize;
++        gl->fShaderSource(tempVertShader, 1, (const GLchar**)&sLayerVS, &vsSize);
++        // working in NDC directly
++        float vertices[16] = {
++            -1.0f, -1.0f, 1.0f, 1.0f,
++            -1.0f,  1.0f, 1.0f, 1.0f,
++             1.0f,  1.0f, 1.0f, 1.0f,
++             1.0f, -1.0f, 1.0f, 1.0f
++        };
++        float textureCoord[8] = {
++             0.0f, 1.0f,
++             0.0f, 0.0f,
++             1.0f, 0.0f,
++             1.0f, 1.0f,
++        };
++        float identityMatrix[16] = {
++            1.0f, 0.0f, 0.0f, 0.0f,
++            0.0f, 1.0f, 0.0f, 0.0f,
++            0.0f, 0.0f, 1.0f, 0.0f,
++            0.0f, 0.0f, 0.0f, 1.0f,
++        };
++        float zeroVector[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++        unsigned char elementIndex[6] = {0, 1, 2, 3};
++#ifdef MOZ_WIDGET_GONK
++        if (image.get()->GetFormat() == GRALLOC_PLANAR_YCBCR)
++        {
++            fsSize = sizeof(sRGBAExternalTextureLayerFS);
++            mozilla::layers::GrallocImage* grallocImage = static_cast<mozilla::layers::GrallocImage*>(image.get());
++            gl->fShaderSource(tempFragShader, 1, (const GLchar**)&sRGBAExternalTextureLayerFS, &fsSize);
++            gl->fCompileShader(tempVertShader);
++            gl->fCompileShader(tempFragShader);
++            gl->fAttachShader(tempProgram, tempVertShader);
++            gl->fAttachShader(tempProgram, tempFragShader);
++            gl->fLinkProgram(tempProgram);
++            gl->fActiveTexture(LOCAL_GL_TEXTURE0);
++            gl->BindExternalBuffer(LOCAL_GL_TEXTURE_EXTERNAL, grallocImage->GetNativeBuffer());
++            gl->fUseProgram(tempProgram);
++            int verticesIndex = gl->fGetAttribLocation(tempProgram, "aVertexCoord");
++            int texIndex = gl->fGetAttribLocation(tempProgram, "aTexCoord");
++            gl->fEnableVertexAttribArray(verticesIndex);
++            gl->fEnableVertexAttribArray(texIndex);
++            gl->fVertexAttribPointer(verticesIndex, 4, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, vertices);
++            gl->fVertexAttribPointer(texIndex, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, textureCoord);
++
++            gl->fUniform4fv(gl->fGetUniformLocation(tempProgram, "uMatrixProj"), 4, identityMatrix);
++            gl->fUniform4fv(gl->fGetUniformLocation(tempProgram, "uLayerQuadTransform"), 4, identityMatrix);
++            gl->fUniform4fv(gl->fGetUniformLocation(tempProgram, "uLayerTransform"), 4, identityMatrix);
++            gl->fUniform4fv(gl->fGetUniformLocation(tempProgram, "uTextureTransform"), 4, identityMatrix);
++            gl->fUniform4fv(gl->fGetUniformLocation(tempProgram, "uRenderTargetOffset"), 1, zeroVector);
++            gl->fDrawElements(LOCAL_GL_TRIANGLE_FAN, 4, LOCAL_GL_UNSIGNED_BYTE, elementIndex);
++            gl->fFlush();
++            gl->fFinish();
++        } else
++#endif
++        if (image.get()->GetFormat() == PLANAR_YCBCR) {
++
++        }
++        gl->fActiveTexture(LOCAL_GL_TEXTURE0 + mActiveTexture);
++        gl->fBindTexture(mLastBoundTextureTarget, tempTexture);
++        gl->fBindFramebuffer(LOCAL_GL_FRAMEBUFFER, originFBO);
++        gl->fUseProgram(originProgram);
++        return true;
++    }
++
++
+     // Allow whatever element types the bindings are willing to pass
+     // us in TexImage2D
+     template<class ElementType>
+     void TexImage2D(GLenum target, GLint level,
+                     GLenum internalformat, GLenum format, GLenum type,
+                     ElementType& elt, ErrorResult& rv)
+     {
+         if (IsContextLost())
+             return;
++
++        mozilla::dom::HTMLVideoElement* video = mozilla::dom::HTMLVideoElement::FromContentOrNull(&elt);
++        //Direct GPU based RGB texture generation
++        if (TexImageFromVideo(target, level, internalformat, format, type, video, rv))
++        {
++          return;
++        }
++
++        //Fallback to normal handling
+         nsRefPtr<gfxImageSurface> isurf;
+         WebGLTexelFormat srcFormat;
+         nsLayoutUtils::SurfaceFromElementResult res = SurfaceFromElement(elt);
+         rv = SurfaceFromElementResultToImageSurface(res, getter_AddRefs(isurf),
+                                                     &srcFormat);
+         if (rv.Failed())
+             return;
+ 
+@@ -831,16 +957,17 @@ protected:
+     bool mCanLoseContextInForeground;
+     bool mShouldPresent;
+     bool mIsScreenCleared;
+     bool mDisableFragHighP;
+ 
+     template<typename WebGLObjectType>
+     void DeleteWebGLObjectsArray(nsTArray<WebGLObjectType>& array);
+ 
++    GLuint mLastBoundTextureTarget;
+     GLuint mActiveTexture;
+     GLenum mWebGLError;
+ 
+     // whether shader validation is supported
+     bool mShaderValidation;
+ 
+     // some GL constants
+     int32_t mGLMaxVertexAttribs;
+diff --git a/content/canvas/src/WebGLContextGL.cpp b/content/canvas/src/WebGLContextGL.cpp
+--- a/content/canvas/src/WebGLContextGL.cpp
++++ b/content/canvas/src/WebGLContextGL.cpp
+@@ -193,16 +193,17 @@ WebGLContext::BindTexture(GLenum target,
+ 
+     if (!ValidateObjectAllowDeletedOrNull("bindTexture", tex))
+         return;
+ 
+     // silently ignore a deleted texture
+     if (tex && tex->IsDeleted())
+         return;
+ 
++    mLastBoundTextureTarget = target;
+     if (target == LOCAL_GL_TEXTURE_2D) {
+         mBound2DTextures[mActiveTexture] = tex;
+     } else if (target == LOCAL_GL_TEXTURE_CUBE_MAP) {
+         mBoundCubeMapTextures[mActiveTexture] = tex;
+     } else {
+         return ErrorInvalidEnumInfo("bindTexture: target", target);
+     }
+ 

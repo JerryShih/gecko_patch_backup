@@ -1,0 +1,629 @@
+# HG changeset patch
+# Parent 91d5139beb6aa85e02ca5b7862559a4190ca57ae
+# User Jerry Shih <hshih@mozilla.com>
+color layer with gb
+* * *
+test gen color layer buffer
+* * *
+for leo input
+
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -79,16 +79,18 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+ 
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+ 
+     mDpy = dpy;
+     mSur = sur;
+ 
++    ColorBufferFactory::GetSingleton()->SetMaxSize(screenSize.width,screenSize.height);
++
+     return 0;
+ }
+ 
+ HwcComposer2D*
+ HwcComposer2D::GetInstance()
+ {
+     if (!sInstance) {
+         LOGD("Creating new instance");
+@@ -187,17 +189,17 @@ HwcComposer2D::PrepareLayerList(Layer* a
+     }
+ 
+     LayerRenderState state = aLayer->GetRenderState();
+     nsIntSize surfaceSize;
+ 
+     if (state.mSurface.get()) {
+         surfaceSize = state.mSize;
+     } else {
+-        if (aLayer->AsColorLayer() && mColorFill) {
++        if (aLayer->AsColorLayer() && (mColorFill || mColorFillWithGraphicBuffer)) {
+             fillColor = true;
+         } else {
+             LOGD("%s Layer doesn't have a gralloc buffer", aLayer->Name());
+             return false;
+         }
+     }
+     // Buffer rotation is not to be confused with the angled rotation done by a transform matrix
+     // It's a fancy ThebesLayer feature used for scrolling
+@@ -396,23 +398,55 @@ HwcComposer2D::PrepareLayerList(Layer* a
+             region.numRects = visibleRects->size();
+             region.rects = &((*visibleRects)[0]);
+         } else {
+             region.numRects = 1;
+             region.rects = &(hwcLayer.displayFrame);
+         }
+         hwcLayer.visibleRegionScreen = region;
+     } else {
+-        hwcLayer.flags |= HwcUtils::HWC_COLOR_FILL;
+         ColorLayer* colorLayer = aLayer->AsColorLayer();
+         if (colorLayer->GetColor().a < 1.0) {
+             LOGD("Color layer has semitransparency which is unsupported");
+             return false;
+         }
+-        hwcLayer.transform = colorLayer->GetColor().Packed();
++
++        if(!mColorFillWithGraphicBuffer){
++            hwcLayer.flags |= HwcUtils::HWC_COLOR_FILL;
++            hwcLayer.transform = colorLayer->GetColor().Packed();
++        }
++        else{
++            uint32_t buffer_width=hwcLayer.displayFrame.right-hwcLayer.displayFrame.left;
++            uint32_t buffer_height=hwcLayer.displayFrame.bottom-hwcLayer.displayFrame.top;
++
++            printf_stderr("hwc: debug visible rect(%u,%u,%u,%u)",bufferRect.x,bufferRect.y,bufferRect.width,bufferRect.height);
++            printf_stderr("hwc: debug sourceCrop rect(%u,%u,%u,%u)",hwcLayer.sourceCrop.left,hwcLayer.sourceCrop.top,hwcLayer.sourceCrop.right,hwcLayer.sourceCrop.bottom);
++            printf_stderr("hwc: debug displayFrame rect(%u,%u,%u,%u)",hwcLayer.displayFrame.left,hwcLayer.displayFrame.top,hwcLayer.displayFrame.right,hwcLayer.displayFrame.bottom);
++
++            printf_stderr("hwc:color layer with buffer (%u,%u), pos(%u,%u,%u,%u)",buffer_width,buffer_height,
++                hwcLayer.displayFrame.left,hwcLayer.displayFrame.top,hwcLayer.displayFrame.right,hwcLayer.displayFrame.bottom);
++
++            GraphicBuffer *color_buffer=ColorBufferFactory::GetSingleton()->GetColorBuffer(buffer_width,buffer_height,colorLayer->GetColor().Packed());
++
++            if(!color_buffer){
++                printf_stderr("hwc:no color buffer");
++                return false;
++            }
++            hwc_region_t region;
++            region.numRects = 1;
++            region.rects = &(hwcLayer.displayFrame);
++
++            hwcLayer.sourceCrop.left=0;
++            hwcLayer.sourceCrop.top=0;
++            hwcLayer.sourceCrop.right=buffer_width;
++            hwcLayer.sourceCrop.bottom=buffer_height;
++            hwcLayer.visibleRegionScreen = region;
++            hwcLayer.transform = 0;
++            hwcLayer.handle = color_buffer->handle;
++        }
+     }
+ 
+     mList->numHwLayers++;
+     return true;
+ }
+ 
+ 
+ #if ANDROID_VERSION >= 18
+@@ -453,16 +487,24 @@ HwcComposer2D::TryHwComposition()
+ 
+     for (int j = 0; j < idx; j++) {
+         if (mList->hwLayers[j].compositionType == HWC_FRAMEBUFFER) {
+             LOGD("GPU or Partial MDP Composition");
+             return false;
+         }
+     }
+ 
++    if(mColorFillWithGraphicBuffer){
++        //fill allocated buffer;
++        if(!ColorBufferFactory::GetSingleton()->FillAllColorBuffer()){
++            printf_stderr("bignose hwc:fill buffer failed");
++            return false;
++        }
++    }
++
+     // Full MDP Composition
+     mHwc->set(mHwc, HWC_NUM_DISPLAY_TYPES, displays);
+ 
+     for (int i = 0; i <= MAX_HWC_LAYERS; i++) {
+         if (mPrevRelFd[i] <= 0) {
+             break;
+         }
+         if (!i) {
+@@ -500,42 +542,56 @@ HwcComposer2D::TryHwComposition()
+     return !mHwc->set(mHwc, mDpy, mSur, mList);
+ }
+ #endif
+ 
+ bool
+ HwcComposer2D::TryRender(Layer* aRoot,
+                          const gfxMatrix& aGLWorldTransform)
+ {
++    printf_stderr("bignose hwc:start hwc composition");
++
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("debug.colorfill.use_buffer", propValue, "1");
++    mColorFillWithGraphicBuffer = (atoi(propValue) == 1) ? true : false;
++
+     if (!aGLWorldTransform.PreservesAxisAlignedRectangles()) {
+         LOGD("Render aborted. World transform has non-square angle rotation");
+         return false;
+     }
+ 
+     MOZ_ASSERT(Initialized());
+     if (mList) {
+         mList->numHwLayers = 0;
+     }
+ 
+     // XXX: The clear() below means all rect vectors will be have to be
+     // reallocated. We may want to avoid this if possible
+     mVisibleRegions.clear();
++    
++    if(mColorFillWithGraphicBuffer){
++        ColorBufferFactory::GetSingleton()->Reset();
++    }
+ 
+     if (!PrepareLayerList(aRoot,
+                           mScreenRect,
+                           gfxMatrix(),
+                           aGLWorldTransform))
+     {
+         LOGD("Render aborted. Nothing was drawn to the screen");
++	    
++        printf_stderr("bignose hwc:prepare faild, end composition");
+         return false;
+     }
+ 
+     if (!TryHwComposition()) {
+       // Full MDP Composition
+       LOGE("H/W Composition failed");
++      printf_stderr("bignose hwc:hwc failed, end composition");
+       return false;
+     }
+ 
+     LOGD("Frame rendered");
++    printf_stderr("bignose hwc:hwc success, end composition");
+     return true;
+ }
+ 
+ } // namespace mozilla
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -70,16 +70,19 @@ private:
+ 
+     HwcDevice*              mHwc;
+     HwcList*                mList;
+     hwc_display_t           mDpy;
+     hwc_surface_t           mSur;
+     nsIntRect               mScreenRect;
+     int                     mMaxLayerCount;
+     bool                    mColorFill;
++
++    bool                    mColorFillWithGraphicBuffer;
++
+     //Holds all the dynamically allocated RectVectors needed
+     //to render the current frame
+     std::list<RectVector>   mVisibleRegions;
+     int                     mPrevRelFd[MAX_HWC_LAYERS + 1];
+ };
+ 
+ } // namespace mozilla
+ 
+diff --git a/widget/gonk/HwcUtils.cpp b/widget/gonk/HwcUtils.cpp
+--- a/widget/gonk/HwcUtils.cpp
++++ b/widget/gonk/HwcUtils.cpp
+@@ -13,33 +13,36 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #include <android/log.h>
+ #include "HwcUtils.h"
+ #include "gfxUtils.h"
+ 
++#include "mozilla/StaticPtr.h"
++#include "mozilla/Mutex.h"
++#include "cutils/properties.h"
++
++
+ #define LOG_TAG "HwcUtils"
+ 
+ #if (LOG_NDEBUG == 0)
+ #define LOGD(args...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, ## args)
+ #else
+ #define LOGD(args...) ((void)0)
+ #endif
+ 
+ #define LOGE(args...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, ## args)
+ 
+ 
+ namespace mozilla {
+ 
+ /* Utility functions for HwcComposer */
+ 
+-
+-
+ /* static */ bool
+ HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
+                             nsIntRect aClip, nsIntRect aBufferRect,
+                             hwc_rect_t* aSourceCrop, hwc_rect_t* aVisibleRegionScreen) {
+ 
+     gfxRect visibleRect(aVisible);
+     gfxRect clip(aClip);
+     gfxRect visibleRectScreen = aTransform.TransformBounds(visibleRect);
+@@ -135,9 +138,290 @@ HwcUtils::CalculateClipRect(const gfxMat
+     gfxRect trClip = aTransform.TransformBounds(r);
+     trClip.Round();
+     gfxUtils::GfxRectToIntRect(trClip, &clip);
+ 
+     aRenderClip->IntersectRect(*aRenderClip, clip);
+     return true;
+ }
+ 
++
++
++
++
++
++
++
++class ColorBuffer : public RefCounted<ColorBuffer>
++{
++  friend class ColorBufferFactory;
++
++public:
++  ColorBuffer(ColorBufferFactory *buffer_factory);
++  ColorBuffer(ColorBufferFactory *buffer_factory,android::sp<android::GraphicBuffer> buffer);
++  virtual ~ColorBuffer();
++
++  void SetPendingFillRegion(uint32_t width,uint32_t height,uint32_t packed_rgba_color);
++  bool FillColor(void);
++
++  bool BufferSizeFit(uint32_t width,uint32_t height);
++
++private:
++  bool NeedFill(void);
++  void UpdateFilledRegion(uint32_t width,uint32_t height,uint32_t packed_rgba_color);
++
++  uint32_t mFilledColor;
++  uint32_t mFilledWidth;
++  uint32_t mFilledHeight;
++
++  uint32_t mPendingFillColor;
++  uint32_t mPendingFillWidth;
++  uint32_t mPendingFillHeight;
++
++  android::sp<android::GraphicBuffer> mBuffer;
++
++  ColorBufferFactory *mBufferFactory;
++};
++
++ColorBuffer::ColorBuffer(ColorBufferFactory *buffer_factory)
++:mFilledColor(0),mFilledWidth(0),mFilledHeight(0),mPendingFillColor(0),
++ mPendingFillWidth(0),mPendingFillHeight(0),mBufferFactory(buffer_factory)
++{
++
++}
++
++ColorBuffer::ColorBuffer(ColorBufferFactory *buffer_factory,android::sp<android::GraphicBuffer> buffer)
++:mFilledColor(0),mFilledWidth(0),mFilledHeight(0),mPendingFillColor(0),
++ mPendingFillWidth(0),mPendingFillHeight(0),mBuffer(buffer),mBufferFactory(buffer_factory)
++{
++
++}
++
++ColorBuffer::~ColorBuffer()
++{
++
++}
++
++bool ColorBuffer::FillColor(void)
++{
++  if(NeedFill()){
++    char prop[PROPERTY_VALUE_MAX];
++    property_get("debug.test_fill_color", prop, "0");
++    if(atoi(prop)==1){
++      return true;
++    }
++
++    android::status_t buffer_status;
++    uint32_t fill_width,fill_height;
++    uint32_t buffer_stride=mBuffer->getStride()*android::bytesPerPixel(mBuffer->getPixelFormat());
++    void *locked_buffer=nullptr;
++    uint8_t *byte_buffer=nullptr;
++    uint32_t *pixel_buffer=nullptr;
++
++    if(mBufferFactory->GetFillMode()==ColorBufferFactory::FILL_ALL){
++      fill_width=mBuffer->getWidth();
++      fill_height=mBuffer->getHeight();
++    }
++    else{
++      fill_width=mPendingFillWidth;
++      fill_height=mPendingFillHeight;
++    }
++
++    //lock buffer
++    android::Rect rect(fill_width,fill_height);
++    if((buffer_status=mBuffer->lock(android::GraphicBuffer::USAGE_SW_WRITE_OFTEN|android::GraphicBuffer::USAGE_SW_READ_NEVER,&locked_buffer))!=0){
++      return false;
++    }
++
++    printf_stderr("bignose hwc: fill color (%u,%u), stride:%u",fill_width,fill_height,buffer_stride);
++
++    //fill buffer
++    byte_buffer=reinterpret_cast<uint8_t*>(locked_buffer);
++    for(uint32_t i=0;i<fill_height;++i){
++      pixel_buffer=reinterpret_cast<uint32_t*>(byte_buffer+buffer_stride*i);
++      for(uint32_t j=0;j<fill_width;++j){
++        pixel_buffer[j]=mPendingFillColor;
++      }
++    }
++
++    //unlock buffer
++    if((buffer_status=mBuffer->unlock())!=0){
++      return false;
++    }
++
++    UpdateFilledRegion(fill_width,fill_height,mPendingFillColor);
++
++    printf_stderr("bignose hwc: fill color ok");
++
++    return true;
++  }
++
++  return true;
++}
++
++bool ColorBuffer::BufferSizeFit(uint32_t width,uint32_t height)
++{
++  if(mBuffer.get()){
++    if(mBuffer->getWidth()<width || mBuffer->getHeight()<height){
++      return false;
++    }
++
++    return true;
++  }
++
++  return false;
++}
++
++void ColorBuffer::SetPendingFillRegion(uint32_t width,uint32_t height,uint32_t packed_rgba_color)
++{
++  mPendingFillColor=packed_rgba_color;
++  mPendingFillWidth=width;
++  mPendingFillHeight=height;
++}
++
++bool ColorBuffer::NeedFill(void)
++{
++  if(mPendingFillWidth==0 || mPendingFillHeight==0){
++    return false;
++  }
++
++  if(mPendingFillColor!=mFilledColor){
++    return true;
++  }
++
++  if(mFilledWidth<mPendingFillWidth || mFilledHeight<mPendingFillHeight){
++    return true;
++  }
++
++  return false;
++}
++
++void ColorBuffer::UpdateFilledRegion(uint32_t width,uint32_t height,uint32_t packed_rgba_color)
++{
++  mFilledColor=packed_rgba_color;
++  mFilledWidth=width;
++  mFilledHeight=height;
++}
++
++
++static StaticRefPtr<ColorBufferFactory> sColorBufferFactoryInstance;
++static Mutex sColorBufferFactoryMutex("ColorBufferFactory mutex");
++
++ColorBufferFactory* ColorBufferFactory::GetSingleton(void)
++{
++  {
++    MutexAutoUnlock init_mutex(sColorBufferFactoryMutex);
++    if(!sColorBufferFactoryInstance){
++
++      sColorBufferFactoryInstance = new ColorBufferFactory();
++    }
++  }
++
++  MOZ_ASSERT(sColorBufferFactoryInstance);
++
++  return sColorBufferFactoryInstance;
++}
++
++ColorBufferFactory::ColorBufferFactory()
++:mFillMode(FILL_ALL),mBufferWidth(64),mBufferHeight(64),mBufferUsed(0)
++{
++
++}
++
++ColorBufferFactory::~ColorBufferFactory()
++{
++
++}
++
++//void ColorBufferFactory::Init(void)
++//{
++//  android::status_t buffer_status;
++//
++//  for(int i=0;i<COLOR_BUFFER_NUM;++i){
++//    android::sp<android::GraphicBuffer> buffer=new android::GraphicBuffer(mBufferWidth,mBufferHeight,android::PIXEL_FORMAT_RGBA_8888,
++//        android::GraphicBuffer::USAGE_HW_COMPOSER |
++//        android::GraphicBuffer::USAGE_SW_READ_OFTEN |
++//        android::GraphicBuffer::USAGE_SW_WRITE_RARELY);
++//    if((buffer_status=buffer->initCheck())){
++//      return;
++//    }
++//
++//    mColorBuffers.push_back(new ColorBuffer(this,buffer));
++//  }
++//}
++
++android::GraphicBuffer *ColorBufferFactory::GetColorBuffer(uint32_t width,uint32_t height,uint32_t packed_rgba_color)
++{
++  char prop[PROPERTY_VALUE_MAX];
++  property_get("debug.test_get_color_buffer", prop,"0");
++  if(atoi(prop)==1){
++    return nullptr;
++  }
++
++  if(mBufferUsed>=mColorBuffers.size()){
++    if(mColorBuffers.size()<COLOR_BUFFER_NUM){
++      android::status_t buffer_status;
++
++      android::sp<android::GraphicBuffer> buffer=new android::GraphicBuffer(mBufferWidth,mBufferHeight,android::PIXEL_FORMAT_RGBA_8888,
++          android::GraphicBuffer::USAGE_HW_COMPOSER |
++          android::GraphicBuffer::USAGE_SW_READ_OFTEN |
++          android::GraphicBuffer::USAGE_SW_WRITE_RARELY);
++      if((buffer_status=buffer->initCheck())){
++        return nullptr;
++      }
++
++      mColorBuffers.push_back(new ColorBuffer(this,buffer));
++    }
++    else{
++      printf_stderr("bignose hwc: buffer all used");
++      return nullptr;
++    }
++  }
++
++  if(mBufferUsed>=mColorBuffers.size()){
++    return nullptr;
++  }
++
++  if(!mColorBuffers[mBufferUsed]->BufferSizeFit(width,height)){
++    printf_stderr("bignose hwc: buffer size dismatch");
++
++    return nullptr;
++  }
++
++  mColorBuffers[mBufferUsed]->SetPendingFillRegion(width,height,packed_rgba_color);
++
++  return mColorBuffers[mBufferUsed++]->mBuffer.get();
++}
++
++void ColorBufferFactory::Reset(void)
++{
++  mBufferUsed=0;
++}
++
++bool ColorBufferFactory::FillAllColorBuffer(void)
++{
++  for(uint32_t i=0;i<mBufferUsed;++i){
++    if(!mColorBuffers[i]->FillColor()){
++      printf_stderr("bignose hwc:fill buffer id:%d failed",i);
++      return false;
++    }
++  }
++
++  return true;
++}
++
++ColorBufferFactory::FillMode ColorBufferFactory::GetFillMode(void)
++{
++  return mFillMode;
++}
++
++
++void ColorBufferFactory::SetMaxSize(uint32_t width,uint32_t height)
++{
++  mBufferWidth=width;
++  mBufferHeight=height;
++}
++
++
++
++
++
+ } // namespace mozilla
+diff --git a/widget/gonk/HwcUtils.h b/widget/gonk/HwcUtils.h
+--- a/widget/gonk/HwcUtils.h
++++ b/widget/gonk/HwcUtils.h
+@@ -12,19 +12,23 @@
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #ifndef mozilla_HwcUtils
+ #define mozilla_HwcUtils
+ 
++#include <ui/GraphicBuffer.h>
++
++#include <vector>
++
+ #include "Layers.h"
+-#include <vector>
+ #include "hardware/hwcomposer.h"
++#include "mozilla/RefPtr.h"
+ 
+ namespace mozilla {
+ 
+ class HwcUtils {
+ public:
+ 
+ enum {
+     HWC_USE_GPU = HWC_FRAMEBUFFER,
+@@ -109,11 +113,54 @@ static bool PrepareVisibleRegion(const n
+  */
+ static bool PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
+                               nsIntRect aClip, nsIntRect aBufferRect,
+                               hwc_rect_t* aSourceCrop,
+                               hwc_rect_t* aVisibleRegionScreen);
+ 
+ };
+ 
++
++class ColorBuffer;
++class ColorBufferFactory;
++
++class ColorBufferFactory
++{
++  NS_INLINE_DECL_REFCOUNTING(ColorLayerBufferFactory)
++
++public:
++  enum FillMode{
++    FILL_ALL,
++    FILL_PARTIAL,
++  };
++
++  static ColorBufferFactory* GetSingleton(void);
++
++  ColorBufferFactory();
++  virtual ~ColorBufferFactory();
++
++  void Reset(void);
++  //allocate color buffer
++  android::GraphicBuffer *GetColorBuffer(uint32_t w,uint32_t h,uint32_t packed_rgba_color);
++  //start fill allocated color buffer
++  bool FillAllColorBuffer(void);
++
++  void SetMaxSize(uint32_t width,uint32_t height);
++  FillMode GetFillMode(void);
++
++private:
++  //void Init(void);
++
++  enum {
++    COLOR_BUFFER_NUM=1,
++  };
++
++  uint32_t mBufferWidth,mBufferHeight;
++  FillMode mFillMode;
++  uint32_t mBufferUsed;
++
++  std::vector<RefPtr<ColorBuffer> > mColorBuffers;
++};
++
++
+ } // namespace mozilla
+ 
+ #endif // mozilla_HwcUtils

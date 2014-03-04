@@ -1,0 +1,452 @@
+# HG changeset patch
+# Parent e7e078349d4d3edfe855a910cabb39bef07d428d
+# User Jerry Shih <hshih@mozilla.com>
+Bug 909176 - Have a preference value to replace all texture by tiny texture
+
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -41,25 +41,62 @@
+ #include "nsString.h"                   // for nsString, nsAutoCString, etc
+ #include "prtypes.h"                    // for PR_INT32_MAX
+ 
+ #if MOZ_ANDROID_OMTC
+ #include "TexturePoolOGL.h"
+ #endif
+ #include "GeckoProfiler.h"
+ 
++#include "CompositorDebug.h"
+ 
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
+ using namespace mozilla::gl;
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++class SimplifiedTextureDataOGL;
++
++static RefPtr<SimplifiedTextureDataOGL> sSimplifiedTextureDataOGL;
++static Mutex sSimplifiedTextureDataOGLMutex("SimplifiedTextureDataOGL mutex");
++
++// 2x2 small texture for ogl rendering.
++class SimplifiedTextureDataOGL : public RefCounted<SimplifiedTextureDataOGL>
++{
++public:
++  static SimplifiedTextureDataOGL* GetSingleton(void);
++
++  SimplifiedTextureDataOGL();
++  virtual ~SimplifiedTextureDataOGL();
++
++  static void StartListenPerf(void);
++
++  bool IsEnable(void);
++
++  // Set 2x2 small texture to gl texture unit.
++  void BindTexture(GLContext *gl_context,GLenum texture_unit);
++
++private:
++  bool Init(GLContext *gl_context);
++
++  static int SimpleTexturePrefCallback(const char *preference_name,void *);
++
++  GLuint mTexture;
++
++  bool mInit;
++  bool mEnableSimplifiedTexture;
++
++  static const char *mPrefName;
++};
++#endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
+ static inline IntSize ns2gfxSize(const nsIntSize& s) {
+   return IntSize(s.width, s.height);
+ }
+ 
+ // Draw the supplied geometry with the already selected shader. Both aArray1
+ // and aArray2 are expected to have a stride of 2 * sizeof(GLfloat).
+ static void
+ DrawWithVertexBuffer2(GLContext *aGLContext, VBOArena &aVBOs,
+@@ -361,16 +398,20 @@ CompositorOGL::ReadDrawFPSPref::Run()
+ bool
+ CompositorOGL::Initialize()
+ {
+   ScopedGfxFeatureReporter reporter("GL Layers", true);
+ 
+   // Do not allow double initialization
+   NS_ABORT_IF_FALSE(mGLContext == nullptr, "Don't reinitialize CompositorOGL");
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(SimplifiedTextureDataOGL::StartListenPerf));
++#endif
++
+   mGLContext = CreateContext();
+ 
+ #ifdef MOZ_WIDGET_ANDROID
+   if (!mGLContext)
+     NS_RUNTIMEABORT("We need a context on Android");
+ #endif
+ 
+   if (!mGLContext)
+@@ -1037,17 +1078,17 @@ CompositorOGL::DrawQuad(const Rect& aRec
+     // This is used by IOSurface that use 0,0...w,h coordinate rather then 0,0..1,1.
+     program->SetTexCoordMultiplier(source->GetSize().width, source->GetSize().height);
+   }
+   program->SetLayerQuadRect(aRect);
+   program->SetLayerTransform(aTransform);
+   program->SetRenderOffset(aOffset.x, aOffset.y);
+ 
+   switch (aEffectChain.mPrimaryEffect->mType) {
+-    case EFFECT_SOLID_COLOR: {
++  case EFFECT_SOLID_COLOR: {
+       EffectSolidColor* effectSolidColor =
+         static_cast<EffectSolidColor*>(aEffectChain.mPrimaryEffect.get());
+ 
+       Color color = effectSolidColor->mColor;
+       /* Multiply color by the layer opacity, as the shader
+        * ignores layer opacity and expects a final color to
+        * write to the color buffer.  This saves a needless
+        * multiply in the fragment shader.
+@@ -1057,17 +1098,27 @@ CompositorOGL::DrawQuad(const Rect& aRec
+       color.g *= opacity;
+       color.b *= opacity;
+       color.a = opacity;
+ 
+       program->SetRenderColor(color);
+ 
+       AutoBindTexture bindMask;
+       if (maskType != MaskNone) {
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++        SimplifiedTextureDataOGL::GetSingleton()->IsEnable();
++        if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE0);
++        }
++        else{
++          bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE0);
++        }
++#else
+         bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE0);
++#endif
+         program->SetMaskTextureUnit(0);
+         program->SetMaskLayerTransform(maskQuadTransform);
+       }
+ 
+       BindAndDrawQuad(program);
+     }
+     break;
+ 
+@@ -1080,30 +1131,50 @@ CompositorOGL::DrawQuad(const Rect& aRec
+       Rect textureCoords;
+       TextureSource *source = texturedEffect->mTexture;
+ 
+       if (!texturedEffect->mPremultiplied) {
+         mGLContext->fBlendFuncSeparate(LOCAL_GL_SRC_ALPHA, LOCAL_GL_ONE_MINUS_SRC_ALPHA,
+                                        LOCAL_GL_ONE, LOCAL_GL_ONE);
+       }
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++      AutoBindTexture bindSource;
++
++      if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++        SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE0);
++      }
++      else{
++        bindSource.Bind(source->AsSourceOGL(), LOCAL_GL_TEXTURE0);
++      }
++#else
+       AutoBindTexture bindSource(source->AsSourceOGL(), LOCAL_GL_TEXTURE0);
+-  
++#endif
++
+       program->SetTextureTransform(source->AsSourceOGL()->GetTextureTransform());
+ 
+       mGLContext->ApplyFilterToBoundTexture(source->AsSourceOGL()->GetTextureTarget(),
+                                             ThebesFilter(texturedEffect->mFilter));
+ 
+       program->SetTextureUnit(0);
+       program->SetLayerOpacity(aOpacity);
+ 
+       AutoBindTexture bindMask;
+       if (maskType != MaskNone) {
+         mGLContext->fActiveTexture(LOCAL_GL_TEXTURE1);
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++        if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE1);
++        }
++        else{
++          bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE1);
++        }
++#else
+         bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE1);
++#endif
+         program->SetMaskTextureUnit(1);
+         program->SetMaskLayerTransform(maskQuadTransform);
+       }
+ 
+       BindAndDrawQuadWithTextureRect(program, texturedEffect->mTextureCoords, source);
+ 
+       if (!texturedEffect->mPremultiplied) {
+         mGLContext->fBlendFuncSeparate(LOCAL_GL_ONE, LOCAL_GL_ONE_MINUS_SRC_ALPHA,
+@@ -1122,30 +1193,61 @@ CompositorOGL::DrawQuad(const Rect& aRec
+ 
+       if (!sourceY && !sourceCb && !sourceCr) {
+         NS_WARNING("Invalid layer texture.");
+         return;
+       }
+ 
+       gfxPattern::GraphicsFilter filter = ThebesFilter(effectYCbCr->mFilter);
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++      AutoBindTexture bindY;
++      AutoBindTexture bindCb;
++      AutoBindTexture bindCr;
++
++      if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++        SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE0);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++        SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE1);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++        SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE2);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++      }
++      else{
++        bindY.Bind(sourceY, LOCAL_GL_TEXTURE0);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++        bindCb.Bind(sourceCb, LOCAL_GL_TEXTURE1);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++        bindCr.Bind(sourceCr, LOCAL_GL_TEXTURE2);
++        mGLContext->ApplyFilterToBoundTexture(filter);
++      }
++#else
+       AutoBindTexture bindY(sourceY, LOCAL_GL_TEXTURE0);
+       mGLContext->ApplyFilterToBoundTexture(filter);
+       AutoBindTexture bindCb(sourceCb, LOCAL_GL_TEXTURE1);
+       mGLContext->ApplyFilterToBoundTexture(filter);
+       AutoBindTexture bindCr(sourceCr, LOCAL_GL_TEXTURE2);
+       mGLContext->ApplyFilterToBoundTexture(filter);
+-
++#endif
+       program->SetYCbCrTextureUnits(Y, Cb, Cr);
+       program->SetLayerOpacity(aOpacity);
+       program->SetTextureTransform(gfx3DMatrix());
+ 
+       AutoBindTexture bindMask;
+       if (maskType != MaskNone) {
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++        if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE3);
++        }
++        else{
++          bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE3);
++        }
++#else
+         bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE3);
++#endif
+         program->SetMaskTextureUnit(3);
+         program->SetMaskLayerTransform(maskQuadTransform);
+       }
+       BindAndDrawQuadWithTextureRect(program, effectYCbCr->mTextureCoords, sourceYCbCr->GetSubSource(Y));
+     }
+     break;
+   case EFFECT_RENDER_TARGET: {
+       EffectRenderTarget* effectRenderTarget =
+@@ -1206,30 +1308,52 @@ CompositorOGL::DrawQuad(const Rect& aRec
+           ShaderProgramType type = gl()->GetPreferredARGB32Format() == LOCAL_GL_BGRA ?
+                                    ComponentAlphaPass2RGBProgramType :
+                                    ComponentAlphaPass2ProgramType;
+           program = GetProgram(type, maskType);
+           gl()->fBlendFuncSeparate(LOCAL_GL_ONE, LOCAL_GL_ONE,
+                                    LOCAL_GL_ONE, LOCAL_GL_ONE);
+         }
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++        AutoBindTexture bindSourceOnBlack;
++        AutoBindTexture bindSourceOnWhite;
++
++        if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE0);
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE1);
++        }
++        else{
++          bindSourceOnBlack.Bind(sourceOnBlack, LOCAL_GL_TEXTURE0);
++          bindSourceOnWhite.Bind(sourceOnWhite, LOCAL_GL_TEXTURE1);
++        }
++#else
+         AutoBindTexture bindSourceOnBlack(sourceOnBlack, LOCAL_GL_TEXTURE0);
+         AutoBindTexture bindSourceOnWhite(sourceOnWhite, LOCAL_GL_TEXTURE1);
+-
++#endif
+         program->Activate();
+         program->SetBlackTextureUnit(0);
+         program->SetWhiteTextureUnit(1);
+         program->SetLayerOpacity(aOpacity);
+         program->SetLayerTransform(aTransform);
+         program->SetTextureTransform(gfx3DMatrix());
+         program->SetRenderOffset(aOffset.x, aOffset.y);
+         program->SetLayerQuadRect(aRect);
+         AutoBindTexture bindMask;
+         if (maskType != MaskNone) {
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++        if(SimplifiedTextureDataOGL::GetSingleton()->IsEnable()){
++          SimplifiedTextureDataOGL::GetSingleton()->BindTexture(mGLContext,LOCAL_GL_TEXTURE2);
++        }
++        else{
+           bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE2);
++        }
++#else
++          bindMask.Bind(sourceMask, LOCAL_GL_TEXTURE2);
++#endif
+           program->SetMaskTextureUnit(2);
+           program->SetMaskLayerTransform(maskQuadTransform);
+         }
+ 
+         BindAndDrawQuadWithTextureRect(program, effectComponentAlpha->mTextureCoords, effectComponentAlpha->mOnBlack);
+ 
+         mGLContext->fBlendFuncSeparate(LOCAL_GL_ONE, LOCAL_GL_ONE_MINUS_SRC_ALPHA,
+                                        LOCAL_GL_ONE, LOCAL_GL_ONE);
+@@ -1513,11 +1637,106 @@ CompositorOGL::BindAndDrawQuad(ShaderPro
+                                bool aFlipped)
+ {
+   NS_ASSERTION(aProg->HasInitialized(), "Shader program not correctly initialized");
+   BindAndDrawQuad(aProg->AttribLocation(ShaderProgramOGL::VertexCoordAttrib),
+                   aProg->AttribLocation(ShaderProgramOGL::TexCoordAttrib),
+                   aFlipped);
+ }
+ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
++const char* SimplifiedTextureDataOGL::mPrefName="debug.small_texture";
++
++SimplifiedTextureDataOGL* SimplifiedTextureDataOGL::GetSingleton(void)
++{
++  {
++    MutexAutoLock texture_mutex(sSimplifiedTextureDataOGLMutex);
++
++    if(!sSimplifiedTextureDataOGL){
++      sSimplifiedTextureDataOGL=new SimplifiedTextureDataOGL();
++    }
++  }
++
++  MOZ_ASSERT(sSimplifiedTextureDataOGL);
++
++  return sSimplifiedTextureDataOGL.get();
++}
++
++void SimplifiedTextureDataOGL::StartListenPerf(void)
++{
++  printf_stderr("bignose trigger SimplifiedTextureDataOGL::StartListenPerf() at thread:%d",gettid());
++
++  if(Preferences::HasUserValue(SimplifiedTextureDataOGL::mPrefName)){
++    Preferences::ClearUser(SimplifiedTextureDataOGL::mPrefName);
++  }
++
++  Preferences::RegisterCallback(SimplifiedTextureDataOGL::SimpleTexturePrefCallback,SimplifiedTextureDataOGL::mPrefName,nullptr);
++
++  printf_stderr("bignose trigger SimplifiedTextureDataOGL::StartListenPerf() register callback");
++}
++
++int SimplifiedTextureDataOGL::SimpleTexturePrefCallback(const char *preference_name,void *)
++{
++  SimplifiedTextureDataOGL::GetSingleton()->mEnableSimplifiedTexture=Preferences::GetBool(SimplifiedTextureDataOGL::mPrefName,false);
++
++  return 0;
++}
++
++SimplifiedTextureDataOGL::SimplifiedTextureDataOGL()
++  :mTexture(0),mInit(false),mEnableSimplifiedTexture(false)
++{
++
++}
++
++SimplifiedTextureDataOGL::~SimplifiedTextureDataOGL()
++{
++
++}
++
++bool SimplifiedTextureDataOGL::IsEnable(void)
++{
++  return mEnableSimplifiedTexture;
++}
++
++bool SimplifiedTextureDataOGL::Init(GLContext *gl_context)
++{
++  if(mInit){
++    return true;
++  }
++
++  unsigned int color_pixel_2x2[4]={
++      0xFFFF0000,
++      0xFF00FF00,
++      0xFF0000FF,
++      0xFFFFFFFF,
++  };
++
++  gl_context->fGenTextures(1,&mTexture);
++
++  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D,mTexture);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_MIN_FILTER,LOCAL_GL_LINEAR);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_MAG_FILTER,LOCAL_GL_LINEAR);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_WRAP_S,LOCAL_GL_CLAMP_TO_EDGE);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_WRAP_T,LOCAL_GL_CLAMP_TO_EDGE);
++
++  gl_context->fTexImage2D(LOCAL_GL_TEXTURE_2D,0,LOCAL_GL_RGBA,2,2,0,LOCAL_GL_RGBA,LOCAL_GL_UNSIGNED_BYTE,color_pixel_2x2);
++
++  mInit=true;
++
++  return true;
++}
++
++void SimplifiedTextureDataOGL::BindTexture(GLContext *gl_context,GLenum texture_unit)
++{
++  if(!mInit){
++    if(Init(gl_context)){
++      return;
++    }
++  }
++
++  gl_context->fActiveTexture(texture_unit);
++  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D,mTexture);
++}
++#endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ 
+ } /* layers */
+ } /* mozilla */
+diff --git a/gfx/layers/opengl/CompositorOGL.h b/gfx/layers/opengl/CompositorOGL.h
+--- a/gfx/layers/opengl/CompositorOGL.h
++++ b/gfx/layers/opengl/CompositorOGL.h
+@@ -50,17 +50,17 @@ namespace layers {
+ class CompositingRenderTarget;
+ class CompositingRenderTargetOGL;
+ class DataTextureSource;
+ class GLManagerCompositor;
+ class TextureSource;
+ struct Effect;
+ struct EffectChain;
+ struct FPSState;
+-
++ 
+ class CompositorOGL : public Compositor
+ {
+   typedef mozilla::gl::GLContext GLContext;
+   typedef ShaderProgramType ProgramType;
+   
+   friend class GLManagerCompositor;
+ 
+ public:
+@@ -311,12 +311,12 @@ private:
+ 
+   nsAutoPtr<FPSState> mFPS;
+   // Textures used for direct texturing of buffers like gralloc.
+   // The index of the texture in this array must correspond to the texture unit.
+   nsTArray<GLuint> mTextures;
+   static bool sDrawFPS;
+ };
+ 
+-}
+-}
++} // layers
++} // mozilla
+ 
+ #endif /* MOZILLA_GFX_COMPOSITOROGL_H */

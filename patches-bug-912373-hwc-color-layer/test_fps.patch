@@ -1,0 +1,26 @@
+# HG changeset patch
+# Parent 2a995d194fbe52b03fc863337021a30c9e584486
+# User Jerry Shih <hshih@mozilla.com>
+test fps
+
+diff --git a/b2g/chrome/content/settings.js b/b2g/chrome/content/settings.js
+--- a/b2g/chrome/content/settings.js
++++ b/b2g/chrome/content/settings.js
+@@ -433,16 +433,17 @@ SettingsListener.observe('app.reportCras
+ // ================ Updates ================
+ SettingsListener.observe('app.update.interval', 86400, function(value) {
+   Services.prefs.setIntPref('app.update.interval', value);
+ });
+ 
+ // ================ Debug ================
+ // XXX could factor out into a settings->pref map.
+ SettingsListener.observe("debug.fps.enabled", false, function(value) {
++  dump("bignose debug.fps.enabled="+value);
+   Services.prefs.setBoolPref("layers.acceleration.draw-fps", value);
+ });
+ SettingsListener.observe("debug.paint-flashing.enabled", false, function(value) {
+   Services.prefs.setBoolPref("nglayout.debug.paint_flashing", value);
+ });
+ SettingsListener.observe("layers.draw-borders", false, function(value) {
+   Services.prefs.setBoolPref("layers.draw-borders", value);
+ });

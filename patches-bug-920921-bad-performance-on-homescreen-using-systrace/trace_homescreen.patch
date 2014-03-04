@@ -1,0 +1,98 @@
+# HG changeset patch
+# Parent c784d6cc497cd8b2ce9910b264b671f8a3fe095b
+# User Jerry Shih <hshih@mozilla.com>
+test pre-render task
+
+diff --git a/layout/base/nsDisplayList.cpp b/layout/base/nsDisplayList.cpp
+--- a/layout/base/nsDisplayList.cpp
++++ b/layout/base/nsDisplayList.cpp
+@@ -527,36 +527,47 @@ static void MarkFrameForDisplay(nsIFrame
+     }
+   }
+ }
+ 
+ void nsDisplayListBuilder::MarkOutOfFlowFrameForDisplay(nsIFrame* aDirtyFrame,
+                                                         nsIFrame* aFrame,
+                                                         const nsRect& aDirtyRect)
+ {
++  //virtual nsIAtom* GetType() const = 0;
++  printf_stderr("bignose %d in MarkOutOfFlowFrameForDisplay",gettid());
++
+   nsRect dirtyRectRelativeToDirtyFrame = aDirtyRect;
+   nsRect displayPort;
+   if (nsLayoutUtils::IsFixedPosFrameInDisplayPort(aFrame, &displayPort)) {
+     NS_ASSERTION(aDirtyFrame == aFrame->GetParent(), "Dirty frame should be viewport frame");
+     dirtyRectRelativeToDirtyFrame = displayPort;
+   }
+ 
+   nsRect dirty = dirtyRectRelativeToDirtyFrame - aFrame->GetOffsetTo(aDirtyFrame);
+   nsRect overflowRect = aFrame->GetVisualOverflowRect();
+ 
++  gfxRect dirty_gfx=CurrentPresShellState()->mPresShell->GetPresContext()->AppUnitsToGfxUnits(dirty);
++  gfxRect overflowRect_gfx=CurrentPresShellState()->mPresShell->GetPresContext()->AppUnitsToGfxUnits(overflowRect);
++  printf_stderr("bignose %d MarkOutOfFlowFrameForDisplay dirty(%f,%f,%f,%f)",gettid(),dirty_gfx.x,dirty_gfx.y,dirty_gfx.width,dirty_gfx.height);
++  printf_stderr("bignose %d MarkOutOfFlowFrameForDisplay overflowRect(%f,%f,%f,%f)",gettid(),overflowRect_gfx.x,overflowRect_gfx.y,overflowRect_gfx.width,overflowRect_gfx.height);
++
+   if (aFrame->IsTransformed() &&
+       nsLayoutUtils::HasAnimationsForCompositor(aFrame->GetContent(),
+                                                 eCSSProperty_transform)) {
++  //if (aFrame->IsTransformed()) {
+    /**
+     * Add a fuzz factor to the overflow rectangle so that elements only just
+     * out of view are pulled into the display list, so they can be
+     * prerendered if necessary.
+     */
+     overflowRect.Inflate(nsPresContext::CSSPixelsToAppUnits(32));
+   }
++  overflowRect_gfx=CurrentPresShellState()->mPresShell->GetPresContext()->AppUnitsToGfxUnits(overflowRect);
++  printf_stderr("bignose %d MarkOutOfFlowFrameForDisplay overflowRect 32(%f,%f,%f,%f)",gettid(),overflowRect_gfx.x,overflowRect_gfx.y,overflowRect_gfx.width,overflowRect_gfx.height);
+ 
+   if (!dirty.IntersectRect(dirty, overflowRect))
+     return;
+   const DisplayItemClip* clip = mClipState.GetClipForContainingBlockDescendants();
+   OutOfFlowDisplayData* data = clip ? new OutOfFlowDisplayData(*clip, dirty)
+     : new OutOfFlowDisplayData(dirty);
+   aFrame->Properties().Set(nsDisplayListBuilder::OutOfFlowDisplayDataProperty(), data);
+ 
+diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -2097,16 +2097,18 @@ nsLayoutUtils::GetFramesForArea(nsIFrame
+   return NS_OK;
+ }
+ 
+ nsresult
+ nsLayoutUtils::PaintFrame(nsRenderingContext* aRenderingContext, nsIFrame* aFrame,
+                           const nsRegion& aDirtyRegion, nscolor aBackstop,
+                           uint32_t aFlags)
+ {
++  printf_stderr("bignose %d start PaintFrame",gettid());
++
+   PROFILER_LABEL("nsLayoutUtils","PaintFrame");
+   if (aFlags & PAINT_WIDGET_LAYERS) {
+     nsView* view = aFrame->GetView();
+     if (!(view && view->GetWidget() && GetDisplayRootFrame(aFrame) == aFrame)) {
+       aFlags &= ~PAINT_WIDGET_LAYERS;
+       NS_ASSERTION(aRenderingContext, "need a rendering context");
+     }
+   }
+@@ -2365,16 +2367,19 @@ nsLayoutUtils::PaintFrame(nsRenderingCon
+   }
+ 
+   if (builder.WillComputePluginGeometry()) {
+     rootPresContext->ComputePluginGeometryUpdates(aFrame, &builder, &list);
+   }
+ 
+   // Flush the list so we don't trigger the IsEmpty-on-destruction assertion
+   list.DeleteAll();
++
++  printf_stderr("bignose %d end PaintFrame",gettid());
++
+   return NS_OK;
+ }
+ 
+ int32_t
+ nsLayoutUtils::GetZIndex(nsIFrame* aFrame) {
+   if (!aFrame->IsPositioned() && !aFrame->IsFlexItem())
+     return 0;
+ 

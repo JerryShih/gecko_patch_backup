@@ -1,0 +1,5 @@
+gfx_trace_makefile.patch
+force-enable-hwcomposer
+message_io_working.patch
+compositor_debug.patch
+GPU_video_texture.patch

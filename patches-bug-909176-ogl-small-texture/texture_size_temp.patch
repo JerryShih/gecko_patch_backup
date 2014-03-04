@@ -1,0 +1,262 @@
+# HG changeset patch
+# Parent de0ea8feb3d294cc1e71955c6c70a9b42aa1f9bc
+# User Jerry Shih <hshih@mozilla.com>
+temp for texture size
+
+
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -58,35 +58,38 @@ using namespace mozilla::gl;
+ 
+ #if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ class SimplifiedTextureDataOGL;
+ 
+ static RefPtr<SimplifiedTextureDataOGL> sSimplifiedTextureDataOGL;
+ static Mutex sSimplifiedTextureDataOGLMutex("SimplifiedTextureDataOGL mutex");
+ 
+ // 2x2 small texture for ogl rendering.
++// Use this small texture to address gpu fillrate bottleneck
+ class SimplifiedTextureDataOGL : public RefCounted<SimplifiedTextureDataOGL>
+ {
+ public:
+   static SimplifiedTextureDataOGL* GetSingleton(void);
+ 
+   SimplifiedTextureDataOGL();
+   virtual ~SimplifiedTextureDataOGL();
+ 
+   static void StartListenPerf(void);
+ 
+   bool IsEnable(void);
+ 
+   // Set 2x2 small texture to gl texture unit.
+   void BindTexture(GLContext *gl_context,GLenum texture_unit);
+ 
+ private:
++  static int SimpleTexturePrefCallback(const char *preference_name,void *);
++
+   bool Init(GLContext *gl_context);
+ 
+-  static int SimpleTexturePrefCallback(const char *preference_name,void *);
++  void StartListenPerfInternal(void);
+ 
+   GLuint mTexture;
+ 
+   bool mInit;
+   bool mEnableSimplifiedTexture;
+ 
+   static const char *mPrefName;
+ };
+@@ -399,17 +402,19 @@ bool
+ CompositorOGL::Initialize()
+ {
+   ScopedGfxFeatureReporter reporter("GL Layers", true);
+ 
+   // Do not allow double initialization
+   NS_ABORT_IF_FALSE(mGLContext == nullptr, "Don't reinitialize CompositorOGL");
+ 
+ #if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+-  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(SimplifiedTextureDataOGL::StartListenPerf));
++  //XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(SimplifiedTextureDataOGL::StartListenPerf));
++  //SimplifiedTextureDataOGL::GetSingleton()->StartListenPerf();
++  SimplifiedTextureDataOGL::StartListenPerf();
+ #endif
+ 
+   mGLContext = CreateContext();
+ 
+ #ifdef MOZ_WIDGET_ANDROID
+   if (!mGLContext)
+     NS_RUNTIMEABORT("We need a context on Android");
+ #endif
+@@ -1639,104 +1644,125 @@ CompositorOGL::BindAndDrawQuad(ShaderPro
+   NS_ASSERTION(aProg->HasInitialized(), "Shader program not correctly initialized");
+   BindAndDrawQuad(aProg->AttribLocation(ShaderProgramOGL::VertexCoordAttrib),
+                   aProg->AttribLocation(ShaderProgramOGL::TexCoordAttrib),
+                   aFlipped);
+ }
+ 
+ #if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ 
+-const char* SimplifiedTextureDataOGL::mPrefName="debug.small_texture";
++const char* SimplifiedTextureDataOGL::mPrefName = "debug.small_texture";
+ 
+-SimplifiedTextureDataOGL* SimplifiedTextureDataOGL::GetSingleton(void)
++/* static */ SimplifiedTextureDataOGL*
++SimplifiedTextureDataOGL::GetSingleton(void)
+ {
+   {
+     MutexAutoLock texture_mutex(sSimplifiedTextureDataOGLMutex);
+ 
+-    if(!sSimplifiedTextureDataOGL){
+-      sSimplifiedTextureDataOGL=new SimplifiedTextureDataOGL();
++    if (!sSimplifiedTextureDataOGL) {
++      sSimplifiedTextureDataOGL = new SimplifiedTextureDataOGL();
+     }
+   }
+ 
+   MOZ_ASSERT(sSimplifiedTextureDataOGL);
+ 
+   return sSimplifiedTextureDataOGL.get();
+ }
+ 
+-void SimplifiedTextureDataOGL::StartListenPerf(void)
++void
++SimplifiedTextureDataOGL::StartListenPerfInternal(void)
+ {
+-  printf_stderr("bignose trigger SimplifiedTextureDataOGL::StartListenPerf() at thread:%d",gettid());
++  printf_stderr("bignose trigger SimplifiedTextureDataOGL::StartListenPerfInternal() at thread:%d", gettid());
+ 
+-  if(Preferences::HasUserValue(SimplifiedTextureDataOGL::mPrefName)){
++  if (Preferences::HasUserValue(SimplifiedTextureDataOGL::mPrefName)) {
+     Preferences::ClearUser(SimplifiedTextureDataOGL::mPrefName);
+   }
+ 
+-  Preferences::RegisterCallback(SimplifiedTextureDataOGL::SimpleTexturePrefCallback,SimplifiedTextureDataOGL::mPrefName,nullptr);
++  Preferences::RegisterCallback(SimplifiedTextureDataOGL::SimpleTexturePrefCallback,
++      SimplifiedTextureDataOGL::mPrefName, nullptr);
+ 
+   printf_stderr("bignose trigger SimplifiedTextureDataOGL::StartListenPerf() register callback");
+ }
+ 
+-int SimplifiedTextureDataOGL::SimpleTexturePrefCallback(const char *preference_name,void *)
++void
++SimplifiedTextureDataOGL::StartListenPerf(void)
+ {
+-  SimplifiedTextureDataOGL::GetSingleton()->mEnableSimplifiedTexture=Preferences::GetBool(SimplifiedTextureDataOGL::mPrefName,false);
++//  nsCOMPtr<nsIRunnable> event = NS_NewRunnableMethod(this, &SimplifiedTextureDataOGL::StartListenPerfInternal);
++//
++//  NS_DispatchToMainThread(event);
++
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableFunction(SimplifiedTextureDataOGL::StartListenPerfInternal));
++}
++
++int
++SimplifiedTextureDataOGL::SimpleTexturePrefCallback(const char *preference_name, void *)
++{
++  SimplifiedTextureDataOGL::GetSingleton()->mEnableSimplifiedTexture =
++      Preferences::GetBool(SimplifiedTextureDataOGL::mPrefName, false);
+ 
+   return 0;
+ }
+ 
+ SimplifiedTextureDataOGL::SimplifiedTextureDataOGL()
+-  :mTexture(0),mInit(false),mEnableSimplifiedTexture(false)
++  : mTexture(0)
++  , mInit(false)
++  , mEnableSimplifiedTexture(false)
+ {
+ 
+ }
+ 
+ SimplifiedTextureDataOGL::~SimplifiedTextureDataOGL()
+ {
+ 
+ }
+ 
+-bool SimplifiedTextureDataOGL::IsEnable(void)
++bool
++SimplifiedTextureDataOGL::IsEnable(void)
+ {
+   return mEnableSimplifiedTexture;
+ }
+ 
+-bool SimplifiedTextureDataOGL::Init(GLContext *gl_context)
++bool
++SimplifiedTextureDataOGL::Init(GLContext *gl_context)
+ {
+-  if(mInit){
++  if (mInit) {
+     return true;
+   }
+ 
+-  unsigned int color_pixel_2x2[4]={
++  unsigned int color_pixel_2x2[4] = {
+       0xFFFF0000,
+       0xFF00FF00,
+       0xFF0000FF,
+       0xFFFFFFFF,
+   };
+ 
+-  gl_context->fGenTextures(1,&mTexture);
++  gl_context->fGenTextures(1, &mTexture);
+ 
+-  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D,mTexture);
+-  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_MIN_FILTER,LOCAL_GL_LINEAR);
+-  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_MAG_FILTER,LOCAL_GL_LINEAR);
+-  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_WRAP_S,LOCAL_GL_CLAMP_TO_EDGE);
+-  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D,LOCAL_GL_TEXTURE_WRAP_T,LOCAL_GL_CLAMP_TO_EDGE);
++  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D, mTexture);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MIN_FILTER, LOCAL_GL_LINEAR);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MAG_FILTER, LOCAL_GL_LINEAR);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_WRAP_S, LOCAL_GL_CLAMP_TO_EDGE);
++  gl_context->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_WRAP_T, LOCAL_GL_CLAMP_TO_EDGE);
+ 
+-  gl_context->fTexImage2D(LOCAL_GL_TEXTURE_2D,0,LOCAL_GL_RGBA,2,2,0,LOCAL_GL_RGBA,LOCAL_GL_UNSIGNED_BYTE,color_pixel_2x2);
++  gl_context->fTexImage2D(LOCAL_GL_TEXTURE_2D, 0, LOCAL_GL_RGBA, 2, 2, 0,
++      LOCAL_GL_RGBA, LOCAL_GL_UNSIGNED_BYTE, color_pixel_2x2);
+ 
+-  mInit=true;
++  mInit = true;
+ 
+   return true;
+ }
+ 
+-void SimplifiedTextureDataOGL::BindTexture(GLContext *gl_context,GLenum texture_unit)
++void
++SimplifiedTextureDataOGL::BindTexture(GLContext *gl_context, GLenum texture_unit)
+ {
+-  if(!mInit){
+-    if(Init(gl_context)){
++  if (!mInit) {
++    if (Init(gl_context)) {
+       return;
+     }
+   }
+ 
+   gl_context->fActiveTexture(texture_unit);
+-  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D,mTexture);
++  gl_context->fBindTexture(LOCAL_GL_TEXTURE_2D, mTexture);
+ }
+ #endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
+ 
+ } /* layers */
+ } /* mozilla */
+diff --git a/modules/libpref/src/Preferences.cpp b/modules/libpref/src/Preferences.cpp
+--- a/modules/libpref/src/Preferences.cpp
++++ b/modules/libpref/src/Preferences.cpp
+@@ -390,16 +390,17 @@ Preferences::GetInstanceForService()
+   NS_ADDREF(sPreferences);
+   return sPreferences;
+ }
+ 
+ // static
+ bool
+ Preferences::InitStaticMembers()
+ {
++  printf_stderr("bignose InitStaticMembers thread=%d",gettid());
+   if (!sShutdown && !sPreferences) {
+     nsCOMPtr<nsIPrefService> prefService =
+       do_GetService(NS_PREFSERVICE_CONTRACTID);
+   }
+ 
+   return sPreferences != nullptr;
+ }
+ 
+@@ -1591,16 +1592,17 @@ Preferences::RemoveObservers(nsIObserver
+ }
+ 
+ // static
+ nsresult
+ Preferences::RegisterCallback(PrefChangedFunc aCallback,
+                               const char* aPref,
+                               void* aClosure)
+ {
++  printf_stderr("bignose Preferences::RegisterCallback thread=%d",gettid());
+   NS_ENSURE_TRUE(InitStaticMembers(), NS_ERROR_NOT_AVAILABLE);
+ 
+   ValueObserverHashKey hashKey(aPref, aCallback);
+   nsRefPtr<ValueObserver> observer;
+   gObserverTable->Get(&hashKey, getter_AddRefs(observer));
+   if (observer) {
+     observer->AppendClosure(aClosure);
+     return NS_OK;

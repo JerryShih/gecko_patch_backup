@@ -1,0 +1,397 @@
+# HG changeset patch
+# Parent 995f4124ac8567e6f2d546b0987d5c8f0befb1b3
+# User Jerry Shih <hshih@mozilla.com>
+test message loop io
+* * *
+test message io for reading debug option
+* * *
+temp for message io
+* * *
+test message io
+
+diff --git a/gfx/layers/CompositorDebug.h b/gfx/layers/CompositorDebug.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/CompositorDebug.h
+@@ -0,0 +1,14 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef CompositorDebug_h
++#define CompositorDebug_h
++
++// Enable this option to turn on mobile device compositor testing support for
++//    1) force schedule composition even without layer transaction update
++//    2) force gl compositor
++//    3) force gl compositor uses 2x2 tiny texture for all composition
++#define COMPOSITOR_PERFORMANCE_DEBUG
++
++#endif  //CompositorDebug_h
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -46,16 +46,32 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++
++#include "CompositorDebug.h"  //compositor debug option
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++#include "mozilla/Preferences.h"
++#include "mozilla/Mutex.h"
++#include "nsDirectoryServiceDefs.h"
++#include "nsDirectoryServiceUtils.h"
++
++#ifdef XP_LINUX
++#include <fcntl.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#endif
++#endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -63,30 +79,68 @@ namespace layers {
+ CompositorParent::LayerTreeState::LayerTreeState()
+   : mParent(nullptr)
+ {
+ }
+ 
+ typedef map<uint64_t, CompositorParent::LayerTreeState> LayerTreeMap;
+ static LayerTreeMap sIndirectLayerTrees;
+ 
++typedef map<uint64_t,CompositorParent*> CompositorMap;
++static CompositorMap* sCompositorMap;
++
+ // FIXME/bug 774386: we're assuming that there's only one
+ // CompositorParent, but that's not always true.  This assumption only
+ // affects CrossProcessCompositorParent below.
+ static Thread* sCompositorThread = nullptr;
+ // manual reference count of the compositor thread.
+ static int sCompositorThreadRefCount = 0;
+ static MessageLoop* sMainLoop = nullptr;
+ // When ContentParent::StartUp() is called, we use the Thread global.
+ // When StartUpWithExistingThread() is used, we have to use the two
+ // duplicated globals, because there's no API to make a Thread from an
+ // existing thread.
+ static PlatformThreadId sCompositorThreadID = 0;
+ static MessageLoop* sCompositorLoop = nullptr;
+ 
++//compositor debug prop watcher
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
++class CompositorDebugPropWatcher;
++
++static RefPtr<CompositorDebugPropWatcher> sCompositorDebugPropWatcher;
++static Mutex sCompositorDebugWatcherMutex("CompositorDebugPropWatcher mutex");
++
++class CompositorDebugPropWatcher : public MessageLoopForIO::Watcher, public RefCounted<CompositorDebugPropWatcher>
++{
++public:
++  static CompositorDebugPropWatcher *GetSingleton(void);
++
++  static bool IsInCompositorDebugPropWatcherThread(void);
++
++  CompositorDebugPropWatcher();
++  virtual ~CompositorDebugPropWatcher();
++
++  //Called when you can read() from the fd without blocking.  Note that this
++  //function is also called when you're at eof (read() returns 0 in this case).
++  void OnFileCanReadWithoutBlocking(int aFd);
++  void OnFileCanWriteWithoutBlocking(int aFd);
++
++  void StartWatching(void);
++  void StopWatching(void);
++
++private:
++  int OpenFD(void);
++
++  MessageLoopForIO::FileDescriptorWatcher mReadWatcher;
++  int mFD;
++};
++#endif //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
++
+ static void DeferredDeleteCompositorParent(CompositorParent* aNowReadyToDie)
+ {
+   aNowReadyToDie->Release();
+ }
+ 
+ static void DeleteCompositorThread()
+ {
+   if (NS_IsMainThread()){
+@@ -111,28 +165,36 @@ CompositorParent::StartUpWithExistingThr
+                                             PlatformThreadId aThreadID)
+ {
+   MOZ_ASSERT(!sCompositorThread);
+   CreateCompositorMap();
+   sCompositorLoop = aMsgLoop;
+   sCompositorThreadID = aThreadID;
+   sMainLoop = MessageLoop::current();
+   sCompositorThreadRefCount = 1;
++
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableMethod(CompositorDebugPropWatcher::GetSingleton(),&CompositorDebugPropWatcher::StartWatching));
++#endif
+ }
+ 
+ void CompositorParent::StartUp()
+ {
+   // Check if compositor started already with StartUpWithExistingThread
+   if (sCompositorThreadID) {
+     return;
+   }
+   MOZ_ASSERT(!sCompositorLoop);
+   CreateCompositorMap();
+   CreateThread();
+   sMainLoop = MessageLoop::current();
++
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++  XRE_GetIOMessageLoop()->PostTask(FROM_HERE,NewRunnableMethod(CompositorDebugPropWatcher::GetSingleton(),&CompositorDebugPropWatcher::StartWatching));
++#endif
+ }
+ 
+ void CompositorParent::ShutDown()
+ {
+   DestroyThread();
+   DestroyCompositorMap();
+ }
+ 
+@@ -702,20 +764,16 @@ CompositorParent::AllocPLayerTransaction
+ 
+ bool
+ CompositorParent::DeallocPLayerTransactionParent(PLayerTransactionParent* actor)
+ {
+   delete actor;
+   return true;
+ }
+ 
+-
+-typedef map<uint64_t,CompositorParent*> CompositorMap;
+-static CompositorMap* sCompositorMap;
+-
+ void CompositorParent::CreateCompositorMap()
+ {
+   if (sCompositorMap == nullptr) {
+     sCompositorMap = new CompositorMap;
+   }
+ }
+ 
+ void CompositorParent::DestroyCompositorMap()
+@@ -1070,11 +1128,203 @@ CrossProcessCompositorParent::CloneTople
+         CompositorParent::Create(transport, base::GetProcId(aPeerProcess));
+       compositor->CloneManagees(this, aCtx);
+       compositor->IToplevelProtocol::SetTransport(transport);
+       return compositor;
+     }
+   }
+   return nullptr;
+ }
++ 
++#if defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++CompositorDebugPropWatcher::CompositorDebugPropWatcher()
++  :mFD(-1)
++{
++
++}
++
++CompositorDebugPropWatcher::~CompositorDebugPropWatcher()
++{
++
++}
++
++bool CompositorDebugPropWatcher::IsInCompositorDebugPropWatcherThread(void)
++{
++  if(XRE_GetIOMessageLoop() == MessageLoopForIO::current()){
++    return true;
++  }
++  return false;
++}
++
++CompositorDebugPropWatcher* CompositorDebugPropWatcher::GetSingleton(void)
++{
++  {
++    MutexAutoUnlock watcher_mutex(sCompositorDebugWatcherMutex);
++
++    if(!sCompositorDebugPropWatcher){
++      sCompositorDebugPropWatcher=new CompositorDebugPropWatcher();
++    }
++  }
++
++  MOZ_ASSERT(sCompositorDebugPropWatcher);
++
++  return sCompositorDebugPropWatcher.get();
++}
++
++void CompositorDebugPropWatcher::OnFileCanReadWithoutBlocking(int aFd)
++{
++  if(!CompositorDebugPropWatcher::IsInCompositorDebugPropWatcherThread()){
++    printf_stderr("bignose CompositorDebugPropWatcher::OnFileCanReadWithoutBlocking() thread error, tid=%d",gettid());
++    return;
++  }
++
++  char buf[1024];
++  int nread;
++  do {
++    // sizeof(buf) - 1 to leave space for the null-terminator.
++    nread = read(aFd, buf, sizeof(buf));
++  } while(nread == -1 && errno == EINTR);
++
++  if (nread == -1) {
++    // We want to avoid getting into a situation where
++    // OnFileCanReadWithoutBlocking is called in an infinite loop, so when
++    // something goes wrong, stop watching the fifo altogether.
++    printf_stderr("bignose fifo_watcher::read fifo failed, errno=%d", errno);
++    StopWatching();
++
++    return;
++  }
++
++  if (nread == 0) {
++    // If we get EOF, that means that the other side closed the fifo.  We need
++    // to close and re-open the fifo; if we don't,
++    // OnFileCanWriteWithoutBlocking will be called in an infinite loop.
++    StopWatching();
++    StartWatching();
++
++    return;
++  }
++
++  nsAutoCString inputStr;
++  inputStr.Append(buf, nread);
++
++  // Trimming whitespace is important because if you do
++  //   |echo "foo" >> debug_info_trigger|,
++  // it'll actually write "foo\n" to the fifo.
++  inputStr.Trim("\b\t\r\n");
++
++  printf_stderr("bignose fifo_watcher::get command:%s",inputStr.get());
++
++  if(inputStr==NS_LITERAL_CSTRING("debug.force_update 1")){
++    Preferences::SetBool("debug.force_update",true);
++  }
++  else if(inputStr==NS_LITERAL_CSTRING("debug.force_update 0")){
++    Preferences::SetBool("debug.force_update",false);
++  }
++  else if(inputStr==NS_LITERAL_CSTRING("debug.small_texture 1")){
++    Preferences::SetBool("debug.small_texture",true);
++  }
++  else if(inputStr==NS_LITERAL_CSTRING("debug.small_texture 0")){
++    Preferences::SetBool("debug.small_texture",false);
++  }
++  else if(inputStr==NS_LITERAL_CSTRING("debug.force_hwc 1")){
++    Preferences::SetBool("debug.force_hwc",true);
++  }
++  else if(inputStr==NS_LITERAL_CSTRING("debug.force_hwc 0")){
++    Preferences::SetBool("debug.force_hwc",false);
++  }
++}
++
++void CompositorDebugPropWatcher::OnFileCanWriteWithoutBlocking(int aFd)
++{
++
++}
++
++void CompositorDebugPropWatcher::StartWatching(void)
++{
++  if(!CompositorDebugPropWatcher::IsInCompositorDebugPropWatcherThread()){
++    printf_stderr("bignose CompositorDebugPropWatcher::StartWatching() thread error, tid=%d",gettid());
++    return;
++  }
++
++  mFD=OpenFD();
++  if(mFD==-1){
++    printf_stderr("bignose fifo_watcher::open fd failed");
++
++    return;
++  }
++
++  MessageLoopForIO::current()->WatchFileDescriptor(mFD,true,MessageLoopForIO::WATCH_READ,&mReadWatcher,this);
++}
++
++void CompositorDebugPropWatcher::StopWatching(void)
++{
++  if(!CompositorDebugPropWatcher::IsInCompositorDebugPropWatcherThread()){
++    printf_stderr("bignose CompositorDebugPropWatcher::StopWatching() thread error, tid=%d",gettid());
++    return;
++  }
++
++  mReadWatcher.StopWatchingFileDescriptor();
++  if(mFD!=-1){
++    close(mFD);
++    mFD=-1;
++  }
++}
++
++int CompositorDebugPropWatcher::OpenFD(void)
++{
++  //put fifo at /data/local/tmp/gfx_debug
++  nsCOMPtr<nsIFile> file;
++  nsAutoCString path;
++  nsresult rv;
++
++  rv=NS_GetSpecialDirectory(NS_OS_TEMP_DIR,getter_AddRefs(file));
++  NS_ENSURE_SUCCESS(rv,-1);
++
++  rv=file->AppendNative(NS_LITERAL_CSTRING("gfx_debug"));
++  NS_ENSURE_SUCCESS(rv,-1);
++
++  rv=file->GetNativePath(path);
++  NS_ENSURE_SUCCESS(rv,-1);
++
++  //we don't care about unlink failed
++  unlink(path.get());
++
++  if(mkfifo(path.get(),0766)){
++    printf_stderr("bignose fifo_watcher::mkfifo failed; errno=%d", errno);
++    return -1;
++  }
++
++#ifdef ANDROID
++  // Android runs with a umask, so we need to chmod our fifo to make it
++  // world-writable.
++  chmod(path.get(),0666);
++#endif
++
++  int fd;
++  do{
++    // The fifo will block until someone else has written to it.  In
++    // particular, open() will block until someone else has opened it for
++    // writing!  We want open() to succeed and read() to block, so we open
++    // with NONBLOCK and then fcntl that away.
++    fd=open(path.get(),O_RDONLY|O_NONBLOCK);
++  } while(fd==-1 && errno==EINTR);
++
++  if(fd==-1) {
++    printf_stderr("bignose fifo_watcher::open fifo failed; errno=%d", errno);
++    return -1;
++  }
++
++  // Make fd blocking now that we've opened it.
++  if(fcntl(fd,F_SETFL,0)){
++    printf_stderr("bignose fifo_watcher::changing fifo to block failed; errno=%d", errno);
++
++    close(fd);
++    return -1;
++  }
++
++  return fd;
++}
++#endif  //defined(MOZ_WIDGET_GONK) && defined(COMPOSITOR_PERFORMANCE_DEBUG)
++
+ 
+ } // namespace layers
+ } // namespace mozilla

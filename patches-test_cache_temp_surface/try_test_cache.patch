@@ -1,0 +1,6 @@
+# HG changeset patch
+# Parent 3111204e4005fe28dacab8b0ef7502db82e44c00
+# User Jerry Shih <hshih@mozilla.com>
+try: -b o -p emulator,emulator-jb,linux_gecko -u reftest,crashtest,crashtest-1,crashtest-2,crashtest-3,reftest-1,reftest-2,reftest-3,reftest-4,reftest-5,reftest-6,reftest-7,reftest-8,reftest-9,reftest-10,marionette-webapi,gaia-unit,gaia-ui-test -t none
+
+

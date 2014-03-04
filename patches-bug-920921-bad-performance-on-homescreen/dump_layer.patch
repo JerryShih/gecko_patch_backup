@@ -1,0 +1,79 @@
+# HG changeset patch
+# Parent bf81fb2a9da60d4f7a245f398bd6caa31d39a650
+# User Jerry Shih <hshih@mozilla.com>
+dump layer prop
+
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -6,17 +6,17 @@
+ #ifndef GFX_LAYERSTYPES_H
+ #define GFX_LAYERSTYPES_H
+ 
+ #include <stdint.h>                     // for uint32_t
+ #include "nsPoint.h"                    // for nsIntPoint
+ 
+ // Debugging define.
+ // To dump a layer tree call LayerManager::Dump()
+-// #define MOZ_LAYERS_HAVE_LOG
++#define MOZ_LAYERS_HAVE_LOG
+ 
+ #ifdef MOZ_WIDGET_GONK
+ #include <ui/GraphicBuffer.h>
+ #endif
+ #if defined(DEBUG) || defined(PR_LOGGING)
+ #  include <stdio.h>            // FILE
+ #  include "prlog.h"            // for PR_LOG
+ #  ifndef MOZ_LAYERS_HAVE_LOG
+diff --git a/gfx/layers/client/ClientLayerManager.cpp b/gfx/layers/client/ClientLayerManager.cpp
+--- a/gfx/layers/client/ClientLayerManager.cpp
++++ b/gfx/layers/client/ClientLayerManager.cpp
+@@ -217,16 +217,18 @@ ClientLayerManager::EndTransaction(DrawT
+   } else {
+     MakeSnapshotIfRequired();
+   }
+ }
+ 
+ bool
+ ClientLayerManager::EndEmptyTransaction(EndTransactionFlags aFlags)
+ {
++  printf_stderr("bignose ClientLayerManager::EndEmptyTransaction(), tid=%d",gettid());
++
+   mInTransaction = false;
+ 
+   if (!mRoot) {
+     return false;
+   }
+   if (!EndTransactionInternal(nullptr, nullptr, aFlags)) {
+     // Return without calling ForwardTransaction. This leaves the
+     // ShadowLayerForwarder transaction open; the following
+diff --git a/layout/base/nsPresShell.cpp b/layout/base/nsPresShell.cpp
+--- a/layout/base/nsPresShell.cpp
++++ b/layout/base/nsPresShell.cpp
+@@ -5589,22 +5589,26 @@ PresShell::Paint(nsView*        aViewToP
+   if (frame && isRetainingManager) {
+     // Try to do an empty transaction, if the frame tree does not
+     // need to be updated. Do not try to do an empty transaction on
+     // a non-retained layer manager (like the BasicLayerManager that
+     // draws the window title bar on Mac), because a) it won't work
+     // and b) below we don't want to clear NS_FRAME_UPDATE_LAYER_TREE,
+     // that will cause us to forget to update the real layer manager!
+     if (!(aFlags & PAINT_LAYERS)) {
++      printf_stderr("bignose PresShell::Paint(), !(aFlags & PAINT_LAYERS), flag=%d,tid=%d",aFlags,gettid());
++
+       layerManager->BeginTransaction();
+       if (layerManager->EndEmptyTransaction()) {
+         return;
+       }
+       NS_WARNING("Must complete empty transaction when compositing!");
+     } else {
++      printf_stderr("bignose PresShell::Paint(), (aFlags & PAINT_LAYERS), flag=%d,tid=%d",aFlags,gettid());
++
+       layerManager->BeginTransaction();
+     }
+ 
+     if (!(frame->GetStateBits() & NS_FRAME_UPDATE_LAYER_TREE)) {
+       NotifySubDocInvalidationFunc computeInvalidFunc =
+         presContext->MayHavePaintEventListenerInSubDocument() ? nsPresContext::NotifySubDocInvalidation : 0;
+       bool computeInvalidRect = computeInvalidFunc ||
+                                 (layerManager->GetBackendType() == LAYERS_BASIC);

@@ -1,0 +1,6 @@
+# HG changeset patch
+# Parent 2809b7a9fadab0676b67b12e3a4d833812f945a3
+# User Jerry Shih <hshih@mozilla.com>
+try: -b o -p all -u reftest -t none
+
+
