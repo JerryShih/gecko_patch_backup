@@ -1,0 +1,113 @@
+# HG changeset patch
+# Parent ebbbe2d192a4d91971afa9f67aa42383ded094fb
+# User Jerry Shih <hshih@mozilla.com>
+Bug 961963 - [Nexus 5] [gonk-kk] Black screen when scrolling the screen in the apps
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -687,17 +687,17 @@ pref("hal.processPriorityManager.gonk.no
+ // We wait this long before polling the memory-pressure fd after seeing one
+ // memory pressure event.  (When we're not under memory pressure, we sit
+ // blocked on a poll(), and this pref has no effect.)
+ pref("gonk.systemMemoryPressureRecoveryPollMS", 5000);
+ 
+ #ifndef DEBUG
+ // Enable pre-launching content processes for improved startup time
+ // (hiding latency).
+-pref("dom.ipc.processPrelaunch.enabled", true);
++pref("dom.ipc.processPrelaunch.enabled", false);
+ // Wait this long before pre-launching a new subprocess.
+ pref("dom.ipc.processPrelaunch.delayMs", 5000);
+ #endif
+ 
+ // When a process receives a system message, we hold a CPU wake lock on its
+ // behalf for this many seconds, or until it handles the system message,
+ // whichever comes first.
+ pref("dom.ipc.systemMessageCPULockTimeoutSec", 30);
+diff --git a/gfx/layers/ipc/AsyncPanZoomController.cpp b/gfx/layers/ipc/AsyncPanZoomController.cpp
+--- a/gfx/layers/ipc/AsyncPanZoomController.cpp
++++ b/gfx/layers/ipc/AsyncPanZoomController.cpp
+@@ -1309,26 +1309,34 @@ void AsyncPanZoomController::ScaleWithFo
+ 
+ /**
+  * Attempts to enlarge the displayport along a single axis based on the
+  * velocity. aOffset and aLength are in/out parameters; they are initially set
+  * to the currently visible area and will be transformed to the area we should
+  * be drawing to minimize checkerboarding.
+  */
+ static void
+-EnlargeDisplayPortAlongAxis(float* aOutOffset, float* aOutLength,
++EnlargeDisplayPortAlongAxis(const CSSToLayoutDeviceScale &aDevPixelsPerCSSPixel,
++                            float* aOutOffset, float* aOutLength,
+                             double aEstimatedPaintDurationMillis, float aVelocity,
+                             float aStationarySizeMultiplier, float aSkateSizeMultiplier)
+ {
++  const float MAX_CSS_PIXEL_SIZE = std::floor(4096.0f / aDevPixelsPerCSSPixel.scale);
++
+   // Scale up the length using the appropriate multiplier and center the
+   // displayport around the visible area.
+   float multiplier = (fabsf(aVelocity) < gMinSkateSpeed
+                         ? aStationarySizeMultiplier
+                         : aSkateSizeMultiplier);
+   float newLength = (*aOutLength) * multiplier;
++  // Limit the maximum display port size
++  if (newLength > MAX_CSS_PIXEL_SIZE) {
++    newLength = MAX_CSS_PIXEL_SIZE;
++  }
++
+   *aOutOffset -= (newLength - (*aOutLength)) / 2;
+   *aOutLength = newLength;
+ 
+   // Project the displayport out based on the estimated time it will take to paint,
+   // if the gUsePaintDuration flag is set. If not, just use a constant 50ms paint
+   // time. Setting the gVelocityBias pref appropriately can cancel this out if so
+   // desired.
+   double paintFactor = (gUsePaintDuration ? aEstimatedPaintDurationMillis : 50.0);
+@@ -1380,20 +1388,22 @@ const CSSRect AsyncPanZoomController::Ca
+   }
+   if (aFrameMetrics.GetDisableScrollingY()) {
+     velocity.y = 0;
+   }
+ 
+   // Enlarge the displayport along both axes depending on how fast we're moving
+   // on that axis and how long it takes to paint. Apply some heuristics to try
+   // to minimize checkerboarding.
+-  EnlargeDisplayPortAlongAxis(&(displayPort.x), &(displayPort.width),
++  EnlargeDisplayPortAlongAxis(aFrameMetrics.mDevPixelsPerCSSPixel,
++    &(displayPort.x), &(displayPort.width),
+     estimatedPaintDurationMillis, velocity.x,
+     gXStationarySizeMultiplier, xSkateSizeMultiplier);
+-  EnlargeDisplayPortAlongAxis(&(displayPort.y), &(displayPort.height),
++  EnlargeDisplayPortAlongAxis(aFrameMetrics.mDevPixelsPerCSSPixel,
++    &(displayPort.y), &(displayPort.height),
+     estimatedPaintDurationMillis, velocity.y,
+     gYStationarySizeMultiplier, ySkateSizeMultiplier);
+ 
+   displayPort = displayPort.ForceInside(scrollableRect) - scrollOffset;
+ 
+   APZC_LOG_FM(aFrameMetrics,
+     "Calculated displayport as (%f %f %f %f) from velocity (%f %f) paint time %f metrics",
+     displayPort.x, displayPort.y, displayPort.width, displayPort.height,
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -291,17 +291,17 @@ GrallocBufferActor::Create(const gfx::In
+     return actor;
+   }
+ 
+   // If the requested size is too big (i.e. exceeds the commonly used max GL texture size)
+   // then we risk OOMing the parent process. It's better to just deny the allocation and
+   // kill the child process, which is what the following code does.
+   // TODO: actually use GL_MAX_TEXTURE_SIZE instead of hardcoding 4096
+   if (aSize.width > 4096 || aSize.height > 4096) {
+-    printf_stderr("GrallocBufferActor::Create -- requested gralloc buffer is too big. Killing child instead.");
++    printf_stderr("bignose GrallocBufferActor::Create -- requested gralloc buffer is too big:(%d,%d). Killing child instead.",aSize.width,aSize.height);
+     delete actor;
+     return nullptr;
+   }
+ 
+   sp<GraphicBuffer> buffer(new GraphicBuffer(aSize.width, aSize.height, format, usage));
+   if (buffer->initCheck() != OK)
+     return actor;
+ 

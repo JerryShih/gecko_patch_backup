@@ -1,0 +1,156 @@
+# HG changeset patch
+# Parent 67485526e241bb70f4eab24f1936356469c6130e
+# User Jerry Shih <hshih@mozilla.com>
+modify gfx build option to -O0
+
+diff --git a/content/media/Makefile.in b/content/media/Makefile.in
+--- a/content/media/Makefile.in
++++ b/content/media/Makefile.in
+@@ -1,8 +1,11 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ CFLAGS   += $(GSTREAMER_CFLAGS)
+ CXXFLAGS += $(GSTREAMER_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -10,8 +10,11 @@ endif
+ include $(topsrcdir)/config/rules.mk
+ 
+ # Due to bug 796023, we can't have -DUNICODE and -D_UNICODE; defining those
+ # macros changes the type of LOGFONT to LOGFONTW instead of LOGFONTA. This
+ # changes the symbol names of exported C++ functions that use LOGFONT.
+ DEFINES := $(filter-out -DUNICODE -D_UNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -7,8 +7,11 @@ include $(topsrcdir)/config/rules.mk
+ ifeq ($(MOZ_WIDGET_TOOLKIT),gonk)
+ CXXFLAGS += -I$(ANDROID_SOURCE)/hardware/libhardware/include
+ endif
+ 
+ DEFINES := $(filter-out -DUNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -9,10 +9,13 @@ CXXFLAGS += \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright/openmax \
+         -I$(ANDROID_SOURCE)/frameworks/av/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/native/include/media/openmax \
+         $(NULL)
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
++
+ PremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
+diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
+--- a/gfx/src/Makefile.in
++++ b/gfx/src/Makefile.in
+@@ -9,8 +9,11 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFL
+ 
+ ifdef MOZ_WIDGET_GTK
+ CXXFLAGS += $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(MOZ_QT_CFLAGS)
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -26,8 +26,11 @@ CXXFLAGS += $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(CAIRO_FT_CFLAGS) $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ DeprecatedPremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/ipc/chromium/Makefile.in b/ipc/chromium/Makefile.in
+--- a/ipc/chromium/Makefile.in
++++ b/ipc/chromium/Makefile.in
+@@ -31,8 +31,11 @@ ifdef MOZ_NATIVE_LIBEVENT # {
+ export-preqs = \
+   $(call mkdir_deps,$(CURDIR)/third_party/libevent) \
+   $(NULL)
+ 
+ export:: $(export-preqs)
+ 	echo '#include <event.h>' > $(CURDIR)/third_party/libevent/event.h
+ 
+ endif # }
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/modules/libpref/src/Makefile.in b/modules/libpref/src/Makefile.in
+--- a/modules/libpref/src/Makefile.in
++++ b/modules/libpref/src/Makefile.in
+@@ -26,8 +26,11 @@ grepref_files += $(topsrcdir)/mobile/and
+ endif
+ endif
+ 
+ greprefs.js: $(grepref_files)
+ 	$(call py_action,preprocessor,$(PREF_PPFLAGS) $(DEFINES) $(ACDEFINES) $(XULPPFLAGS) $^ -o $@)
+ 
+ libs:: greprefs.js
+ 	$(INSTALL) $^ $(DIST)/bin/
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/widget/gonk/Makefile.in b/widget/gonk/Makefile.in
+--- a/widget/gonk/Makefile.in
++++ b/widget/gonk/Makefile.in
+@@ -15,8 +15,10 @@
+ include $(topsrcdir)/config/rules.mk
+ 
+ CXXFLAGS += \
+ 	-I$(ANDROID_SOURCE)/hardware/libhardware/include \
+ 	-I$(ANDROID_SOURCE)/hardware/libhardware_legacy/include \
+ 	-I$(ANDROID_SOURCE)/frameworks/native/opengl/include \
+ 	$(NULL)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/xpcom/base/Makefile.in b/xpcom/base/Makefile.in
+--- a/xpcom/base/Makefile.in
++++ b/xpcom/base/Makefile.in
+@@ -26,8 +26,11 @@ ErrorListCxxDefines.h: ErrorList.h Makef
+ 
+ ErrorListCDefines.h: ErrorList.h Makefile
+ 		sed 's/.*ERROR(\([A-Z_0-9]*\),\( *\)\(.*\))[^)]*/#define \1 \2((nsresult)(\3))/' < $< > $@
+ 
+ GARBAGE += \
+ 	ErrorListCxxDefines.h \
+ 	ErrorListCDefines.h \
+ 	$(NULL)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++

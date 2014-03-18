@@ -1,0 +1,663 @@
+# HG changeset patch
+# Parent 0673a6b3609025e5670853ccf9a3bb90db40c036
+# User Jerry Shih <hshih@mozilla.com>
+vincent patch
+
+
+diff --git a/gfx/layers/composite/TextureHost.cpp b/gfx/layers/composite/TextureHost.cpp
+--- a/gfx/layers/composite/TextureHost.cpp
++++ b/gfx/layers/composite/TextureHost.cpp
+@@ -763,23 +763,26 @@ TextureParent::ActorDestroy(ActorDestroy
+     return;
+   }
+ 
+   switch (why) {
+   case AncestorDeletion:
+   case Deletion:
+   case NormalShutdown:
+   case AbnormalShutdown:
++    printf_stderr("bignose TextureParent::ActorDestroy, reason:%d",why);
+     break;
+   case FailedConstructor:
+     NS_RUNTIMEABORT("FailedConstructor isn't possible in PTexture");
+   }
+ 
+   if (mTextureHost->GetFlags() & TEXTURE_DEALLOCATE_CLIENT) {
+     mTextureHost->ForgetSharedData();
+   }
+ 
++  printf_stderr("bignose TextureParent::ActorDestroy, delete actor");
+   mTextureHost->mActor = nullptr;
++  printf_stderr("bignose TextureParent::ActorDestroy, delete host");
+   mTextureHost = nullptr;
+ }
+ 
+ } // namespace
+ } // namespace
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -282,16 +282,18 @@ CompositorOGL::Destroy()
+     mDestroyed = true;
+     CleanupResources();
+   }
+ }
+ 
+ void
+ CompositorOGL::CleanupResources()
+ {
++  printf_stderr("bignose CompositorOGL::CleanupResources");
++
+   if (!mGLContext)
+     return;
+ 
+   nsRefPtr<GLContext> ctx = mGLContext->GetSharedContext();
+   if (!ctx) {
+     ctx = mGLContext;
+   }
+ 
+@@ -299,27 +301,29 @@ CompositorOGL::CleanupResources()
+        iter != mPrograms.end();
+        iter++) {
+     delete iter->second;
+   }
+   mPrograms.clear();
+ 
+   if (!ctx->MakeCurrent()) {
+     mQuadVBO = 0;
++    printf_stderr("bignose CompositorOGL::CleanupResources, mGLContext:%p set nullptr at line:%d",ctx.get(),__LINE__);
+     mGLContext = nullptr;
+     return;
+   }
+ 
+   ctx->fBindFramebuffer(LOCAL_GL_FRAMEBUFFER, 0);
+ 
+   if (mQuadVBO) {
+     ctx->fDeleteBuffers(1, &mQuadVBO);
+     mQuadVBO = 0;
+   }
+ 
++  printf_stderr("bignose CompositorOGL::CleanupResources, mGLContext:%p set nullptr at line:%d",mGLContext.get(),__LINE__);
+   mGLContext = nullptr;
+ }
+ 
+ bool
+ CompositorOGL::Initialize()
+ {
+   ScopedGfxFeatureReporter reporter("GL Layers", true);
+ 
+diff --git a/gfx/layers/opengl/GrallocTextureHost.cpp b/gfx/layers/opengl/GrallocTextureHost.cpp
+--- a/gfx/layers/opengl/GrallocTextureHost.cpp
++++ b/gfx/layers/opengl/GrallocTextureHost.cpp
+@@ -260,17 +260,20 @@ GrallocTextureSourceOGL::GetSize() const
+   return gfx::IntSize(mGraphicBuffer->getWidth(), mGraphicBuffer->getHeight());
+ }
+ 
+ void
+ GrallocTextureSourceOGL::DeallocateDeviceData()
+ {
+   if (mEGLImage) {
+     MOZ_ASSERT(gl());
++    printf_stderr("bignose GrallocTextureSourceOGL::DeallocateDeviceData, gl=%p",gl());
++    printf_stderr("bignose GrallocTextureSourceOGL::DeallocateDeviceData, gl()->MakeCurrent()");
+     gl()->MakeCurrent();
++    printf_stderr("bignose GrallocTextureSourceOGL::DeallocateDeviceData, EGLImageDestroy(gl(), mEGLImage)");
+     EGLImageDestroy(gl(), mEGLImage);
+     mEGLImage = EGL_NO_IMAGE;
+   }
+ }
+ 
+ GrallocTextureHostOGL::GrallocTextureHostOGL(TextureFlags aFlags,
+                                              const NewSurfaceDescriptorGralloc& aDescriptor)
+   : TextureHost(aFlags)
+diff --git a/layout/reftests/reftest-sanity/reftest.list b/layout/reftests/reftest-sanity/reftest.list
+--- a/layout/reftests/reftest-sanity/reftest.list
++++ b/layout/reftests/reftest-sanity/reftest.list
+@@ -11,153 +11,8 @@ skip-if(B2G) == test-async.html test-asy
+ 
+ # make sure we don't fall over if the root is missing
+ == no-root.html about:blank
+ 
+ # Makes sure that the file: protocol handler and HTTP server both
+ # choose HTML vs. XHTML processing based on the file extensions.
+ != html-vs-xhtml-by-extension.html html-vs-xhtml-by-extension.xhtml
+ HTTP != html-vs-xhtml-by-extension.html html-vs-xhtml-by-extension.xhtml
+-
+-# make sure red and green colors are not the default and are different from
+-# each other
+-!= green.html default.html
+-!= green.html red.html
+-!= red.html default.html
+-
+-# Make sure about:blank works, even via HTTP.
+-== blank.html about:blank
+-== about:blank blank.html
+-HTTP == blank.html about:blank
+-HTTP == about:blank blank.html
+-# same for data:
+-== default.html data:text/html,<div>Text</div>
+-== data:text/html,<div>Text</div> default.html
+-HTTP == default.html data:text/html,<div>Text</div>
+-HTTP == data:text/html,<div>Text</div> default.html
+-!= blank.html default.html
+-HTTP != blank.html default.html
+-
+-skip-if(B2G) HTTP(..) == filter-1.xhtml filter-1-ref.xhtml
+-skip-if(B2G) HTTP(..) == filter-2.xhtml filter-2-ref.xhtml # bug 773482
+-
+-# test that the MozReftestInvalidate event fires
+-== invalidation.html about:blank
+-== zoom-invalidation.html zoom-invalidation-ref.html # bug 773482
+-
+-# test that xulRuntime.OS works
+-skip-if(B2G||B2GDT) fails-if(xulRuntime.OS!="Linux"&&!Android) == data:text/html,<body>Linux data:text/html,<script>document.write(navigator.platform.substr(0,5))</script>
+-fails-if(xulRuntime.OS!="WINNT") == data:text/html,<body>Win data:text/html,<script>document.write(navigator.platform.substr(0,3))</script>
+-fails-if(xulRuntime.OS!="Darwin") == data:text/html,<body>Mac data:text/html,<script>document.write(navigator.platform.substr(0,3))</script>
+-
+-# test parsing of asserts() expressions
+-asserts(0) load about:blank
+-asserts(0-5) load about:blank
+-asserts-if(true,0) load about:blank
+-asserts-if(false,7) load about:blank
+-asserts-if(true,0-4) load about:blank
+-asserts-if(false,6-8) load about:blank
+-
+-# test that <div> is display:block
+-== div.html div-ref.html
+-
+-# test script keyword
+-include scripttests.list
+-
+-# test url-prefix
+-include urlprefixtests.list
+-
+-# test default-preferences
+-include default-preferences-tests.list
+-
+-# test that all corners are visible
+-!= corners-1.html corners-1-ref.html
+-!= corners-2.html corners-2-ref.html
+-!= corners-3.html corners-3-ref.html
+-!= corners-4.html corners-4-ref.html
+-
+-# Test that the harness gives the correct page dimensions.
+-!= page-width-3.9in.html page-width-4in.html
+-skip-if(B2G||B2GDT) == page-width-4.1in.html page-width-4in.html   # bug 774396
+-skip-if(B2G||B2GDT) == page-width-auto.html page-width-4in.html    # bug 774396
+-skip-if(B2G||B2GDT) != page-height-2in.html page-height-2.1in.html # bug 774396
+-== page-height-2in.html page-height-nobreak.html
+-== page-height-2.1in.html page-height-forcebreak.html
+-
+-# Check that tests that need focus are skipped when it's not available
+-needs-focus load needs-focus.html
+-
+-# Bug 632636
+-fails == data:text/plain,HELLO about:blank
+-needs-focus == data:text/plain, about:blank
+-
+-# Sanity check of viewport+displayport overrides
+-random-if(!browserIsRemote) == test-displayport.html test-displayport-ref.html # bug 593168
+-skip-if(!browserIsRemote) != test-displayport-2.html test-displayport-ref.html # bug 593168
+-skip-if(!browserIsRemote) fails-if(OSX&&layersGPUAccelerated) fuzzy-if(layersOMTC,1,1390) random-if(Android&&AndroidVersion<15) random-if(B2G||B2GDT) == 647192-1.html 647192-1-ref.html
+-skip-if(!browserIsRemote) == 656041-1.html 656041-1-ref.html
+-skip-if(!browserIsRemote||layersOMTC) == test-displayport-bg.html test-displayport-ref.html # bug 694706
+-
+-# IPC Position-fixed frames/layers test
+-# Fixed layers are temporarily disabled (bug 656167).
+-#skip-if(!browserIsRemote) == test-pos-fixed.html test-pos-fixed-ref.html
+-#skip-if(!browserIsRemote) == test-bg-attachment-fixed.html test-bg-attachment-fixed-ref.html
+-skip-if(!browserIsRemote) == test-pos-fixed-transform.html test-pos-fixed-transform-ref.html
+-
+-# reftest syntax: require-or
+-require-or(unrecognizedCondition,skip) script scripttest-fail.html
+-require-or(true&&unrecognizedCondition,skip) script scripttest-fail.html
+-require-or(unrecognizedCondition&&true,skip) script scripttest-fail.html
+-require-or(unrecognizedCondition,fails) script scripttest-fail.html
+-require-or(true,fails) script scripttest-pass.html
+-require-or(true&&true,fails) script scripttest-pass.html
+-
+-# tests for pref(...) syntax in manifest, including "fails" examples with incorrect prefs
+-# a boolean pref
+-pref(gfx.downloadable_fonts.enabled,true) HTTP(..) != font-download.html font-default.html
+-pref(gfx.downloadable_fonts.enabled,false) HTTP(..) == font-download.html font-default.html
+-fails pref(gfx.downloadable_fonts.enabled,0) HTTP(..) == font-download.html font-default.html
+-fails pref(gfx.downloadable_fonts.enabled,"foo") HTTP(..) == font-download.html font-default.html
+-# a non-existent pref
+-fails pref(not.a.real.pref.name,1) == font-download.html font-default.html
+-# an integer pref
+-pref(font.size.variable.x-western,16) == font-size-16.html font-default.html
+-pref(font.size.variable.x-western,16) != font-size-24.html font-default.html
+-pref(font.size.variable.x-western,24) == font-size-24.html font-default.html
+-pref(font.size.variable.x-western,24) != font-size-16.html font-default.html
+-fails pref(font.size.variable.x-western,false) == font-size-16.html font-default.html
+-fails pref(font.size.variable.x-western,"foo") == font-size-16.html font-default.html
+-# a string pref
+-pref(font.default.x-western,"serif") == font-serif.html font-default.html
+-pref(font.default.x-western,"serif") != font-sans-serif.html font-default.html
+-pref(font.default.x-western,"sans-serif") == font-sans-serif.html font-default.html
+-pref(font.default.x-western,"sans-serif") != font-serif.html font-default.html
+-fails pref(font.default.x-western,true) == font-serif.html font-default.html
+-fails pref(font.default.x-western,0) == font-serif.html font-default.html
+-# tests for ref-pref, and test-pref
+-ref-pref(font.size.variable.x-western,16) == font-size-16.html font-default.html
+-ref-pref(font.size.variable.x-western,16) != font-size-24.html font-default.html
+-ref-pref(font.size.variable.x-western,24) == font-size-24.html font-default.html
+-ref-pref(font.size.variable.x-western,24) != font-size-16.html font-default.html
+-fails ref-pref(font.size.variable.x-western,false) == font-size-16.html font-default.html
+-fails ref-pref(font.size.variable.x-western,"foo") == font-size-16.html font-default.html
+-test-pref(font.size.variable.x-western,16) == font-default.html font-size-16.html
+-test-pref(font.size.variable.x-western,16) != font-default.html font-size-24.html
+-test-pref(font.size.variable.x-western,24) == font-default.html font-size-24.html
+-test-pref(font.size.variable.x-western,24) != font-default.html font-size-16.html
+-fails test-pref(font.size.variable.x-western,false) == font-default.html font-size-16.html
+-fails test-pref(font.size.variable.x-western,"foo") == font-default.html font-size-16.html
+-ref-pref(font.size.variable.x-western,16) test-pref(font.size.variable.x-western,24) != font-default.html font-default.html
+-ref-pref(font.size.variable.x-western,24) test-pref(font.size.variable.x-western,16) != font-default.html font-default.html
+-ref-pref(font.size.variable.x-western,24) test-pref(font.size.variable.x-western,24) == font-default.html font-default.html
+-# reftest syntax: fuzzy(maxPixelDifference,maxNumberDifferingPixels)
+-fuzzy(1,250000) == fuzzy.html fuzzy-ref.html
+-fuzzy(1,250000) != too-fuzzy.html fuzzy-ref.html
+-fuzzy-if(true,1,250000) == fuzzy.html fuzzy-ref.html
+-fuzzy-if(false,2,1) == fuzzy-ref.html fuzzy-ref.html
+-# When using 565 fuzzy.html and fuzzy-ref.html will compare as equal
+-fails fuzzy-if(false,2,1) random-if(Android) == fuzzy.html fuzzy-ref.html
+-
+-# Test that reftest-no-paint fails correctly
+-fails == reftest-no-paint.html reftest-no-paint-ref.html
+-
+-skip-if(!browserIsRemote) == async-scroll-1a.html async-scroll-1-ref.html
+-skip-if(!browserIsRemote) != async-scroll-1b.html async-scroll-1-ref.html
+diff --git a/layout/reftests/reftest.list b/layout/reftests/reftest.list
+--- a/layout/reftests/reftest.list
++++ b/layout/reftests/reftest.list
+@@ -2,361 +2,8 @@
+ # bugzilla and note the bug number as a comment on the line with the
+ # failing test.
+ #
+ # Please keep the tests in alphabetical order unless there is a reason
+ # for something to not be in order.
+ 
+ # verify the tests work
+ include reftest-sanity/reftest.list
+-
+-# images (if libpr0n is busted, could result in weird failures in other tests)
+-include ../../image/test/reftest/reftest.list
+-
+-# CSSWG tests
+-skip-if(B2G) include w3c-css/submitted/reftest.list
+-skip-if(B2G) include w3c-css/received/reftest.list
+-
+-# relative and absolute positioning
+-skip-if(B2G) include abs-pos/reftest.list
+-
+-# backgrounds/
+-skip-if(B2G) include backgrounds/reftest.list
+-
+-# bidi/
+-skip-if(B2G) include bidi/reftest.list
+-
+-# border-image
+-skip-if(Android||B2G) include border-image/reftest.list
+-
+-# border-radius/
+-skip-if(B2G) include border-radius/reftest.list
+-
+-# -moz-box tests
+-skip-if(B2G) include box/reftest.list
+-
+-# box-ordinal/
+-skip-if(B2G) include box-ordinal/reftest.list
+-
+-# box-properties/
+-skip-if(B2G) include box-properties/reftest.list
+-
+-# box-shadow/
+-skip-if(Android||B2G) include box-shadow/reftest.list
+-
+-# bugs/
+-include bugs/reftest.list
+-
+-# canvas 2D
+-include canvas/reftest.list
+-
+-# css animations
+-include css-animations/reftest.list
+-
+-# blending/
+-skip-if(B2G||Android) include css-blending/reftest.list
+-
+-# css calc() tests
+-include css-calc/reftest.list
+-
+-# css character encoding tests
+-skip-if(B2G) include css-charset/reftest.list
+-
+-# css default pseudo class tests
+-skip-if(B2G) include css-default/reftest.list
+-
+-# css :disable tests
+-skip-if(Android||B2G) include css-disabled/reftest.list
+-
+-# css :enable tests
+-skip-if(Android||B2G) include css-enabled/reftest.list
+-
+-# css @import tests
+-skip-if(B2G) include css-import/reftest.list
+-
+-# css gradients
+-include css-gradients/reftest.list
+-
+-# css media queries (tests for print mode)
+-skip-if(B2G) include css-mediaqueries/reftest.list
+-
+-# css parsing
+-skip-if(B2G) include css-parsing/reftest.list
+-
+-# css placeholder
+-skip-if(B2G) include css-placeholder/reftest.list
+-
+-# css required
+-skip-if(B2G) include css-required/reftest.list
+-
+-# css optional
+-skip-if(B2G) include css-optional/reftest.list
+-
+-# css valid
+-skip-if(Android||B2G) include css-valid/reftest.list
+-
+-# css invalid
+-skip-if(Android||B2G) include css-invalid/reftest.list
+-
+-# css-submit-invalid
+-skip-if(B2G) include css-submit-invalid/reftest.list
+-
+-# css text-overflow
+-skip-if(B2G) include text-overflow/reftest.list
+-
+-# css selectors
+-include css-selectors/reftest.list
+-
+-# css transitions
+-skip-if(B2G) include css-transitions/reftest.list
+-
+-# css :-moz-ui-invalid
+-skip-if(Android||B2G) include css-ui-invalid/reftest.list
+-
+-# css :-moz-ui-valid
+-skip-if(Android||B2G) include css-ui-valid/reftest.list
+-
+-# css values and units
+-skip-if(B2G) include css-valuesandunits/reftest.list
+-
+-# css variables
+-include css-variables/reftest.list
+-
+-# Reftests in css-visited are run using
+-# layout/style/test/test_visited_reftests instead of using the reftest
+-# harness.
+-
+-skip-if(B2G) include cssom/reftest.list
+-
+-# columns/
+-skip-if(B2G) include columns/reftest.list
+-
+-# content/
+-include ../../content/test/reftest/reftest.list
+-
+-# counters/
+-skip-if(B2G) include counters/reftest.list
+-
+-# datalist
+-skip-if(B2G) include datalist/reftest.list
+-
+-# dom/
+-skip-if(B2G) include dom/reftest.list
+-
+-# generated-content/
+-skip-if(B2G) include generated-content/reftest.list
+-
+-# first-letter/
+-skip-if(Android||B2G) include first-letter/reftest.list
+-
+-# first-line/
+-skip-if(B2G) include first-line/reftest.list
+-
+-# flexbox (display: flex, display: inline-flex)
+-include flexbox/reftest.list
+-
+-# floats/
+-skip-if(B2G) include floats/reftest.list
+-
+-# font-face
+-include font-face/reftest.list
+-
+-# font features (opentype)
+-skip-if(B2G) include font-features/reftest.list
+-
+-# mobile font size inflation
+-include font-inflation/reftest.list
+-
+-# font matching
+-skip-if(B2G) include font-matching/reftest.list
+-
+-# forms
+-skip-if(Android) include forms/reftest.list
+-
+-# gfx
+-include ../../gfx/tests/reftest/reftest.list
+-
+-# block-inside-inline splits
+-skip-if(B2G) include ib-split/reftest.list
+-
+-# image/
+-include image/reftest.list
+-
+-# image-element/
+-skip-if(B2G) include image-element/reftest.list
+-
+-# image-rect/
+-skip-if(B2G) include image-rect/reftest.list
+-
+-# image-region/
+-skip-if(B2G) include image-region/reftest.list
+-
+-# indic shaping with harfbuzz
+-skip-if(B2G) include indic-shaping/reftest.list
+-
+-# inline layout
+-include inline/reftest.list
+-
+-# inline borders and padding
+-skip-if(B2G) include inline-borderpadding/reftest.list
+-
+-# layers/
+-include layers/reftest.list
+-
+-# line-breaking/
+-skip-if(B2G) include line-breaking/reftest.list
+-
+-# list-item/
+-skip-if(B2G) include list-item/reftest.list
+-
+-# mathml/
+-skip-if(B2G) include mathml/reftest.list
+-
+-# margin-collapsing
+-skip-if(B2G) include margin-collapsing/reftest.list
+-
+-# marquee/
+-skip-if(B2G) include marquee/reftest.list
+-
+-# native-theme/
+-skip-if(Android||B2G) include native-theme/reftest.list
+-
+-# netwerk/
+-skip-if(B2G) include ../../netwerk/test/reftest/reftest.list
+-
+-include outline/reftest.list
+-
+-# object/
+-skip-if(B2G) include object/reftest.list
+-
+-# ogg-video/
+-include ogg-video/reftest.list
+-
+-# webm-video/
+-include webm-video/reftest.list
+-
+-# parser/
+-skip-if(B2G) include ../../parser/htmlparser/tests/reftest/reftest.list
+-
+-# percent-overflow-sizing/
+-skip-if(B2G) include percent-overflow-sizing/reftest.list
+-
+-# pixel-rounding/
+-skip-if(B2G) include pixel-rounding/reftest.list
+-
+-# plugin/
+-skip-if(B2G) include ../../dom/plugins/test/reftest/reftest.list
+-
+-# position-dynamic-changes/
+-include position-dynamic-changes/reftest.list
+-
+-# printing
+-skip-if(B2G) include printing/reftest.list
+-skip-if(B2G) include pagination/reftest.list
+-
+-# <style scoped>
+-skip-if(B2G) include scoped-style/reftest.list
+-
+-# scrolling 
+-skip-if(Android&&AndroidVersion>=15) include scrolling/reftest.list
+-
+-# selection
+-include selection/reftest.list
+-
+-# sticky positioning
+-include position-sticky/reftest.list
+-
+-# svg/
+-include svg/reftest.list
+-
+-# tab-size/
+-skip-if(B2G) include tab-size/reftest.list
+-
+-# table-anonymous-boxes/
+-skip-if(B2G) include table-anonymous-boxes/reftest.list
+-
+-# table-background/
+-skip-if(B2G) include table-background/reftest.list
+-
+-# table-bordercollapse/
+-skip-if(B2G) include table-bordercollapse/reftest.list
+-
+-# table-dom/
+-skip-if(B2G) include table-dom/reftest.list
+-
+-skip-if(B2G) include table-overflow/reftest.list
+-
+-# table-width/
+-skip-if(B2G) include table-width/reftest.list
+-
+-# text/
+-include text/reftest.list
+-
+-# text-decoration/
+-skip-if(B2G) include text-decoration/reftest.list
+-
+-# text-indent/
+-skip-if(B2G) include text-indent/reftest.list
+-
+-# text-shadow/
+-skip-if(Android||B2G) include text-shadow/reftest.list
+-
+-# text-svgglyphs/
+-include text-svgglyphs/reftest.list
+-
+-# text-transform/
+-skip-if(B2G) include text-transform/reftest.list
+-
+-# theme (osx)
+-skip-if(B2G) include ../../toolkit/themes/osx/reftests/reftest.list
+-
+-# -moz-transform/
+-include transform/reftest.list
+-
+-# 3d transforms
+-include transform-3d/reftest.list
+-
+-# unicode/ (verify that we don't do expend effort doing unicode-aware case checks)
+-skip-if(B2G) include unicode/reftest.list
+-
+-# webcomonents/
+-include webcomponents/reftest.list
+-
+-# widget/
+-skip-if(B2G) include ../../widget/reftests/reftest.list
+-
+-# xml-stylesheet/
+-skip-if(B2G) include ../../content/test/reftest/xml-stylesheet/reftest.list
+-
+-# xul-document-load/
+-skip-if(B2G) include xul-document-load/reftest.list
+-
+-# xul/
+-skip-if(B2G) include xul/reftest.list
+-
+-# webcomonents/
+-include webcomponents/reftest.list
+-
+-# xul
+-skip-if(B2G) include ../xul/reftest/reftest.list
+-
+-# xul grid
+-skip-if(B2G) include ../xul/grid/reftests/reftest.list
+-
+-# z-index/
+-skip-if(B2G) include z-index/reftest.list
+-
+-# reftest(s) to verify content bugfixes
+-skip-if(B2G) include ../../content/html/document/reftests/reftests.list
+-skip-if(B2G) include ../../content/html/content/reftests/reftest.list
+-skip-if(B2G) include ../../dom/imptests/reftest.list
+-
+-# editor/
+-skip-if(B2G) include ../../editor/reftests/reftest.list
+-
+-# box-sizing
+-skip-if(B2G) include box-sizing/reftest.list
+-
+-# invalidation - only run on B2G
+-skip-if(!B2G) include invalidation/reftest.list
+-
+-# encodings
+-include ../../dom/encoding/test/reftest/reftest.list
+diff --git a/layout/tools/reftest/runreftestb2g.py b/layout/tools/reftest/runreftestb2g.py
+--- a/layout/tools/reftest/runreftestb2g.py
++++ b/layout/tools/reftest/runreftestb2g.py
+@@ -410,23 +410,23 @@ class B2GRemoteReftest(RefTest):
+                                                special_powers=False)
+         profileDir = profile.profile
+ 
+         prefs = {}
+         # Turn off the locale picker screen
+         prefs["browser.firstrun.show.localepicker"] = False
+         prefs["browser.homescreenURL"] = "app://test-container.gaiamobile.org/index.html"
+         prefs["browser.manifestURL"] = "app://test-container.gaiamobile.org/manifest.webapp"
+-        prefs["browser.tabs.remote"] = False
++        prefs["browser.tabs.remote.autostart"] = True
+         prefs["dom.ipc.tabs.disabled"] = False
+         prefs["dom.mozBrowserFramesEnabled"] = True
+         prefs["font.size.inflation.emPerLine"] = 0
+         prefs["font.size.inflation.minTwips"] = 0
+         prefs["network.dns.localDomains"] = "app://test-container.gaiamobile.org"
+-        prefs["reftest.browser.iframe.enabled"] = False
++        prefs["reftest.browser.iframe.enabled"] = True
+         prefs["reftest.remote"] = True
+         prefs["reftest.uri"] = "%s" % reftestlist
+         # Set a future policy version to avoid the telemetry prompt.
+         prefs["toolkit.telemetry.prompted"] = 999
+         prefs["toolkit.telemetry.notifiedOptOut"] = 999
+ 
+         # Set the extra prefs.
+         profile.set_preferences(prefs)

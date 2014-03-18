@@ -1,0 +1,1358 @@
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -47,16 +47,18 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++#include "cutils/properties.h"
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -171,45 +173,72 @@ void CompositorParent::DestroyThread()
+   ReleaseCompositorThread();
+ }
+ 
+ MessageLoop* CompositorParent::CompositorLoop()
+ {
+   return sCompositorThread ? sCompositorThread->message_loop() : sCompositorLoop;
+ }
+ 
++void CompositorParent::Notify(const VsyncInfo& aVsyncInfo)
++{
++  printf_stderr("bignose CompositorParent::Notify");
++  CompositorLoop()->PostTask(FROM_HERE,NewRunnableMethod(this, &CompositorParent::CheckComposition));
++}
++
++void CompositorParent::CheckComposition(void)
++{
++  if (!mCurrentCompositeTask || mPaused) {
++    return;
++  }
++
++  printf_stderr("bignose CompositorParent start compose");
++  MessageLoop::current()->PostTask(FROM_HERE, NewRunnableMethod(this, mCurrentCompositeTask));
++
++  mCurrentCompositeTask = nullptr;
++}
++
+ CompositorParent::CompositorParent(nsIWidget* aWidget,
+                                    bool aUseExternalSurfaceSize,
+                                    int aSurfaceWidth, int aSurfaceHeight)
+   : mWidget(aWidget)
+   , mCurrentCompositeTask(nullptr)
+   , mIsTesting(false)
+   , mPaused(false)
+   , mUseExternalSurfaceSize(aUseExternalSurfaceSize)
+   , mEGLSurfaceSize(aSurfaceWidth, aSurfaceHeight)
+   , mPauseCompositionMonitor("PauseCompositionMonitor")
+   , mResumeCompositionMonitor("ResumeCompositionMonitor")
+   , mOverrideComposeReadiness(false)
+   , mForceCompositionTask(nullptr)
+ {
+   NS_ABORT_IF_FALSE(sCompositorThread != nullptr || sCompositorThreadID,
+-                    "The compositor thread must be Initialized before instanciating a COmpositorParent.");
++                    "The compositor thread must be Initialized before instanciating a CompositorParent.");
+   MOZ_COUNT_CTOR(CompositorParent);
+   mCompositorID = 0;
+   // FIXME: This holds on the the fact that right now the only thing that
+   // can destroy this instance is initialized on the compositor thread after
+   // this task has been processed.
+   CompositorLoop()->PostTask(FROM_HERE, NewRunnableFunction(&AddCompositor,
+                                                           this, &mCompositorID));
+ 
+   mRootLayerTreeID = AllocateLayerTreeId();
+   sIndirectLayerTrees[mRootLayerTreeID].mParent = this;
+ 
+   mApzcTreeManager = new APZCTreeManager();
+   ++sCompositorThreadRefCount;
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.vsync1", propValue, "0");
++
++  if(atoi(propValue)){
++
++  RegisterVsyncObserver(this);
++
++  }
+ }
+ 
+ PlatformThreadId
+ CompositorParent::CompositorThreadID()
+ {
+   return sCompositorThread ? sCompositorThread->thread_id() : sCompositorThreadID;
+ }
+ 
+@@ -224,17 +253,26 @@ CompositorParent::RootLayerTreeId()
+ {
+   return mRootLayerTreeID;
+ }
+ 
+ CompositorParent::~CompositorParent()
+ {
+   MOZ_COUNT_DTOR(CompositorParent);
+ 
++  UnregisterVsyncObserver(this);
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.vsync1", propValue, "0");
++
++  if(atoi(propValue)){
++
+   ReleaseCompositorThread();
++
++  }
+ }
+ 
+ void
+ CompositorParent::Destroy()
+ {
+   NS_ABORT_IF_FALSE(ManagedPLayerTransactionParent().Length() == 0,
+                     "CompositorParent destroyed before managed PLayerTransactionParent");
+ 
+@@ -576,47 +614,68 @@ CalculateCompositionFrameRate()
+ 
+ void
+ CompositorParent::ScheduleComposition()
+ {
+   if (mCurrentCompositeTask || mPaused) {
+     return;
+   }
+ 
+-  bool initialComposition = mLastCompose.IsNull();
++//  char propValue[PROPERTY_VALUE_MAX];
++//  property_get("debug.vsync2", propValue, "0");
++
++  bool initialComposition;
+   TimeDuration delta;
++  int32_t rate;
++  TimeDuration minFrameDelta;
++  TimeDuration delay;
++
++  //if(!atoi(propValue)){
++
++  initialComposition = mLastCompose.IsNull();
+   if (!initialComposition)
+     delta = TimeStamp::Now() - mLastCompose;
+ 
+-  int32_t rate = CalculateCompositionFrameRate();
++  rate = CalculateCompositionFrameRate();
+ 
+   // If rate == 0 (ASAP mode), minFrameDelta must be 0 so there's no delay.
+-  TimeDuration minFrameDelta = TimeDuration::FromMilliseconds(
++  minFrameDelta = TimeDuration::FromMilliseconds(
+     rate == 0 ? 0.0 : std::max(0.0, 1000.0 / rate));
+ 
+-
+   mCurrentCompositeTask = NewRunnableMethod(this, &CompositorParent::Composite);
+ 
++  //}
++
++  printf_stderr("bignose CompositorParent::ScheduleComposition");
++
++  return;
++
++  //if(!atoi(propValue)){
++
+   if (!initialComposition && delta < minFrameDelta) {
+-    TimeDuration delay = minFrameDelta - delta;
++    delay = minFrameDelta - delta;
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+     mExpectedComposeStartTime = TimeStamp::Now() + delay;
+ #endif
+     ScheduleTask(mCurrentCompositeTask, delay.ToMilliseconds());
+   } else {
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+     mExpectedComposeStartTime = TimeStamp::Now();
+ #endif
+     ScheduleTask(mCurrentCompositeTask, 0);
+   }
++
++  //}
+ }
+ 
+ void
+ CompositorParent::Composite()
+ {
++  printf_stderr("bignose CompositorParent in composite");
++
+   CompositeToTarget(nullptr);
+ }
+ 
+ void
+ CompositorParent::CompositeToTarget(DrawTarget* aTarget)
+ {
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
+   PROFILER_LABEL("CompositorParent", "Composite");
+diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent.h
+--- a/gfx/layers/ipc/CompositorParent.h
++++ b/gfx/layers/ipc/CompositorParent.h
+@@ -27,22 +27,26 @@
+ #include "mozilla/TimeStamp.h"          // for TimeStamp
+ #include "mozilla/ipc/ProtocolUtils.h"
+ #include "mozilla/layers/GeckoContentController.h"
+ #include "mozilla/layers/LayersMessages.h"  // for TargetConfig
+ #include "mozilla/layers/PCompositorParent.h"
+ #include "nsAutoPtr.h"                  // for nsRefPtr
+ #include "nsISupportsImpl.h"
+ #include "nsSize.h"                     // for nsIntSize
++  
++#include "mozilla/Hal.h"
+ 
+ class CancelableTask;
+ class MessageLoop;
+ class gfxContext;
+ class nsIWidget;
+ 
++using namespace mozilla::hal;
++
+ namespace mozilla {
+ namespace gfx {
+ class DrawTarget;
+ }
+ 
+ namespace layers {
+ 
+ class APZCTreeManager;
+@@ -58,17 +62,18 @@ struct ScopedLayerTreeRegistration
+                               GeckoContentController* aController);
+   ~ScopedLayerTreeRegistration();
+ 
+ private:
+   uint64_t mLayersId;
+ };
+ 
+ class CompositorParent : public PCompositorParent,
+-                         public ShadowLayersManager
++                         public ShadowLayersManager,
++                         public VsyncObserver
+ {
+   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(CompositorParent)
+ 
+ public:
+   CompositorParent(nsIWidget* aWidget,
+                    bool aUseExternalSurfaceSize = false,
+                    int aSurfaceWidth = -1, int aSurfaceHeight = -1);
+ 
+@@ -239,16 +244,20 @@ protected:
+   virtual void ScheduleTask(CancelableTask*, int);
+   void Composite();
+   void CompositeToTarget(gfx::DrawTarget* aTarget);
+   void ForceComposeToTarget(gfx::DrawTarget* aTarget);
+ 
+   void SetEGLSurfaceSize(int width, int height);
+ 
+ private:
++  // vsync event
++  void Notify(const VsyncInfo& aVsyncInfo);
++  void CheckComposition(void);
++
+   void InitializeLayerManager(const nsTArray<LayersBackend>& aBackendHints);
+   void PauseComposition();
+   void ResumeComposition();
+   void ResumeCompositionAndResize(int width, int height);
+   void ForceComposition();
+   void CancelCurrentCompositeTask();
+ 
+   inline static PlatformThreadId CompositorThreadID();
+diff --git a/hal/Hal.cpp b/hal/Hal.cpp
+--- a/hal/Hal.cpp
++++ b/hal/Hal.cpp
+@@ -1,14 +1,16 @@
+ /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim: set sw=2 ts=8 et ft=cpp : */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#include "android/log.h"
++
+ #include "Hal.h"
+ #include "HalImpl.h"
+ #include "HalSandbox.h"
+ #include "nsThreadUtils.h"
+ #include "nsXULAppAPI.h"
+ #include "mozilla/Observer.h"
+ #include "nsIDocument.h"
+ #include "nsIDOMDocument.h"
+@@ -25,16 +27,18 @@
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/ContentParent.h"
+ 
+ #ifdef XP_WIN
+ #include <process.h>
+ #define getpid _getpid
+ #endif
+ 
++#define LOG(args...)  __android_log_print(ANDROID_LOG_INFO, "Hal" , ## args)
++
+ using namespace mozilla::services;
+ using namespace mozilla::dom;
+ 
+ #define PROXY_IF_SANDBOXED(_call)                 \
+   do {                                            \
+     if (InSandbox()) {                            \
+       if (!hal_sandbox::HalChildDestroyed()) {    \
+         hal_sandbox::_call;                       \
+@@ -334,16 +338,34 @@ protected:
+ 
+   void GetCurrentInformationInternal(ScreenConfiguration* aInfo) {
+     PROXY_IF_SANDBOXED(GetCurrentScreenConfiguration(aInfo));
+   }
+ };
+ 
+ static ScreenConfigurationObserversManager sScreenConfigurationObservers;
+ 
++class VsyncObserversManager : public CachingObserversManager<VsyncInfo>
++{
++protected:
++  void EnableNotifications() {
++    PROXY_IF_SANDBOXED(EnableVsyncNotifications());
++  }
++
++  void DisableNotifications() {
++    PROXY_IF_SANDBOXED(DisableVsyncNotifications());
++  }
++
++  void GetCurrentInformationInternal(VsyncInfo* aInfo) {
++    PROXY_IF_SANDBOXED(GetCurrentVsyncInfo(aInfo));
++  }
++};
++
++static VsyncObserversManager sVsyncObservers;
++
+ void
+ RegisterBatteryObserver(BatteryObserver* aObserver)
+ {
+   AssertMainThread();
+   sBatteryObservers.AddObserver(aObserver);
+ }
+ 
+ void
+@@ -713,16 +735,45 @@ GetCurrentScreenConfiguration(ScreenConf
+ 
+ void
+ NotifyScreenConfigurationChange(const ScreenConfiguration& aScreenConfiguration)
+ {
+   sScreenConfigurationObservers.CacheInformation(aScreenConfiguration);
+   sScreenConfigurationObservers.BroadcastCachedInformation();
+ }
+ 
++void
++RegisterVsyncObserver(VsyncObserver* aObserver)
++{
++  LOG("%s", __func__);
++  AssertMainThread();
++  sVsyncObservers.AddObserver(aObserver);
++}
++
++void
++UnregisterVsyncObserver(VsyncObserver* aObserver)
++{
++  AssertMainThread();
++  sVsyncObservers.RemoveObserver(aObserver);
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsyncInfo)
++{
++  AssertMainThread();
++  *aVsyncInfo = sVsyncObservers.GetCurrentInformation();
++}
++
++void
++NotifyVsyncChange(const VsyncInfo& atimestamp)
++{
++  sVsyncObservers.CacheInformation(atimestamp);
++  sVsyncObservers.BroadcastCachedInformation();
++}
++
+ bool
+ LockScreenOrientation(const dom::ScreenOrientation& aOrientation)
+ {
+   AssertMainThread();
+   RETURN_PROXY_IF_SANDBOXED(LockScreenOrientation(aOrientation), false);
+ }
+ 
+ void
+diff --git a/hal/Hal.h b/hal/Hal.h
+--- a/hal/Hal.h
++++ b/hal/Hal.h
+@@ -15,16 +15,17 @@
+ #include "nsTArray.h"
+ #include "prlog.h"
+ #include "mozilla/dom/battery/Types.h"
+ #include "mozilla/dom/network/Types.h"
+ #include "mozilla/dom/power/Types.h"
+ #include "mozilla/hal_sandbox/PHal.h"
+ #include "mozilla/dom/ScreenOrientation.h"
+ #include "mozilla/HalScreenConfiguration.h"
++#include "mozilla/HalVsyncInfo.h"
+ 
+ /*
+  * Hal.h contains the public Hal API.
+  *
+  * By default, this file defines its functions in the hal namespace, but if
+  * MOZ_HAL_NAMESPACE is defined, we'll define our functions in that namespace.
+  *
+  * This is used by HalImpl.h and HalSandbox.h, which define copies of all the
+@@ -396,16 +397,25 @@ void UnregisterScreenConfigurationObserv
+ void GetCurrentScreenConfiguration(hal::ScreenConfiguration* aScreenConfiguration);
+ 
+ /**
+  * Notify of a change in the screen configuration.
+  * @param aScreenConfiguration The new screen orientation.
+  */
+ void NotifyScreenConfigurationChange(const hal::ScreenConfiguration& aScreenConfiguration);
+ 
++
++void RegisterVsyncObserver(hal::VsyncObserver* aObserver);
++
++void UnregisterVsyncObserver(hal::VsyncObserver* aObserver);
++
++void GetCurrentVsyncInfo(hal::VsyncInfo* aVsyncInfo);
++
++void NotifyVsyncChange(const hal::VsyncInfo& atimestamp);
++
+ /**
+  * Lock the screen orientation to the specific orientation.
+  * @return Whether the lock has been accepted.
+  */
+ bool LockScreenOrientation(const dom::ScreenOrientation& aOrientation);
+ 
+ /**
+  * Unlock the screen orientation.
+diff --git a/hal/HalInternal.h b/hal/HalInternal.h
+--- a/hal/HalInternal.h
++++ b/hal/HalInternal.h
+@@ -49,16 +49,22 @@ void DisableNetworkNotifications();
+  */
+ void EnableScreenConfigurationNotifications();
+ 
+ /**
+  * Disables screen orientation notifications from the backend.
+  */
+ void DisableScreenConfigurationNotifications();
+ 
++void
++EnableVsyncNotifications();
++
++void
++DisableVsyncNotifications();
++
+ /**
+  * Enable switch notifications from the backend
+  */
+ void EnableSwitchNotifications(hal::SwitchDevice aDevice);
+ 
+ /**
+  * Disable switch notifications from the backend
+  */
+diff --git a/hal/HalVsyncInfo.h b/hal/HalVsyncInfo.h
+new file mode 100644
+--- /dev/null
++++ b/hal/HalVsyncInfo.h
+@@ -0,0 +1,20 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_HalVsyncInfo_h
++#define mozilla_HalVsyncInfo_h
++
++#include "mozilla/Observer.h"
++
++namespace mozilla {
++namespace hal {
++struct VsyncInfo;
++typedef Observer<VsyncInfo> VsyncObserver;
++} // namespace hal
++} // namespace mozilla
++
++#endif  // mozilla_HalVsyncInfo_h
++
+diff --git a/hal/gonk/GonkHal.cpp b/hal/gonk/GonkHal.cpp
+--- a/hal/gonk/GonkHal.cpp
++++ b/hal/gonk/GonkHal.cpp
+@@ -60,16 +60,17 @@
+ #include "nsScreenManagerGonk.h"
+ #include "nsThreadUtils.h"
+ #include "nsThreadUtils.h"
+ #include "nsIThread.h"
+ #include "nsXULAppAPI.h"
+ #include "OrientationObserver.h"
+ #include "UeventPoller.h"
+ #include <algorithm>
++#include "nsAppShell.h"
+ 
+ #define LOG(args...)  __android_log_print(ANDROID_LOG_INFO, "Gonk", args)
+ #define NsecPerMsec  1000000LL
+ #define NsecPerSec   1000000000
+ 
+ // The header linux/oom.h is not available in bionic libc. We
+ // redefine some of its constants here.
+ 
+@@ -849,16 +850,32 @@ DisableScreenConfigurationNotifications(
+ }
+ 
+ void
+ GetCurrentScreenConfiguration(hal::ScreenConfiguration* aScreenConfiguration)
+ {
+   *aScreenConfiguration = nsScreenGonk::GetConfiguration();
+ }
+ 
++void
++EnableVsyncNotifications()
++{
++}
++
++void
++DisableVsyncNotifications()
++{
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsynInfo)
++{
++  *aVsynInfo = nsAppShell::GetVsyncInfo();
++}
++
+ bool
+ LockScreenOrientation(const dom::ScreenOrientation& aOrientation)
+ {
+   return OrientationObserver::GetInstance()->LockScreenOrientation(aOrientation);
+ }
+ 
+ void
+ UnlockScreenOrientation()
+diff --git a/hal/moz.build b/hal/moz.build
+--- a/hal/moz.build
++++ b/hal/moz.build
+@@ -12,16 +12,17 @@ XPIDL_MODULE = 'hal'
+ 
+ EXPORTS.mozilla += [
+     'Hal.h',
+     'HalImpl.h',
+     'HalSandbox.h',
+     'HalScreenConfiguration.h',
+     'HalSensor.h',
+     'HalTypes.h',
++    'HalVsyncInfo.h',
+     'HalWakeLock.h',
+ ]
+ 
+ TEST_DIRS += ['tests']
+ UNIFIED_SOURCES += [
+     'HalWakeLock.cpp',
+     'sandbox/SandboxHal.cpp',
+     'WindowIdentifier.cpp',
+diff --git a/hal/sandbox/PHal.ipdl b/hal/sandbox/PHal.ipdl
+--- a/hal/sandbox/PHal.ipdl
++++ b/hal/sandbox/PHal.ipdl
+@@ -69,16 +69,20 @@ struct WakeLockInformation {
+ 
+ struct ScreenConfiguration {
+   nsIntRect rect;
+   ScreenOrientation orientation;
+   uint32_t colorDepth;
+   uint32_t pixelDepth;
+ };
+ 
++struct VsyncInfo {
++  int64_t timestamp;
++};
++
+ struct FMRadioOperationInformation {
+   FMRadioOperation operation;
+   FMRadioOperationStatus status;
+   uint32_t frequency;
+ };
+ 
+ struct FMRadioSettings {
+   FMRadioCountry country;
+@@ -102,16 +106,17 @@ namespace hal_sandbox {
+ sync protocol PHal {
+     manager PContent;
+ 
+ child:
+     NotifyBatteryChange(BatteryInformation aBatteryInfo);
+     NotifyNetworkChange(NetworkInformation aNetworkInfo);
+     NotifyWakeLockChange(WakeLockInformation aWakeLockInfo);
+     NotifyScreenConfigurationChange(ScreenConfiguration aScreenOrientation);
++    NotifyVsyncChange(VsyncInfo aVsyncInfo);
+     NotifySwitchChange(SwitchEvent aEvent);
+     NotifySystemClockChange(int64_t aClockDeltaMS); 
+     NotifySystemTimezoneChange(SystemTimezoneChangeInformation aSystemTimezoneChangeInfo); 
+ 
+ parent:
+     Vibrate(uint32_t[] pattern, uint64_t[] id, PBrowser browser);
+     CancelVibrate(uint64_t[] id, PBrowser browser);
+ 
+@@ -158,16 +163,22 @@ parent:
+     DisableWakeLockNotifications();
+     sync GetWakeLockInfo(nsString aTopic)
+       returns (WakeLockInformation aWakeLockInfo);
+ 
+     EnableScreenConfigurationNotifications();
+     DisableScreenConfigurationNotifications();
+     sync GetCurrentScreenConfiguration()
+       returns (ScreenConfiguration aScreenConfiguration);
++
++    EnableVsyncNotifications();
++    DisableVsyncNotifications();
++    sync GetCurrentVsyncInfo()
++      returns (VsyncInfo aVsyncInfo);
++
+     sync LockScreenOrientation(ScreenOrientation aOrientation)
+       returns (bool allowed);
+     UnlockScreenOrientation();
+  
+     EnableSwitchNotifications(SwitchDevice aDevice);
+     DisableSwitchNotifications(SwitchDevice aDevice);
+     sync GetCurrentSwitchState(SwitchDevice aDevice)
+       returns (SwitchState aState);
+diff --git a/hal/sandbox/SandboxHal.cpp b/hal/sandbox/SandboxHal.cpp
+--- a/hal/sandbox/SandboxHal.cpp
++++ b/hal/sandbox/SandboxHal.cpp
+@@ -115,16 +115,34 @@ DisableScreenConfigurationNotifications(
+ }
+ 
+ void
+ GetCurrentScreenConfiguration(ScreenConfiguration* aScreenConfiguration)
+ {
+   Hal()->SendGetCurrentScreenConfiguration(aScreenConfiguration);
+ }
+ 
++void
++EnableVsyncNotifications()
++{
++  Hal()->SendEnableVsyncNotifications();
++}
++
++void
++DisableVsyncNotifications()
++{
++  Hal()->SendDisableVsyncNotifications();
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsyncInfo)
++{
++  Hal()->SendGetCurrentVsyncInfo(aVsyncInfo);
++}
++
+ bool
+ LockScreenOrientation(const dom::ScreenOrientation& aOrientation)
+ {
+   bool allowed;
+   Hal()->SendLockScreenOrientation(aOrientation, &allowed);
+   return allowed;
+ }
+ 
+@@ -441,26 +459,28 @@ class HalParent : public PHalParent
+                 , public BatteryObserver
+                 , public NetworkObserver
+                 , public ISensorObserver
+                 , public WakeLockObserver
+                 , public ScreenConfigurationObserver
+                 , public SwitchObserver
+                 , public SystemClockChangeObserver
+                 , public SystemTimezoneChangeObserver
++                , public VsyncObserver
+ {
+ public:
+   virtual void
+   ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE
+   {
+     // NB: you *must* unconditionally unregister your observer here,
+     // if it *may* be registered below.
+     hal::UnregisterBatteryObserver(this);
+     hal::UnregisterNetworkObserver(this);
+     hal::UnregisterScreenConfigurationObserver(this);
++    hal::UnregisterVsyncObserver(this);
+     for (int32_t sensor = SENSOR_UNKNOWN + 1;
+          sensor < NUM_SENSOR_TYPE; ++sensor) {
+       hal::UnregisterSensorObserver(SensorType(sensor), this);
+     }
+     hal::UnregisterWakeLockObserver(this);
+     hal::UnregisterSystemClockChangeObserver(this);
+     hal::UnregisterSystemTimezoneChangeObserver(this);
+     for (int32_t switchDevice = SWITCH_DEVICE_UNKNOWN + 1;
+@@ -558,16 +578,38 @@ public:
+ 
+   virtual bool
+   RecvGetCurrentScreenConfiguration(ScreenConfiguration* aScreenConfiguration) MOZ_OVERRIDE {
+     hal::GetCurrentScreenConfiguration(aScreenConfiguration);
+     return true;
+   }
+ 
+   virtual bool
++  RecvEnableVsyncNotifications() MOZ_OVERRIDE {
++    hal::RegisterVsyncObserver(this);
++    return true;
++  }
++
++  virtual bool
++  RecvDisableVsyncNotifications() MOZ_OVERRIDE {
++    hal::UnregisterVsyncObserver(this);
++    return true;
++  }
++
++  virtual bool
++  RecvGetCurrentVsyncInfo(VsyncInfo* aVsyncInfo) MOZ_OVERRIDE {
++    hal::GetCurrentVsyncInfo(aVsyncInfo);
++    return true;
++  }
++
++  void Notify(const VsyncInfo& aVsyncInfo) {
++    unused << SendNotifyVsyncChange(aVsyncInfo);
++  }
++
++  virtual bool
+   RecvLockScreenOrientation(const dom::ScreenOrientation& aOrientation, bool* aAllowed) MOZ_OVERRIDE
+   {
+     // FIXME/bug 777980: unprivileged content may only lock
+     // orientation while fullscreen.  We should check whether the
+     // request comes from an actor in a process that might be
+     // fullscreen.  We don't have that information currently.
+     *aAllowed = hal::LockScreenOrientation(aOrientation);
+     return true;
+@@ -894,16 +936,22 @@ public:
+ 
+   virtual bool
+   RecvNotifyScreenConfigurationChange(const ScreenConfiguration& aScreenConfiguration) MOZ_OVERRIDE {
+     hal::NotifyScreenConfigurationChange(aScreenConfiguration);
+     return true;
+   }
+ 
+   virtual bool
++  RecvNotifyVsyncChange(const VsyncInfo& aVsyncInfo) MOZ_OVERRIDE {
++    hal::NotifyVsyncChange(aVsyncInfo);
++    return true;
++  }
++
++  virtual bool
+   RecvNotifySwitchChange(const mozilla::hal::SwitchEvent& aEvent) MOZ_OVERRIDE {
+     hal::NotifySwitchChange(aEvent);
+     return true;
+   }
+ 
+   virtual bool
+   RecvNotifySystemClockChange(const int64_t& aClockDeltaMS) {
+     hal::NotifySystemClockChange(aClockDeltaMS);
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -20,18 +20,21 @@
+ #ifdef XP_WIN
+ #include <windows.h>
+ // mmsystem isn't part of WIN32_LEAN_AND_MEAN, so we have
+ // to manually include it
+ #include <mmsystem.h>
+ #include "WinUtils.h"
+ #endif
+ 
++#include "android/log.h"
++
+ #include "mozilla/ArrayUtils.h"
+ #include "mozilla/AutoRestore.h"
++#include "mozilla/Hal.h"
+ #include "nsRefreshDriver.h"
+ #include "nsITimer.h"
+ #include "nsLayoutUtils.h"
+ #include "nsPresContext.h"
+ #include "nsComponentManagerUtils.h"
+ #include "prlog.h"
+ #include "nsAutoPtr.h"
+ #include "nsIDocument.h"
+@@ -44,31 +47,36 @@
+ #include "nsPerformance.h"
+ #include "mozilla/dom/WindowBinding.h"
+ #include "RestyleManager.h"
+ #include "Layers.h"
+ #include "imgIContainer.h"
+ #include "nsIFrameRequestCallback.h"
+ #include "mozilla/dom/ScriptSettings.h"
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla;
++using namespace mozilla::hal;
+ using namespace mozilla::widget;
+ 
+ #ifdef PR_LOGGING
+ static PRLogModuleInfo *gLog = nullptr;
+ #define LOG(...) PR_LOG(gLog, PR_LOG_NOTICE, (__VA_ARGS__))
+ #else
+ #define LOG(...) do { } while(0)
+ #endif
+ 
+ #define DEFAULT_FRAME_RATE 60
+ #define DEFAULT_THROTTLED_FRAME_RATE 1
+ // after 10 minutes, stop firing off inactive timers
+ #define DEFAULT_INACTIVE_TIMER_DISABLE_SECONDS 600
+ 
++#define LOGA(args...)  __android_log_print(ANDROID_LOG_INFO, "RefreshDriver" , ## args)
++
+ namespace mozilla {
+ 
+ /*
+  * The base class for all global refresh driver timers.  It takes care
+  * of managing the list of refresh drivers attached to them and
+  * provides interfaces for querying/setting the rate and actually
+  * running a timer 'Tick'.  Subclasses must implement StartTimer(),
+  * StopTimer(), and ScheduleNextTick() -- the first two just
+@@ -225,16 +233,38 @@ protected:
+   virtual void StopTimer()
+   {
+     mTimer->Cancel();
+   }
+ 
+   nsRefPtr<nsITimer> mTimer;
+ };
+ 
++class HWVsyncRefreshDriverTimer :
++    public RefreshDriverTimer
++  , public VsyncObserver
++{
++public:
++  HWVsyncRefreshDriverTimer(double aRate)
++    : RefreshDriverTimer(aRate)
++  {
++  	RegisterVsyncObserver(this);
++  }
++  void Notify(const VsyncInfo& aVsyncInfo)
++  {
++      printf_stderr("bignose HWVsyncRefreshDriverTimer Notify");
++      this->Tick();
++  }
++
++protected:
++  virtual void StartTimer() {}
++  virtual void StopTimer() {}
++  virtual void ScheduleNextTick(TimeStamp aNowTime) {}
++};
++
+ /*
+  * PreciseRefreshDriverTimer schedules ticks based on the current time
+  * and when the next tick -should- be sent if we were hitting our
+  * rate.  It always schedules ticks on multiples of aRate -- meaning that
+  * if some execution takes longer than an alloted slot, the next tick
+  * will be delayed instead of triggering instantly.  This might not be
+  * desired -- there's an #if 0'd block below that we could put behind
+  * a pref to control this behaviour.
+@@ -556,17 +586,18 @@ GetFirstFrameDelay(imgIRequest* req)
+   // If this image isn't animated, there isn't a first frame delay.
+   int32_t delay = container->GetFirstFrameDelay();
+   if (delay < 0)
+     return 0;
+ 
+   return static_cast<uint32_t>(delay);
+ }
+ 
+-static PreciseRefreshDriverTimer *sRegularRateTimer = nullptr;
++static RefreshDriverTimer *sRegularRateTimer = nullptr;
++//static PreciseRefreshDriverTimer *sRegularRateTimer = nullptr;
+ static InactiveRefreshDriverTimer *sThrottledRateTimer = nullptr;
+ 
+ #ifdef XP_WIN
+ static int32_t sHighPrecisionTimerRequests = 0;
+ // a bare pointer to avoid introducing a static constructor
+ static nsITimer *sDisableHighPrecisionTimersTimer = nullptr;
+ #endif
+ 
+@@ -667,17 +698,25 @@ nsRefreshDriver::ChooseTimer() const
+     bool isDefault = true;
+     double rate = GetRegularTimerInterval(&isDefault);
+ #ifdef XP_WIN
+     if (PreciseRefreshDriverTimerWindowsDwmVsync::IsSupported()) {
+       sRegularRateTimer = new PreciseRefreshDriverTimerWindowsDwmVsync(rate, isDefault);
+     }
+ #endif
+     if (!sRegularRateTimer) {
+-      sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      char propValue[PROPERTY_VALUE_MAX];
++      property_get("debug.vsync", propValue, "0");
++
++      if(atoi(propValue)){
++        sRegularRateTimer = new HWVsyncRefreshDriverTimer(rate);
++      }
++      else{
++        sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      }
+     }
+   }
+   return sRegularRateTimer;
+ }
+ 
+ nsRefreshDriver::nsRefreshDriver(nsPresContext* aPresContext)
+   : mActiveTimer(nullptr),
+     mPresContext(aPresContext),
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -25,16 +25,19 @@
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/PLayerTransaction.h"
+ #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ #include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
+ #include "mozilla/StaticPtr.h"
+ #include "cutils/properties.h"
+ #include "gfx2DGlue.h"
+ 
++#include "nsAppShell.h"
++#include "GeckoProfiler.h"
++
+ #if ANDROID_VERSION >= 17
+ #include "libdisplay/FramebufferSurface.h"
+ #ifndef HWC_BLIT
+ #define HWC_BLIT (HWC_FRAMEBUFFER_TARGET + 1)
+ #endif
+ #endif
+ 
+ #ifdef LOG_TAG
+@@ -61,32 +64,50 @@
+ 
+ using namespace android;
+ using namespace mozilla::layers;
+ 
+ namespace mozilla {
+ 
+ static StaticRefPtr<HwcComposer2D> sInstance;
+ 
++#if ANDROID_VERSION >= 17
++struct HwcComposer2D::cb_context {
++    struct callbacks : public hwc_procs_t {
++        // these are here to facilitate the transition when adding
++        // new callbacks (an implementation can check for NULL before
++        // calling a new callback).
++        void (*zero[4])(void);
++    };
++    callbacks procs;
++    HwcComposer2D* hwc;
++};
++#endif
++
+ HwcComposer2D::HwcComposer2D()
+     : mHwc(nullptr)
+     , mList(nullptr)
+     , mMaxLayerCount(0)
+     , mColorFill(false)
+     , mRBSwapSupport(false)
+ #if ANDROID_VERSION >= 17
+     , mPrevRetireFence(Fence::NO_FENCE)
+     , mPrevDisplayFence(Fence::NO_FENCE)
+ #endif
+     , mPrepared(false)
++    , mVSyncCount(0)
++#if ANDROID_VERSION >= 17
++    , mCBContext(new cb_context)
++#endif
+ {
+ }
+ 
+ HwcComposer2D::~HwcComposer2D() {
+     free(mList);
++    delete mCBContext;	
+ }
+ 
+ int
+ HwcComposer2D::Init(hwc_display_t dpy, hwc_surface_t sur)
+ {
+     MOZ_ASSERT(!Initialized());
+ 
+     mHwc = (HwcDevice*)GetGonkDisplay()->GetHWCDevice();
+@@ -109,16 +130,29 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+         }
+         if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+             mRBSwapSupport = !!supported;
+         }
+     } else {
+         mColorFill = false;
+         mRBSwapSupport = false;
+     }
++
++    LOGI("%s %p", __func__, mHwc->registerProcs);
++    if (mHwc->registerProcs) {
++        mCBContext->hwc = this;
++        mCBContext->procs.invalidate = &hook_invalidate;
++        mCBContext->procs.vsync = &hook_vsync;
++        mCBContext->procs.hotplug = &hook_hotplug;
++        memset(mCBContext->procs.zero, 0, sizeof(mCBContext->procs.zero));
++        mHwc->registerProcs(mHwc, &mCBContext->procs);
++    }
++
++    mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, 0);
++
+ #else
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+     mRBSwapSupport = true;
+ #endif
+ 
+     mDpy = dpy;
+@@ -132,16 +166,55 @@ HwcComposer2D::GetInstance()
+ {
+     if (!sInstance) {
+         LOGI("Creating new instance");
+         sInstance = new HwcComposer2D();
+     }
+     return sInstance;
+ }
+ 
++void
++HwcComposer2D::hook_invalidate(const struct hwc_procs* procs) {
++    cb_context* ctx = reinterpret_cast<cb_context*>(
++            const_cast<hwc_procs_t*>(procs));
++    ctx->hwc->invalidate();
++}
++
++void
++HwcComposer2D::hook_vsync(const struct hwc_procs* procs, int disp,
++        int64_t timestamp) {
++
++
++    cb_context* ctx = reinterpret_cast<cb_context*>(
++            const_cast<hwc_procs_t*>(procs));
++    ctx->hwc->vsync(disp, timestamp);
++}
++
++void
++HwcComposer2D::hook_hotplug(const struct hwc_procs* procs, int disp,
++        int connected) {
++    cb_context* ctx = reinterpret_cast<cb_context*>(
++            const_cast<hwc_procs_t*>(procs));
++    ctx->hwc->hotplug(disp, connected);
++}
++
++void
++HwcComposer2D::invalidate() {
++}
++
++void
++HwcComposer2D::vsync(int disp, int64_t timestamp) {
++    ATRACE_INT("VSYNC", ++mVSyncCount&1);
++    nsAppShell::NotifyVsyncReceived(timestamp);
++}
++
++void
++HwcComposer2D::hotplug(int disp, int connected) {
++}
++
+ bool
+ HwcComposer2D::ReallocLayerList()
+ {
+     int size = sizeof(HwcList) +
+         ((mMaxLayerCount + LAYER_COUNT_INCREMENTS) * sizeof(HwcLayer));
+ 
+     HwcList* listrealloc = (HwcList*)realloc(mList, size);
+ 
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -52,16 +52,25 @@ public:
+     HwcComposer2D();
+     virtual ~HwcComposer2D();
+ 
+     int Init(hwc_display_t aDisplay, hwc_surface_t aSurface);
+ 
+     bool Initialized() const { return mHwc; }
+ 
+     static HwcComposer2D* GetInstance();
++    static void hook_invalidate(const struct hwc_procs* procs);
++    static void hook_vsync(const struct hwc_procs* procs, int disp,
++            int64_t timestamp);
++    static void hook_hotplug(const struct hwc_procs* procs, int disp,
++            int connected);
++
++    inline void invalidate();
++    inline void vsync(int disp, int64_t timestamp);
++    inline void hotplug(int disp, int connected);
+ 
+     // Returns TRUE if the container has been succesfully rendered
+     // Returns FALSE if the container cannot be fully rendered
+     // by this composer so nothing was rendered at all
+     bool TryRender(layers::Layer* aRoot, const gfx::Matrix& aGLWorldTransform) MOZ_OVERRIDE;
+ 
+     bool Render(EGLDisplay dpy, EGLSurface sur);
+ 
+@@ -70,16 +79,21 @@ private:
+     void Prepare(buffer_handle_t fbHandle, int fence);
+     bool Commit();
+     bool TryHwComposition();
+     bool ReallocLayerList();
+     bool PrepareLayerList(layers::Layer* aContainer, const nsIntRect& aClip,
+           const gfxMatrix& aParentTransform, const gfxMatrix& aGLWorldTransform);
+     void setCrop(HwcLayer* layer, hwc_rect_t srcCrop);
+ 
++#if ANDROID_VERSION >= 17
++    struct cb_context;
++    cb_context*                     mCBContext;
++#endif
++
+     HwcDevice*              mHwc;
+     HwcList*                mList;
+     hwc_display_t           mDpy;
+     hwc_surface_t           mSur;
+     nsIntRect               mScreenRect;
+     int                     mMaxLayerCount;
+     bool                    mColorFill;
+     bool                    mRBSwapSupport;
+@@ -87,13 +101,14 @@ private:
+     //to render the current frame
+     std::list<RectVector>   mVisibleRegions;
+ #if ANDROID_VERSION >= 17
+     android::sp<android::Fence> mPrevRetireFence;
+     android::sp<android::Fence> mPrevDisplayFence;
+ #endif
+     nsTArray<layers::LayerComposite*> mHwcLayerMap;
+     bool                    mPrepared;
++    size_t                  mVSyncCount;
+ };
+ 
+ } // namespace mozilla
+ 
+ #endif // mozilla_HwcComposer2D
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -152,33 +152,48 @@ ANativeWindow*
+ GonkDisplayJB::GetNativeWindow()
+ {
+     return mSTClient.get();
+ }
+ 
+ void
+ GonkDisplayJB::SetEnabled(bool enabled)
+ {
++    static bool sState;
++
+     if (enabled) {
+         autosuspend_disable();
+         mPowerModule->setInteractive(mPowerModule, true);
+     }
+ 
+-    if (mHwc)
+-        mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, !enabled);
++    if (mHwc) {
++        if (sState != enabled)	 {
++             if (enabled) {
++                mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, false);
++                mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, true);
++             }
++             else {
++                mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, false);
++                mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, true);
++             }
++        }
++    }
+     else if (mFBDevice->enableScreen)
+         mFBDevice->enableScreen(mFBDevice, enabled);
+ 
+     if (mEnabledCallback)
+         mEnabledCallback(enabled);
+ 
+     if (!enabled) {
+         autosuspend_enable();
+         mPowerModule->setInteractive(mPowerModule, false);
+     }
++
++    sState = enabled;
++
+ }
+ 
+ void
+ GonkDisplayJB::OnEnabled(OnEnabledCallbackType callback)
+ {
+     mEnabledCallback = callback;
+ }
+ 
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -26,16 +26,17 @@
+ #include <sys/epoll.h>
+ #include <sys/ioctl.h>
+ #include <sys/param.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+ #include "base/basictypes.h"
++#include "base/thread.h"
+ #include "GonkPermission.h"
+ #include "nscore.h"
+ #ifdef MOZ_OMX_DECODER
+ #include "MediaResourceManagerService.h"
+ #endif
+ #include "mozilla/TouchEvents.h"
+ #include "mozilla/FileUtils.h"
+ #include "mozilla/Hal.h"
+@@ -79,27 +80,30 @@
+     __android_log_print(ANDROID_LOG_INFO, "Gonk" , ## args)
+ #else
+ # define VERBOSE_LOG(args...)                   \
+     (void)0
+ #endif
+ 
+ using namespace android;
+ using namespace mozilla;
++using namespace mozilla::hal;
+ using namespace mozilla::dom;
+ using namespace mozilla::services;
+ using namespace mozilla::widget;
+ 
+ bool gDrawRequest = false;
+ static nsAppShell *gAppShell = nullptr;
+ static int epollfd = 0;
+ static int signalfds[2] = {0};
+ static bool sDevInputAudioJack;
+ static int32_t sHeadphoneState;
+ static int32_t sMicrophoneState;
++static int64_t sTimeStamp = 0;
++static android::Mutex mVsyncLock;
+ 
+ NS_IMPL_ISUPPORTS_INHERITED1(nsAppShell, nsBaseAppShell, nsIObserver)
+ 
+ namespace mozilla {
+ 
+ bool ProcessNextEvent()
+ {
+     return gAppShell->ProcessNextNativeEvent(true);
+@@ -107,16 +111,34 @@ bool ProcessNextEvent()
+ 
+ void NotifyEvent()
+ {
+     gAppShell->NotifyNativeEvent();
+ }
+ 
+ } // namespace mozilla
+ 
++class VsyncRunnable : public nsRunnable
++{
++public:
++  VsyncRunnable() :mInfo(sTimeStamp) {}
++
++  ~VsyncRunnable() {}
++
++  NS_IMETHOD Run()
++  {
++    LOG("[Butter] %s timestamp : %llu (ms)", __func__, ns2ms(sTimeStamp));
++    hal::NotifyVsyncChange(mInfo);
++    return NS_OK;
++  }
++
++private:
++  VsyncInfo mInfo;
++};
++
+ static void
+ pipeHandler(int fd, FdHandler *data)
+ {
+     ssize_t len;
+     do {
+         char tmp[32];
+         len = read(fd, tmp, sizeof(tmp));
+     } while (len > 0);
+@@ -217,16 +239,21 @@ addDOMTouch(UserInputData& data, WidgetT
+                        0,
+                        touch.coords.getAxisValue(AMOTION_EVENT_AXIS_PRESSURE))
+     );
+ }
+ 
+ static nsEventStatus
+ sendTouchEvent(UserInputData& data, bool* captured)
+ {
++    ATRACE_CALL();
++
++    uint64_t cur_timestamp = ns2ms(systemTime());
++    //LOG("%s evt_timestamp : %llu, cur_timestamp :  %llu", __func__, data.timeMs, cur_timestamp);
++
+     uint32_t msg;
+     int32_t action = data.action & AMOTION_EVENT_ACTION_MASK;
+     switch (action) {
+     case AMOTION_EVENT_ACTION_DOWN:
+     case AMOTION_EVENT_ACTION_POINTER_DOWN:
+         msg = NS_TOUCH_START;
+         break;
+     case AMOTION_EVENT_ACTION_MOVE:
+@@ -1042,8 +1069,23 @@ nsAppShell::NotifyScreenInitialized()
+ /* static */ void
+ nsAppShell::NotifyScreenRotation()
+ {
+     gAppShell->mReaderPolicy->setDisplayInfo();
+     gAppShell->mReader->requestRefreshConfiguration(InputReaderConfiguration::CHANGE_DISPLAY_INFO);
+ 
+     hal::NotifyScreenConfigurationChange(nsScreenGonk::GetConfiguration());
+ }
++
++/* static */ VsyncInfo
++nsAppShell::GetVsyncInfo()
++{
++    return sTimeStamp;
++}
++
++// Call from Vsync thread in HAL.
++/* static */ void
++nsAppShell::NotifyVsyncReceived(int64_t timestamp)
++{
++    android::Mutex::Autolock _l(mVsyncLock);
++    sTimeStamp = timestamp;
++    NS_DispatchToMainThread(new VsyncRunnable());
++}
+diff --git a/widget/gonk/nsAppShell.h b/widget/gonk/nsAppShell.h
+--- a/widget/gonk/nsAppShell.h
++++ b/widget/gonk/nsAppShell.h
+@@ -22,16 +22,19 @@
+ #include "nsBaseAppShell.h"
+ #include "nsTArray.h"
+ 
+ #include "utils/RefBase.h"
+ 
+ namespace mozilla {
+ bool ProcessNextEvent();
+ void NotifyEvent();
++namespace hal {
++struct VsyncInfo;
++}
+ }
+ 
+ extern bool gDrawRequest;
+ 
+ class FdHandler;
+ typedef void(*FdHandlerCallback)(int, FdHandler *);
+ 
+ class FdHandler {
+@@ -71,16 +74,18 @@ public:
+     NS_IMETHOD Exit() MOZ_OVERRIDE;
+ 
+     virtual bool ProcessNextNativeEvent(bool maywait);
+ 
+     void NotifyNativeEvent();
+ 
+     static void NotifyScreenInitialized();
+     static void NotifyScreenRotation();
++    static mozilla::hal::VsyncInfo GetVsyncInfo();
++    static void NotifyVsyncReceived(int64_t timestamp);
+ 
+ protected:
+     virtual ~nsAppShell();
+ 
+     virtual void ScheduleNativeEventCallback();
+ 
+ private:
+     nsresult AddFdHandler(int fd, FdHandlerCallback handlerFunc,

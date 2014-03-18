@@ -1,0 +1,61 @@
+# HG changeset patch
+# Parent f582a26bd0b8e966e25fb9ea78cf8368129d42ba
+# User Jerry Shih <hshih@mozilla.com>
+dump layer
+
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -28,16 +28,30 @@ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG(_args)
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
+ namespace android {
+ class GraphicBuffer;
+ }
+ 
++
++#define MOZ_LAYERS_HAVE_LOG
++#define PR_BEGIN_MACRO  do {
++#define PR_END_MACRO    } while (0)
++
++#define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
++
++#define TMOZ_LAYERS_LOG(args...) \
++  PR_BEGIN_MACRO \
++    __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
++  PR_END_MACRO
++
++
++
+ namespace mozilla {
+ namespace layers {
+ 
+ 
+ typedef uint32_t TextureFlags;
+ 
+ enum LayersBackend {
+   LAYERS_NONE = 0,
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -238,16 +238,18 @@ LayerManagerComposite::EndTransaction(Dr
+     // so we don't need to pass any global transform here.
+     mRoot->ComputeEffectiveTransforms(gfx3DMatrix());
+ 
+     Render();
+   }
+ 
+   mCompositor->SetTargetContext(nullptr);
+ 
++  Dump(nullptr,"bignose layer:",false);
++
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   Log();
+   MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ }
+ 
+ already_AddRefed<gfxASurface>
+ LayerManagerComposite::CreateOptimalMaskSurface(const IntSize &aSize)

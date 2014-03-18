@@ -1,0 +1,8 @@
+gfx_trace_makefile.patch
+print_lost_restore_msg.patch
+test_restart_process.patch
+debug_canvas_element.patch
+limit_display_port.patch
+dump_layer.patch
+disable_dump_layer.patch
+debug_context_lost.patch

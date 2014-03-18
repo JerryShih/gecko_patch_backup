@@ -1,0 +1,6 @@
+# HG changeset patch
+# Parent c63854894992b94155d543fddac9edad35c55e61
+# User Jerry Shih <hshih@mozilla.com>
+try: -b o -p emulator -u reftest,mochitests -t none
+
+

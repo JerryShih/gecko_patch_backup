@@ -1,0 +1,57 @@
+# HG changeset patch
+# Parent 46041cc216fdac8bdced304e84a6acd859acbd83
+# User Jerry Shih <hshih@mozilla.com>
+Bug 930884 - handle cancelBuffer
+
+
+diff --git a/widget/gonk/libdisplay/GonkDisplayICS.cpp b/widget/gonk/libdisplay/GonkDisplayICS.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayICS.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayICS.cpp
+@@ -71,16 +71,23 @@ frameBufferWatcher(void *)
+ 
+ } // anonymous namespace
+ 
+ 
+ namespace mozilla {
+ 
+ static GonkDisplayICS* sGonkDisplay = nullptr;
+ 
++static int
++FramebufferNativeWindowCancelBufferNoop(ANativeWindow* aWindow,
++    android_native_buffer_t* aBuffer)
++{
++    return 0;
++}
++
+ GonkDisplayICS::GonkDisplayICS()
+     : mModule(nullptr)
+     , mHwc(nullptr)
+ {
+     // Some gralloc HALs need this in order to open the
+     // framebuffer device after we restart with the screen off.
+     //
+     // this *must* run BEFORE allocating the
+@@ -99,16 +106,23 @@ GonkDisplayICS::GonkDisplayICS()
+         } while (len < 0 && errno == EINTR);
+         if (len < 0) {
+             LOGE("BootAnimation: wait_for_fb_sleep failed errno: %d", errno);
+         }
+     }
+ 
+     mFBSurface = new FramebufferNativeWindow();
+ 
++    // ICS FrambufferNativeWindow doesn't set the |cancelBuffer|
++    // function pointer.
++    // It will crash when delete the EGL window surface.
++    if (!mFBSurface->cancelBuffer) {
++        mFBSurface->cancelBuffer = FramebufferNativeWindowCancelBufferNoop;
++    }
++
+     int err = hw_get_module(HWC_HARDWARE_MODULE_ID, &mModule);
+     LOGW_IF(err, "%s module not found", HWC_HARDWARE_MODULE_ID);
+     if (!err) {
+         err = hwc_open(mModule, &mHwc);
+         LOGE_IF(err, "%s device failed to initialize (%s)",
+                  HWC_HARDWARE_COMPOSER, strerror(-err));
+     }
+ 

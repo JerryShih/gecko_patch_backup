@@ -1,0 +1,148 @@
+# HG changeset patch
+# Parent 73f9ebaeedd76d3bb5c7ec4d198a21c381f43ebd
+# User Jerry Shih <hshih@mozilla.com>
+use pref
+
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -79,16 +79,114 @@ static int sCompositorThreadRefCount = 0
+ static MessageLoop* sMainLoop = nullptr;
+ // When ContentParent::StartUp() is called, we use the Thread global.
+ // When StartUpWithExistingThread() is used, we have to use the two
+ // duplicated globals, because there's no API to make a Thread from an
+ // existing thread.
+ static PlatformThreadId sCompositorThreadID = 0;
+ static MessageLoop* sCompositorLoop = nullptr;
+ 
++// Force compositor update
++#define COMPOSITOR_PERFORMANCE_DEBUG
++#ifdef COMPOSITOR_PERFORMANCE_DEBUG
++class CompositorForceUpdater;
++
++static CompositorForceUpdater* sCompositorForceUpdater = nullptr;
++
++class CompositorForceUpdater
++{
++public:
++  //static CompositorForceUpdateSetter *GetSingleton(void);
++
++  //static void StartListenPerf(void);
++
++  CompositorForceUpdater();
++  virtual ~CompositorForceUpdater();
++
++  static void ForceUpdatePrefCallback(const char *preference_name,void *);
++
++private:
++  //force composition
++  void CompositorForceUpdate(void);
++
++  //CompositorParent *mCompositorParent;
++  bool mInForceCompositionMode;
++};
++
++void CompositorForceUpdater::StartListenPerf(void)
++{
++  printf_stderr("bignose trigger CompositorForceUpdateSetter::StartListenPerf()");
++
++  if(Preferences::HasUserValue("debug.force_update")){
++    Preferences::ClearUser("debug.force_update");
++  }
++
++  Preferences::RegisterCallback(CompositorForceUpdater::ForceUpdatePrefCallback,"gfx.debug.force-update",nullptr);
++}
++
++CompositorForceUpdater* CompositorForceUpdateSetter::GetSingleton(void)
++{
++  {
++    MutexAutoUnlock watcher_mutex(sCompositorForceUpdateSetterMutex);
++
++    if(!sCompositorForceUpdateSetter){
++      sCompositorForceUpdateSetter=new CompositorForceUpdateSetter();
++    }
++  }
++
++  MOZ_ASSERT(sCompositorForceUpdateSetter);
++
++  return sCompositorForceUpdateSetter.get();
++}
++
++CompositorForceUpdateSetter::CompositorForceUpdateSetter()
++  :mCompositorParent(nullptr),mInForceCompositionMode(false)
++{
++
++}
++
++CompositorForceUpdateSetter::~CompositorForceUpdateSetter()
++{
++
++}
++
++void CompositorForceUpdateSetter::ForceUpdatePrefCallback(const char *preference_name,void *)
++{
++  bool force_update=Preferences::GetBool(preference_name,false);
++  CompositorForceUpdateSetter *setter=CompositorForceUpdateSetter::GetSingleton();
++
++  if(setter->mInForceCompositionMode!=force_update){
++    if(force_update){
++      CancelableTask *render_task=NewRunnableMethod(setter,&CompositorForceUpdateSetter::CompositorForceUpdate);
++      CompositorParent::CompositorLoop()->PostTask(FROM_HERE,render_task);
++    }
++
++    setter->mInForceCompositionMode=force_update;
++  }
++}
++
++void CompositorForceUpdateSetter::CompositorForceUpdate(void)
++{
++  //printf_stderr("bignose trigger CompositorForceUpdateSetter::CompositorForceUpdate()");
++
++  if(mInForceCompositionMode){
++    if(sCompositorMap){
++      for(CompositorMap::iterator compositor_iterator=sCompositorMap->begin();compositor_iterator!=sCompositorMap->end();++compositor_iterator){
++        //printf_stderr("bignose trigger compositor_iterator->second->ScheduleComposition()");
++        compositor_iterator->second->ScheduleComposition();
++      }
++    }
++
++    CancelableTask *render_task=NewRunnableMethod(this,&CompositorForceUpdateSetter::CompositorForceUpdate);
++    CompositorParent::CompositorLoop()->PostTask(FROM_HERE,render_task);
++  }
++}
++#endif  //COMPOSITOR_PERFORMANCE_DEBUG
++
++
+ static void DeferredDeleteCompositorParent(CompositorParent* aNowReadyToDie)
+ {
+   aNowReadyToDie->Release();
+ }
+ 
+ static void DeleteCompositorThread()
+ {
+   if (NS_IsMainThread()){
+diff --git a/gfx/thebes/gfxPrefs.h b/gfx/thebes/gfxPrefs.h
+--- a/gfx/thebes/gfxPrefs.h
++++ b/gfx/thebes/gfxPrefs.h
+@@ -102,16 +102,20 @@ public:
+   // This is where DECL_GFX_PREF for each of the preferences should go.
+   // We will keep these in an alphabetical order to make it easier to see if
+   // a method accessing a pref already exists. Just add yours in the list.
+ 
+   DECL_GFX_PREF(Once, "gfx.work-around-driver-bugs",           WorkAroundDriverBugs, bool, true);
+ 
+   DECL_GFX_PREF(Live, "gl.msaa-level",                         MSAALevel, uint32_t, 2);
+ 
++#ifdef COMPOSITOR_PERFORMANCE_DEBUG
++  DECL_GFX_PREF(Live, "gfx.debug.force-update",                CompositorForceUpdate, bool, false);
++#endif
++
+ public:
+   // Manage the singleton:
+   static gfxPrefs& One()
+   {
+     if (!sInstance) {
+       sInstance = new gfxPrefs;
+     }
+     return *sInstance;

@@ -1,0 +1,51 @@
+# HG changeset patch
+# Parent 410cd990976554c51b52397434f4e8563b6d5181
+# User Jerry Shih <hshih@mozilla.com>
+debug canvas element lost
+
+diff --git a/content/html/content/src/HTMLCanvasElement.cpp b/content/html/content/src/HTMLCanvasElement.cpp
+--- a/content/html/content/src/HTMLCanvasElement.cpp
++++ b/content/html/content/src/HTMLCanvasElement.cpp
+@@ -117,16 +117,19 @@ HTMLCanvasElement::HTMLCanvasElement(alr
+   : nsGenericHTMLElement(aNodeInfo),
+     mWriteOnly(false)
+ {
+ }
+ 
+ HTMLCanvasElement::~HTMLCanvasElement()
+ {
+   ResetPrintCallback();
++  nsIntSize canvas_size =GetSize();
++
++  printf_stderr("bignose HTMLCanvasElement::~HTMLCanvasElement (%d,%d)",canvas_size.width,canvas_size.height);
+ }
+ 
+ NS_IMPL_CYCLE_COLLECTION_INHERITED_4(HTMLCanvasElement, nsGenericHTMLElement,
+                                      mCurrentContext, mPrintCallback,
+                                      mPrintState, mOriginalCanvas)
+ 
+ NS_IMPL_ADDREF_INHERITED(HTMLCanvasElement, Element)
+ NS_IMPL_RELEASE_INHERITED(HTMLCanvasElement, Element)
+diff --git a/js/xpconnect/src/XPCDebug.cpp b/js/xpconnect/src/XPCDebug.cpp
+--- a/js/xpconnect/src/XPCDebug.cpp
++++ b/js/xpconnect/src/XPCDebug.cpp
+@@ -24,17 +24,18 @@ static void DebugDump(const char* fmt, .
+ #endif
+   buffer[sizeof(buffer)-1] = '\0';
+   va_end(ap);
+ #ifdef XP_WIN
+   if (IsDebuggerPresent()) {
+     OutputDebugStringA(buffer);
+   }
+ #endif
+-  printf("%s", buffer);
++  //printf("%s", buffer);
++  printf_stderr("%s", buffer);
+ }
+ 
+ bool
+ xpc_DumpJSStack(JSContext* cx, bool showArgs, bool showLocals, bool showThisProps)
+ {
+     if (char* buf = xpc_PrintJSStack(cx, showArgs, showLocals, showThisProps)) {
+         DebugDump("%s\n", buf);
+         JS_smprintf_free(buf);

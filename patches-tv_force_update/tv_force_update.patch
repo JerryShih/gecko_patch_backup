@@ -1,0 +1,49 @@
+# HG changeset patch
+# Parent 67485526e241bb70f4eab24f1936356469c6130e
+# User Jerry Shih <hshih@mozilla.com>
+tv force update
+
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -47,16 +47,18 @@
+ #include "nsXULAppAPI.h"                // for XRE_GetIOMessageLoop
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ 
++#define COMPOSITOR_PERFORMANCE_DEBUG
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -695,16 +697,20 @@ CompositorParent::CompositeToTarget(Draw
+ #endif
+ 
+   // 0 -> Full-tilt composite
+   if (gfxPrefs::LayersCompositionFrameRate() == 0) {
+     // Special full-tilt composite mode for performance testing
+     ScheduleComposition();
+   }
+ 
++#ifdef COMPOSITOR_PERFORMANCE_DEBUG
++  ScheduleComposition();
++#endif
++
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_END);
+ }
+ 
+ void
+ CompositorParent::ForceComposeToTarget(DrawTarget* aTarget)
+ {
+   PROFILER_LABEL("CompositorParent", "ForceComposeToTarget");
+   AutoRestore<bool> override(mOverrideComposeReadiness);
