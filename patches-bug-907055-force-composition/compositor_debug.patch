@@ -1,12 +1,12 @@
 # HG changeset patch
-# Parent 7a25551765dccd49131e9412af336b7018e7932e
+# Parent 91e24cc0073684dc554fdfcbbaca50ddcf49118e
 # User Jerry Shih <hshih@mozilla.com>
 Bug 907055 - Have an preference value to enable Compositor render-insomnia
 
 diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
 --- a/gfx/layers/ipc/CompositorParent.cpp
 +++ b/gfx/layers/ipc/CompositorParent.cpp
-@@ -129,16 +129,44 @@ public:
+@@ -132,16 +132,44 @@ public:
  private:
    int OpenFD(void);
  
@@ -32,7 +32,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
 +  CompositorForceUpdateSetter();
 +  virtual ~CompositorForceUpdateSetter();
 +
-+  static int ForceUpdatePrefCallback(const char *preference_name,void *);
++  static void ForceUpdatePrefCallback(const char *preference_name,void *);
 +
 +private:
 +  //force composition
@@ -51,7 +51,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
  
  static void DeleteCompositorThread()
  {
-@@ -168,32 +196,40 @@ CompositorParent::StartUpWithExistingThr
+@@ -171,32 +199,40 @@ CompositorParent::StartUpWithExistingThr
    sCompositorLoop = aMsgLoop;
    sCompositorThreadID = aThreadID;
    sMainLoop = MessageLoop::current();
@@ -92,7 +92,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
    DestroyCompositorMap();
  }
  
-@@ -1319,11 +1355,83 @@ int CompositorDebugPropWatcher::OpenFD(v
+@@ -1461,11 +1497,81 @@ int CompositorDebugPropWatcher::OpenFD(v
      close(fd);
      return -1;
    }
@@ -139,7 +139,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
 +
 +}
 +
-+int CompositorForceUpdateSetter::ForceUpdatePrefCallback(const char *preference_name,void *)
++void CompositorForceUpdateSetter::ForceUpdatePrefCallback(const char *preference_name,void *)
 +{
 +  bool force_update=Preferences::GetBool(preference_name,false);
 +  CompositorForceUpdateSetter *setter=CompositorForceUpdateSetter::GetSingleton();
@@ -152,8 +152,6 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
 +
 +    setter->mInForceCompositionMode=force_update;
 +  }
-+
-+  return 0;
 +}
 +
 +void CompositorForceUpdateSetter::CompositorForceUpdate(void)

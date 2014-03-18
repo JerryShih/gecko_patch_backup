@@ -1,76 +1,90 @@
 # HG changeset patch
-# Parent d71579c316c17b0ca7aa1130075dc9d70d3ff5b3
+# Parent 31113754db3bbfcde38c3af98edd71d5a5a78489
 # User Jerry Shih <hshih@mozilla.com>
 modify gfx build option to -O0
 
+diff --git a/content/canvas/src/Makefile.in b/content/canvas/src/Makefile.in
+--- a/content/canvas/src/Makefile.in
++++ b/content/canvas/src/Makefile.in
+@@ -2,8 +2,10 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ CXXFLAGS	+= $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
++
 diff --git a/content/media/Makefile.in b/content/media/Makefile.in
 --- a/content/media/Makefile.in
 +++ b/content/media/Makefile.in
-@@ -19,8 +19,12 @@ ifdef MOZ_DIRECTSHOW
- LOCAL_INCLUDES += -I$(topsrcdir)/media/webrtc/trunk/webrtc/modules/video_capture/windows/
- endif
+@@ -3,8 +3,11 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
  
  CFLAGS   += $(GSTREAMER_CFLAGS)
  CXXFLAGS += $(GSTREAMER_CFLAGS)
- DEFINES  += -DMOZILLA_INTERNAL_API
  
  AudioNodeEngineNEON.$(OBJ_SUFFIX): CXXFLAGS += -mfpu=neon
-+
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
 +
 diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
 --- a/gfx/2d/Makefile.in
 +++ b/gfx/2d/Makefile.in
-@@ -59,8 +59,11 @@ endif
- 
+@@ -26,8 +26,10 @@ endif
  ifdef SOLARIS_SUNPRO_CXX
  ImageScalingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
  BlurSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
+ FilterProcessingSSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
  endif
  endif
  
- CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS)
-+
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
 diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
 --- a/gfx/gl/Makefile.in
 +++ b/gfx/gl/Makefile.in
-@@ -20,8 +20,11 @@ endif
- 
- include $(topsrcdir)/config/rules.mk
- include $(topsrcdir)/ipc/chromium/chromium-config.mk
+@@ -7,8 +7,11 @@ include $(topsrcdir)/config/rules.mk
+ ifeq ($(MOZ_WIDGET_TOOLKIT),gonk)
+ CXXFLAGS += -I$(ANDROID_SOURCE)/hardware/libhardware/include
+ endif
  
  DEFINES := $(filter-out -DUNICODE,$(DEFINES))
  
- CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS) $(TK_CFLAGS)
- CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(MOZ_PIXMAN_CFLAGS) $(TK_CFLAGS)
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
 +
 diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
 --- a/gfx/layers/Makefile.in
 +++ b/gfx/layers/Makefile.in
-@@ -38,8 +38,11 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(MOZ_PI
+@@ -9,10 +9,13 @@ CXXFLAGS += \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/base/include/media/stagefright/openmax \
+         -I$(ANDROID_SOURCE)/frameworks/av/include/media/stagefright \
+         -I$(ANDROID_SOURCE)/frameworks/native/include/media/openmax \
+         $(NULL)
  
- ifdef _MSC_VER
- ifeq ($(CPU_ARCH),x86_64)
- # Workaround compiler bug (Bug 795594)
- LayerTreeInvalidation.$(OBJ_SUFFIX): CXXFLAGS += -GL-
- Layers.$(OBJ_SUFFIX): CXXFLAGS += -GL-
- endif
- endif
-+
-+
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ 
 +MOZ_OPTIMIZE_FLAGS="-O0"
++
++
+ PremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
 diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
 --- a/gfx/src/Makefile.in
 +++ b/gfx/src/Makefile.in
-@@ -14,8 +14,10 @@ endif
+@@ -9,8 +9,11 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFL
  
- ifeq ($(MOZ_WIDGET_TOOLKIT),os2)
- CXXFLAGS += $(CAIRO_FT_CFLAGS)
+ ifdef MOZ_WIDGET_GTK
+ CXXFLAGS += $(MOZ_PANGO_CFLAGS)
  endif
  
  ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
@@ -78,71 +92,70 @@ diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
  endif
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
++
 diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
 --- a/gfx/thebes/Makefile.in
 +++ b/gfx/thebes/Makefile.in
-@@ -84,8 +84,12 @@ ifdef SOLARIS_SUNPRO_CXX
+@@ -38,8 +38,11 @@ endif
+ 
+ ifdef SOLARIS_SUNPRO_CXX
  gfxAlphaRecoverySSE2.$(OBJ_SUFFIX): OS_CXXFLAGS += -xarch=sse2 -xO4
  endif
  endif
  
- PremultiplyTables.h: $(srcdir)/genTables.py
+ DeprecatedPremultiplyTables.h: $(srcdir)/genTables.py
  	$(PYTHON) $(srcdir)/genTables.py
- 
- gfxUtils.$(OBJ_SUFFIX): PremultiplyTables.h
 +
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/ipc/chromium/Makefile.in b/ipc/chromium/Makefile.in
+--- a/ipc/chromium/Makefile.in
++++ b/ipc/chromium/Makefile.in
+@@ -31,8 +31,11 @@ ifdef MOZ_NATIVE_LIBEVENT # {
+ export-preqs = \
+   $(call mkdir_deps,$(CURDIR)/third_party/libevent) \
+   $(NULL)
+ 
+ export:: $(export-preqs)
+ 	echo '#include <event.h>' > $(CURDIR)/third_party/libevent/event.h
+ 
+ endif # }
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
 +
 diff --git a/modules/libpref/src/Makefile.in b/modules/libpref/src/Makefile.in
 --- a/modules/libpref/src/Makefile.in
 +++ b/modules/libpref/src/Makefile.in
-@@ -41,8 +41,12 @@ nsPrefService.$(OBJ_SUFFIX): nsPrefServi
+@@ -26,8 +26,11 @@ grepref_files += $(topsrcdir)/mobile/and
+ endif
  endif
  
- 
  greprefs.js: $(grepref_files)
- 	$(PYTHON) $(topsrcdir)/config/Preprocessor.py $(PREF_PPFLAGS) $(DEFINES) $(ACDEFINES) $(XULPPFLAGS) $^ > $@
+ 	$(call py_action,preprocessor,$(PREF_PPFLAGS) $(DEFINES) $(ACDEFINES) $(XULPPFLAGS) $^ -o $@)
  
  libs:: greprefs.js
  	$(INSTALL) $^ $(DIST)/bin/
-+
 +
 +MOZ_OPTIMIZE_FLAGS="-O0"
 +
 diff --git a/widget/gonk/Makefile.in b/widget/gonk/Makefile.in
 --- a/widget/gonk/Makefile.in
 +++ b/widget/gonk/Makefile.in
-@@ -37,8 +37,11 @@ LOCAL_INCLUDES += \
- 	-I$(topsrcdir)/widget/shared \
- 	-I$(topsrcdir)/dom/system/android \
- 	-I$(topsrcdir)/content/events/src \
- 	-I$(topsrcdir)/gfx/skia/include/core \
- 	-I$(topsrcdir)/gfx/skia/include/config \
- 	-I$(topsrcdir)/content/media/omx/mediaresourcemanager \
- 	-I$(srcdir) \
- 	$(NULL)
-+
-+#MOZ_OPTIMIZE_FLAGS="-O0"
-+
-diff --git a/widget/gonk/libdisplay/Makefile.in b/widget/gonk/libdisplay/Makefile.in
---- a/widget/gonk/libdisplay/Makefile.in
-+++ b/widget/gonk/libdisplay/Makefile.in
-@@ -27,8 +27,10 @@ DEFINES += -DXPCOM_GLUE
- LOCAL_INCLUDES += \
+@@ -15,8 +15,10 @@
+ include $(topsrcdir)/config/rules.mk
+ 
+ CXXFLAGS += \
  	-I$(ANDROID_SOURCE)/hardware/libhardware/include \
  	-I$(ANDROID_SOURCE)/hardware/libhardware_legacy/include \
- 	-I$(ANDROID_SOURCE)/frameworks/native/include/gui \
  	-I$(ANDROID_SOURCE)/frameworks/native/opengl/include \
- 	-I$(ANDROID_SOURCE)/system/core/libsuspend/include \
- 	-I$(srcdir) \
  	$(NULL)
+ 
++MOZ_OPTIMIZE_FLAGS="-O0"
 +
-+#MOZ_OPTIMIZE_FLAGS="-O0"
 diff --git a/xpcom/base/Makefile.in b/xpcom/base/Makefile.in
 --- a/xpcom/base/Makefile.in
 +++ b/xpcom/base/Makefile.in
-@@ -41,8 +41,11 @@ ErrorListCxxDefines.h: ErrorList.h Makef
+@@ -26,8 +26,11 @@ ErrorListCxxDefines.h: ErrorList.h Makef
  
  ErrorListCDefines.h: ErrorList.h Makefile
  		sed 's/.*ERROR(\([A-Z_0-9]*\),\( *\)\(.*\))[^)]*/#define \1 \2((nsresult)(\3))/' < $< > $@

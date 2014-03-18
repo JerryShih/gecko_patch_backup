@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent 995f4124ac8567e6f2d546b0987d5c8f0befb1b3
+# Parent 8d4e724399b7400459b76f52c56a2c72fc121e8d
 # User Jerry Shih <hshih@mozilla.com>
 test message loop io
 * * *
@@ -64,9 +64,9 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
  
  namespace mozilla {
  namespace layers {
-@@ -63,30 +79,68 @@ namespace layers {
- CompositorParent::LayerTreeState::LayerTreeState()
-   : mParent(nullptr)
+@@ -65,30 +81,68 @@ CompositorParent::LayerTreeState::LayerT
+   , mLayerManager(nullptr)
+   , mCrossProcessParent(nullptr)
  {
  }
  
@@ -133,7 +133,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
  static void DeleteCompositorThread()
  {
    if (NS_IsMainThread()){
-@@ -111,28 +165,36 @@ CompositorParent::StartUpWithExistingThr
+@@ -113,28 +167,36 @@ CompositorParent::StartUpWithExistingThr
                                              PlatformThreadId aThreadID)
  {
    MOZ_ASSERT(!sCompositorThread);
@@ -170,12 +170,12 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
    DestroyCompositorMap();
  }
  
-@@ -702,20 +764,16 @@ CompositorParent::AllocPLayerTransaction
+@@ -833,20 +895,16 @@ CompositorParent::AllocPLayerTransaction
  
  bool
  CompositorParent::DeallocPLayerTransactionParent(PLayerTransactionParent* actor)
  {
-   delete actor;
+   static_cast<LayerTransactionParent*>(actor)->ReleaseIPDLReference();
    return true;
  }
  
@@ -191,7 +191,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorPare
  }
  
  void CompositorParent::DestroyCompositorMap()
-@@ -1070,11 +1128,203 @@ CrossProcessCompositorParent::CloneTople
+@@ -1211,11 +1269,203 @@ CrossProcessCompositorParent::CloneTople
          CompositorParent::Create(transport, base::GetProcId(aPeerProcess));
        compositor->CloneManagees(this, aCtx);
        compositor->IToplevelProtocol::SetTransport(transport);

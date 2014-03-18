@@ -1,28 +1,26 @@
 # HG changeset patch
-# Parent 66d61cb636f32b41822dc2f91bc2d0707d0d7133
+# Parent cb8856df7b2b01094f8691656ec620bf2a2fcef5
 # User Morris Tseng <mtseng@mozilla.com>
 
 diff --git a/widget/gonk/nsWindow.cpp b/widget/gonk/nsWindow.cpp
 --- a/widget/gonk/nsWindow.cpp
 +++ b/widget/gonk/nsWindow.cpp
-@@ -169,18 +169,19 @@ nsWindow::nsWindow()
-         //
-         // NB: GetPlatform() will create the gfxPlatform, which wants
+@@ -160,17 +160,18 @@ nsWindow::nsWindow()
          // to know the color depth, which asks our native window.
          // This has to happen after other init has finished.
          gfxPlatform::GetPlatform();
          sUsingOMTC = ShouldUseOffMainThreadCompositing();
  
          property_get("ro.display.colorfill", propValue, "0");
--        sUsingHwc = Preferences::GetBool("layers.composer2d.enabled",
--                                         atoi(propValue) == 1);
-+        //sUsingHwc = Preferences::GetBool("layers.composer2d.enabled",
-+        //                                 atoi(propValue) == 1);
+ 
+         //Update sUsingHwc whenever layers.composer2d.enabled changes
+-        Preferences::AddBoolVarCache(&sUsingHwc, "layers.composer2d.enabled");
++        //Preferences::AddBoolVarCache(&sUsingHwc, "layers.composer2d.enabled");
 +        sUsingHwc = true;
  
          if (sUsingOMTC) {
            sOMTCSurface = new gfxImageSurface(gfxIntSize(1, 1),
-                                              gfxImageFormatRGB24);
+                                              gfxImageFormat::RGB24);
          }
      }
  }

@@ -1,5 +1,6 @@
 gfx_trace_makefile.patch
-force-enable-hwcomposer
-message_io_working.patch
 compositor_debug.patch
+use_pref.patch
+message_io_working.patch
+force-enable-hwcomposer
 GPU_video_texture.patch
