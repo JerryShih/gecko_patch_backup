@@ -1,0 +1,24 @@
+# HG changeset patch
+# Parent cbc44ba5ff849918c1a376770b3fd961e1643276
+# User Jerry Shih <hshih@mozilla.com>
+diff --git a/layout/base/RestyleManager.cpp b/layout/base/RestyleManager.cpp
+--- a/layout/base/RestyleManager.cpp
++++ b/layout/base/RestyleManager.cpp
+@@ -2226,16 +2226,17 @@ ElementRestyler::CaptureChange(nsStyleCo
+  * mParentContent is the content node used to resolve the parent style
+  * context.  This means that, for pseudo-elements, it is the content
+  * that should be used for selector matching (rather than the fake
+  * content node attached to the frame).
+  */
+ void
+ ElementRestyler::Restyle(nsRestyleHint aRestyleHint)
+ {
++  PROFILER_LABEL("ElementRestyler", "Restyle");
+   // It would be nice if we could make stronger assertions here; they
+   // would let us simplify the ?: expressions below setting |content|
+   // and |pseudoContent| in sensible ways as well as making what
+   // |content| and |pseudoContent| mean, and their relationship to
+   // |mFrame->GetContent()|, make more sense.  However, we can't,
+   // because of frame trees like the one in
+   // https://bugzilla.mozilla.org/show_bug.cgi?id=472353#c14 .  Once we
+   // fix bug 242277 we should be able to make this make more sense.

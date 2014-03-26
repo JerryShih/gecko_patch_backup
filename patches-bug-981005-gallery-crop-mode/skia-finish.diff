@@ -1,0 +1,347 @@
+diff --git a/content/canvas/src/CanvasRenderingContext2D.cpp b/content/canvas/src/CanvasRenderingContext2D.cpp
+--- a/content/canvas/src/CanvasRenderingContext2D.cpp
++++ b/content/canvas/src/CanvasRenderingContext2D.cpp
+@@ -96,16 +96,18 @@
+ #include "GLContextProvider.h"
+ 
+ #undef free // apparently defined by some windows header, clashing with a free()
+             // method in SkTypes.h
+ #include "SkiaGLGlue.h"
+ #include "SurfaceStream.h"
+ #include "SurfaceTypes.h"
+ 
++#include <cutils/properties.h>
++
+ using mozilla::gl::GLContext;
+ using mozilla::gl::SkiaGLGlue;
+ using mozilla::gl::GLContextProvider;
+ 
+ #ifdef XP_WIN
+ #include "gfxWindowsPlatform.h"
+ #endif
+ 
+@@ -437,30 +439,48 @@ public:
+       static_cast<CanvasRenderingContext2DUserData*>(aData);
+     CanvasRenderingContext2D* context = self->mContext;
+     if (!context || !context->mStream || !context->mTarget)
+       return;
+ 
+     // Since SkiaGL default to store drawing command until flush
+     // We will have to flush it before present.
+     context->mTarget->Flush();
++
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("skia.pretransaction", propValue,"0");
++    if(atoi(propValue)){
++      gl::SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
++      glue->GetGLContext()->fFinish();
++      printf_stderr("bignose in PreTransactionCallback gl flush(), gl=%p",glue->GetGLContext());
++    }
+   }
+ 
+   static void DidTransactionCallback(void* aData)
+   {
+     CanvasRenderingContext2DUserData* self =
+       static_cast<CanvasRenderingContext2DUserData*>(aData);
+     if (self->mContext) {
+       self->mContext->MarkContextClean();
+     }
+-  }
++
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("skia.didtransaction", propValue,"0");
++    if(atoi(propValue)){
++      gl::SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
++      glue->GetGLContext()->fFinish();
++      printf_stderr("bignose in DidTransactionCallback gl flush(), gl=%p",glue->GetGLContext());
++    }
++  }
++
+   bool IsForContext(CanvasRenderingContext2D *aContext)
+   {
+     return mContext == aContext;
+   }
++
+   void Forget()
+   {
+     mContext = nullptr;
+   }
+ 
+ private:
+   CanvasRenderingContext2D *mContext;
+ };
+@@ -916,16 +936,18 @@ CanvasRenderingContext2D::GetHeight() co
+ {
+   return mHeight;
+ }
+ #endif
+ 
+ NS_IMETHODIMP
+ CanvasRenderingContext2D::SetDimensions(int32_t width, int32_t height)
+ {
++  printf_stderr("bignose %p CanvasRenderingContext2D::SetDimensions(%d,%d)",this,width,height);
++
+   ClearTarget();
+ 
+   // Zero sized surfaces can cause problems.
+   mZero = false;
+   if (height == 0) {
+     height = 1;
+     mZero = true;
+   }
+@@ -3177,17 +3199,17 @@ CanvasRenderingContext2D::IsPointInStrok
+ void
+ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image,
+                                     double sx, double sy, double sw,
+                                     double sh, double dx, double dy,
+                                     double dw, double dh,
+                                     uint8_t optional_argc,
+                                     ErrorResult& error)
+ {
+-  printf_stderr("bignose CanvasRenderingContext2D::DrawImage");
++  //printf_stderr("bignose CanvasRenderingContext2D::DrawImage");
+ 
+   MOZ_ASSERT(optional_argc == 0 || optional_argc == 2 || optional_argc == 6);
+ 
+   RefPtr<SourceSurface> srcSurf;
+   gfxIntSize imgSize;
+ 
+   Element* element;
+ 
+@@ -4189,16 +4211,25 @@ CanvasRenderingContext2D::GetCanvasLayer
+     // No DidTransactionCallback will be received, so mark the context clean
+     // now so future invalidations will be dispatched.
+     MarkContextClean();
+     return nullptr;
+   }
+ 
+   mTarget->Flush();
+ 
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("skia.getcanvaslayer.1", propValue, "0");
++  if (atoi(propValue)) {
++    gl::SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
++    glue->GetGLContext()->fFinish();
++    printf_stderr("bignose in GetCanvasLayer::Flush gl flush() 1, gl=%p",
++        glue->GetGLContext());
++  }
++
+   if (!mResetLayer && aOldLayer) {
+     CanvasRenderingContext2DUserData* userData =
+       static_cast<CanvasRenderingContext2DUserData*>(
+         aOldLayer->GetUserData(&g2DContextLayerUserData));
+ 
+     CanvasLayer::Data data;
+     if (mStream) {
+       SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
+@@ -4261,16 +4292,24 @@ CanvasRenderingContext2D::GetCanvasLayer
+ 
+   canvasLayer->Initialize(data);
+   uint32_t flags = mOpaque ? Layer::CONTENT_OPAQUE : 0;
+   canvasLayer->SetContentFlags(flags);
+   canvasLayer->Updated();
+ 
+   mResetLayer = false;
+ 
++  property_get("skia.getcanvaslayer.2", propValue, "0");
++  if (atoi(propValue)) {
++    gl::SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
++    glue->GetGLContext()->fFinish();
++    printf_stderr("bignose in GetCanvasLayer::Flush gl flush() 2, gl=%p",
++        glue->GetGLContext());
++  }
++
+   return canvasLayer.forget();
+ }
+ 
+ void
+ CanvasRenderingContext2D::MarkContextClean()
+ {
+   if (mInvalidateCount > 0) {
+     mPredictManyRedrawCalls = mInvalidateCount > kCanvasMaxInvalidateCount;
+diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLContext.cpp
+--- a/content/canvas/src/WebGLContext.cpp
++++ b/content/canvas/src/WebGLContext.cpp
+@@ -377,16 +377,18 @@ WebGLContext::GetHeight() const
+ {
+   return mHeight;
+ }
+ #endif
+ 
+ NS_IMETHODIMP
+ WebGLContext::SetDimensions(int32_t width, int32_t height)
+ {
++    printf_stderr("bignose %p WebGLContext::SetDimensions(%d,%d)",this,width,height);
++
+     // Early error return cases
+ 
+     if (width < 0 || height < 0) {
+         GenerateWarning("Canvas size is too large (seems like a negative value wrapped)");
+         return NS_ERROR_OUT_OF_MEMORY;
+     }
+ 
+     if (!GetCanvas())
+diff --git a/gfx/2d/DrawTargetSkia.cpp b/gfx/2d/DrawTargetSkia.cpp
+--- a/gfx/2d/DrawTargetSkia.cpp
++++ b/gfx/2d/DrawTargetSkia.cpp
+@@ -26,16 +26,19 @@
+ #include "skia/SkLayerDrawLooper.h"
+ #include "skia/SkDashPathEffect.h"
+ #include "Logging.h"
+ #include "HelpersSkia.h"
+ #include "Tools.h"
+ #include "DataSurfaceHelpers.h"
+ #include <algorithm>
+ 
++#include <cutils/properties.h>
++#include "SkiaGLGlue.h"
++
+ namespace mozilla {
+ namespace gfx {
+ 
+ class GradientStopsSkia : public GradientStops
+ {
+ public:
+   MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(GradientStopsSkia)
+   GradientStopsSkia(const std::vector<GradientStop>& aStops, uint32_t aNumStops, ExtendMode aExtendMode)
+@@ -283,16 +286,24 @@ struct AutoPaintSetup {
+   SkCanvas* mCanvas;
+   Float mAlpha;
+ };
+ 
+ void
+ DrawTargetSkia::Flush()
+ {
+   mCanvas->flush();
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("skia.drawtargetskia", propValue,"0");
++  if(atoi(propValue)){
++    gl::SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
++    glue->GetGLContext()->fFinish();
++    printf_stderr("bignose in DrawTargetSkia::Flush gl flush(), gl=%p",glue->GetGLContext());
++  }
+ }
+ 
+ void
+ DrawTargetSkia::DrawSurface(SourceSurface *aSurface,
+                             const Rect &aDest,
+                             const Rect &aSource,
+                             const DrawSurfaceOptions &aSurfOptions,
+                             const DrawOptions &aOptions)
+diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
+--- a/gfx/layers/client/CanvasClient.cpp
++++ b/gfx/layers/client/CanvasClient.cpp
+@@ -105,16 +105,18 @@ CanvasClientSurfaceStream::CanvasClientS
+                                                      TextureFlags aFlags)
+   : CanvasClient(aLayerForwarder, aFlags)
+ {
+ }
+ 
+ void
+ CanvasClientSurfaceStream::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
+ {
++  printf_stderr("bignose CanvasClientSurfaceStream::Update, (%d,%d)",aSize.width,aSize.height);
++
+   GLScreenBuffer* screen = aLayer->mGLContext->Screen();
+   SurfaceStream* stream = nullptr;
+ 
+   if (aLayer->mStream) {
+     stream = aLayer->mStream;
+ 
+     // Copy our current surface to the current producer surface in our stream, then
+     // call SwapProducer to make a new buffer ready.
+@@ -124,16 +126,20 @@ CanvasClientSurfaceStream::Update(gfx::I
+     stream = screen->Stream();
+   }
+ 
+   bool isCrossProcess = !(XRE_GetProcessType() == GeckoProcessType_Default);
+   bool bufferCreated = false;
+   if (isCrossProcess) {
+ #ifdef MOZ_WIDGET_GONK
+     SharedSurface* surf = stream->SwapConsumer();
++
++    printf_stderr("bignose CanvasClientSurfaceStream::Update get texture:%p",surf);
++
++
+     if (!surf) {
+       printf_stderr("surf is null post-SwapConsumer!\n");
+       return;
+     }
+ 
+     if (surf->Type() != SharedSurfaceType::Gralloc) {
+       printf_stderr("Unexpected non-Gralloc SharedSurface in IPC path!");
+       MOZ_ASSERT(false);
+diff --git a/gfx/skia/trunk/src/gpu/gl/GrGpuGL.cpp b/gfx/skia/trunk/src/gpu/gl/GrGpuGL.cpp
+--- a/gfx/skia/trunk/src/gpu/gl/GrGpuGL.cpp
++++ b/gfx/skia/trunk/src/gpu/gl/GrGpuGL.cpp
+@@ -10,16 +10,18 @@
+ #include "GrGLStencilBuffer.h"
+ #include "GrGLPath.h"
+ #include "GrGLShaderBuilder.h"
+ #include "GrTemplates.h"
+ #include "GrTypes.h"
+ #include "SkStrokeRec.h"
+ #include "SkTemplates.h"
+ 
++#include <cutils/properties.h>
++
+ #define GL_CALL(X) GR_GL_CALL(this->glInterface(), X)
+ #define GL_CALL_RET(RET, X) GR_GL_CALL_RET(this->glInterface(), RET, X)
+ 
+ #define SKIP_CACHE_CHECK    true
+ 
+ #if GR_GL_CHECK_ALLOC_WITH_GET_ERROR
+     #define CLEAR_ERROR_BEFORE_ALLOC(iface)   GrGLClearErr(iface)
+     #define GL_ALLOC_CALL(iface, call)        GR_GL_CALL_NOERRCHECK(iface, call)
+@@ -1693,17 +1695,27 @@ void GrGpuGL::onGpuDrawPath(const GrPath
+             avmr.setIdentity(drawState);
+         }
+ 
+         this->drawSimpleRect(bounds, NULL);
+     }
+ }
+ 
+ void GrGpuGL::onResolveRenderTarget(GrRenderTarget* target) {
++    //SkDebugf("bignose GrGpuGL::onResolveRenderTarget");
++
+     GrGLRenderTarget* rt = static_cast<GrGLRenderTarget*>(target);
++
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("skia.grgpugl.1", propValue,"0");
++    if(atoi(propValue)){
++      GL_CALL(Finish());
++      SkDebugf("bignose in GrGpuGL::onResolveRenderTarget gl flush() 1, gl=%p",this->glInterface());
++    }
++
+     if (rt->needsResolve()) {
+         // Some extensions automatically resolves the texture when it is read.
+         if (this->glCaps().usesMSAARenderBuffers()) {
+             SkASSERT(rt->textureFBOID() != rt->renderFBOID());
+             GL_CALL(BindFramebuffer(GR_GL_READ_FRAMEBUFFER, rt->renderFBOID()));
+             GL_CALL(BindFramebuffer(GR_GL_DRAW_FRAMEBUFFER, rt->textureFBOID()));
+             // make sure we go through flushRenderTarget() since we've modified
+             // the bound DRAW FBO ID.
+@@ -1733,16 +1745,22 @@ void GrGpuGL::onResolveRenderTarget(GrRe
+                 int top = r.fBottom + r.fHeight;
+                 GL_CALL(BlitFramebuffer(r.fLeft, r.fBottom, right, top,
+                                         r.fLeft, r.fBottom, right, top,
+                                         GR_GL_COLOR_BUFFER_BIT, GR_GL_NEAREST));
+             }
+         }
+         rt->flagAsResolved();
+     }
++
++    property_get("skia.grgpugl.2", propValue,"0");
++    if(atoi(propValue)){
++      GL_CALL(Finish());
++      SkDebugf("bignose in GrGpuGL::onResolveRenderTarget gl flush() 2, gl=%p",this->glInterface());
++    }
+ }
+ 
+ namespace {
+ 
+ GrGLenum gr_to_gl_stencil_func(GrStencilFunc basicFunc) {
+     static const GrGLenum gTable[] = {
+         GR_GL_ALWAYS,           // kAlways_StencilFunc
+         GR_GL_NEVER,            // kNever_StencilFunc

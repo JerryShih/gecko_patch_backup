@@ -1,0 +1,50 @@
+# HG changeset patch
+# Parent e79d23fbbf2f3bb92657fd5597015281f1eee6e3
+# User Jerry Shih <hshih@mozilla.com>
+remove file_rule, CalcStyleDifference tag
+
+
+diff --git a/layout/style/nsStyleContext.cpp b/layout/style/nsStyleContext.cpp
+--- a/layout/style/nsStyleContext.cpp
++++ b/layout/style/nsStyleContext.cpp
+@@ -403,17 +403,17 @@ nsStyleContext::ApplyStyleFixups(bool aS
+   // Compute User Interface style, to trigger loads of cursors
+   StyleUserInterface();
+ }
+ 
+ nsChangeHint
+ nsStyleContext::CalcStyleDifference(nsStyleContext* aOther,
+                                     nsChangeHint aParentHintsNotHandledForDescendants)
+ {
+-  PROFILER_LABEL("nsStyleContext", "CalcStyleDifference");
++  //PROFILER_LABEL("nsStyleContext", "CalcStyleDifference");
+ 
+   NS_ABORT_IF_FALSE(NS_IsHintSubset(aParentHintsNotHandledForDescendants,
+                                     nsChangeHint_Hints_NotHandledForDescendants),
+                     "caller is passing inherited hints, but shouldn't be");
+ 
+   nsChangeHint hint = NS_STYLE_HINT_NONE;
+   NS_ENSURE_TRUE(aOther, hint);
+   // We must always ensure that we populate the structs on the new style
+diff --git a/layout/style/nsStyleSet.cpp b/layout/style/nsStyleSet.cpp
+--- a/layout/style/nsStyleSet.cpp
++++ b/layout/style/nsStyleSet.cpp
+@@ -935,17 +935,17 @@ nsStyleSet::AssertNoCSSRules(nsRuleNode*
+ #endif
+ 
+ // Enumerate the rules in a way that cares about the order of the rules.
+ void
+ nsStyleSet::FileRules(nsIStyleRuleProcessor::EnumFunc aCollectorFunc, 
+                       RuleProcessorData* aData, Element* aElement,
+                       nsRuleWalker* aRuleWalker)
+ {
+-  PROFILER_LABEL("nsStyleSet", "FileRules");
++  //PROFILER_LABEL("nsStyleSet", "FileRules");
+ 
+   // Cascading order:
+   // [least important]
+   //  - UA normal rules                    = Agent        normal
+   //  - User normal rules                  = User         normal
+   //  - Presentation hints                 = PresHint     normal
+   //  - Author normal rules                = Document     normal
+   //  - Override normal rules              = Override     normal

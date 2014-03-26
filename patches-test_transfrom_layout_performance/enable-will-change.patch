@@ -1,0 +1,26 @@
+# HG changeset patch
+# Parent 3bbf148a4cdd058b293854e14a4ca1ce432ac87d
+# User Jerry Shih <hshih@mozilla.com>
+diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
+--- a/modules/libpref/src/init/all.js
++++ b/modules/libpref/src/init/all.js
+@@ -1781,17 +1781,18 @@ pref("layout.css.filters.enabled", false
+ // Is support for CSS sticky positioning enabled?
+ #ifdef RELEASE_BUILD
+ pref("layout.css.sticky.enabled", false);
+ #else
+ pref("layout.css.sticky.enabled", true);
+ #endif
+ 
+ // Is support for CSS "will-change" enabled?
+-pref("layout.css.will-change.enabled", false);
++//pref("layout.css.will-change.enabled", false);
++pref("layout.css.will-change.enabled", true);
+ 
+ // Is support for CSS "text-align: true X" enabled?
+ pref("layout.css.text-align-true-value.enabled", false);
+ 
+ // Is support for the CSS4 image-orientation property enabled?
+ pref("layout.css.image-orientation.enabled", true);
+ 
+ // Is support for CSS3 Fonts features enabled?

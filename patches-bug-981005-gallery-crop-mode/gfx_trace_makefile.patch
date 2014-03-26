@@ -1,0 +1,204 @@
+# HG changeset patch
+# Parent e84a391b604b6690c8360f20518a70172679fff3
+# User Jerry Shih <hshih@mozilla.com>
+modify gfx build option to -O0
+
+diff --git a/content/canvas/src/CanvasRenderingContext2D.cpp b/content/canvas/src/CanvasRenderingContext2D.cpp
+--- a/content/canvas/src/CanvasRenderingContext2D.cpp
++++ b/content/canvas/src/CanvasRenderingContext2D.cpp
+@@ -3177,16 +3177,18 @@ CanvasRenderingContext2D::IsPointInStrok
+ void
+ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image,
+                                     double sx, double sy, double sw,
+                                     double sh, double dx, double dy,
+                                     double dw, double dh,
+                                     uint8_t optional_argc,
+                                     ErrorResult& error)
+ {
++  printf_stderr("bignose CanvasRenderingContext2D::DrawImage");
++
+   MOZ_ASSERT(optional_argc == 0 || optional_argc == 2 || optional_argc == 6);
+ 
+   RefPtr<SourceSurface> srcSurf;
+   gfxIntSize imgSize;
+ 
+   Element* element;
+ 
+   EnsureTarget();
+diff --git a/content/media/Makefile.in b/content/media/Makefile.in
+--- a/content/media/Makefile.in
++++ b/content/media/Makefile.in
+@@ -1,8 +1,11 @@
+ # This Source Code Form is subject to the terms of the Mozilla Public
+ # License, v. 2.0. If a copy of the MPL was not distributed with this
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ CFLAGS   += $(GSTREAMER_CFLAGS)
+ CXXFLAGS += $(GSTREAMER_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/2d/Makefile.in b/gfx/2d/Makefile.in
+--- a/gfx/2d/Makefile.in
++++ b/gfx/2d/Makefile.in
+@@ -10,8 +10,11 @@ endif
+ include $(topsrcdir)/config/rules.mk
+ 
+ # Due to bug 796023, we can't have -DUNICODE and -D_UNICODE; defining those
+ # macros changes the type of LOGFONT to LOGFONTW instead of LOGFONTA. This
+ # changes the symbol names of exported C++ functions that use LOGFONT.
+ DEFINES := $(filter-out -DUNICODE -D_UNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/gl/Makefile.in b/gfx/gl/Makefile.in
+--- a/gfx/gl/Makefile.in
++++ b/gfx/gl/Makefile.in
+@@ -3,8 +3,11 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ DEFINES := $(filter-out -DUNICODE,$(DEFINES))
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ CFLAGS   += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/layers/Makefile.in b/gfx/layers/Makefile.in
+--- a/gfx/layers/Makefile.in
++++ b/gfx/layers/Makefile.in
+@@ -4,8 +4,11 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ include $(topsrcdir)/config/rules.mk
+ 
+ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFLAGS)
+ 
+ PremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/skia/moz.build b/gfx/skia/moz.build
+--- a/gfx/skia/moz.build
++++ b/gfx/skia/moz.build
+@@ -890,8 +890,17 @@ if CONFIG['INTEL_ARCHITECTURE'] and CONF
+     SOURCES['trunk/src/opts/SkMorphology_opts_SSE2.cpp'].flags += ['-msse2']
+     SOURCES['trunk/src/opts/SkUtils_opts_SSE2.cpp'].flags += ['-msse2']
+ elif CONFIG['CPU_ARCH'] == 'arm' and CONFIG['GNU_CC'] and CONFIG['BUILD_ARM_NEON']:
+     DEFINES['__ARM_HAVE_OPTIONAL_NEON_SUPPORT'] = 1
+     DEFINES['USE_ANDROID_NDK_CPU_FEATURES'] = 0
+ 
+ DEFINES['SKIA_IMPLEMENTATION'] = 1
+ DEFINES['GR_IMPLEMENTATION'] = 1
++
++CFLAGS += [
++    '-O0',
++]
++
++CXXFLAGS += [
++    '-O0',
++]
++
+diff --git a/gfx/src/Makefile.in b/gfx/src/Makefile.in
+--- a/gfx/src/Makefile.in
++++ b/gfx/src/Makefile.in
+@@ -9,8 +9,11 @@ CXXFLAGS += $(MOZ_CAIRO_CFLAGS) $(TK_CFL
+ 
+ ifdef MOZ_WIDGET_GTK
+ CXXFLAGS += $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(MOZ_QT_CFLAGS)
+ endif
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
+--- a/gfx/thebes/Makefile.in
++++ b/gfx/thebes/Makefile.in
+@@ -26,8 +26,11 @@ CXXFLAGS += $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ ifeq ($(MOZ_WIDGET_TOOLKIT),qt)
+ CXXFLAGS += $(CAIRO_FT_CFLAGS) $(MOZ_PANGO_CFLAGS)
+ endif
+ 
+ DeprecatedPremultiplyTables.h: $(srcdir)/genTables.py
+ 	$(PYTHON) $(srcdir)/genTables.py
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/ipc/chromium/Makefile.in b/ipc/chromium/Makefile.in
+--- a/ipc/chromium/Makefile.in
++++ b/ipc/chromium/Makefile.in
+@@ -31,8 +31,11 @@ ifdef MOZ_NATIVE_LIBEVENT # {
+ export-preqs = \
+   $(call mkdir_deps,$(CURDIR)/third_party/libevent) \
+   $(NULL)
+ 
+ export:: $(export-preqs)
+ 	echo '#include <event.h>' > $(CURDIR)/third_party/libevent/event.h
+ 
+ endif # }
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/modules/libpref/src/Makefile.in b/modules/libpref/src/Makefile.in
+--- a/modules/libpref/src/Makefile.in
++++ b/modules/libpref/src/Makefile.in
+@@ -26,8 +26,11 @@ grepref_files += $(topsrcdir)/mobile/and
+ endif
+ endif
+ 
+ greprefs.js: $(grepref_files)
+ 	$(call py_action,preprocessor,$(PREF_PPFLAGS) $(DEFINES) $(ACDEFINES) $(XULPPFLAGS) $^ -o $@)
+ 
+ libs:: greprefs.js
+ 	$(INSTALL) $^ $(DIST)/bin/
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++
+diff --git a/widget/gonk/moz.build b/widget/gonk/moz.build
+--- a/widget/gonk/moz.build
++++ b/widget/gonk/moz.build
+@@ -85,8 +85,17 @@ if CONFIG['MOZ_OMX_DECODER']:
+ 
+ CXXFLAGS += [
+     '-I%s/%s' % (CONFIG['ANDROID_SOURCE'], d) for d in [
+         'hardware/libhardware/include',
+         'hardware/libhardware_legacy/include',
+         'frameworks/native/opengl/include',
+     ]
+ ]
++
++CFLAGS += [
++    '-O0',
++]
++
++CXXFLAGS += [
++    '-O0',
++]
++
+diff --git a/xpcom/base/Makefile.in b/xpcom/base/Makefile.in
+--- a/xpcom/base/Makefile.in
++++ b/xpcom/base/Makefile.in
+@@ -26,8 +26,11 @@ ErrorListCxxDefines.h: ErrorList.h Makef
+ 
+ ErrorListCDefines.h: ErrorList.h Makefile
+ 		sed 's/.*ERROR(\([A-Z_0-9]*\),\( *\)\(.*\))[^)]*/#define \1 \2((nsresult)(\3))/' < $< > $@
+ 
+ GARBAGE += \
+ 	ErrorListCxxDefines.h \
+ 	ErrorListCDefines.h \
+ 	$(NULL)
++
++MOZ_OPTIMIZE_FLAGS="-O0"
++

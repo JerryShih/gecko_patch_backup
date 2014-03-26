@@ -1,0 +1,25 @@
+# HG changeset patch
+# Parent 0850809f24252188e4e71b44b7734373c2710a84
+# User Jerry Shih <hshih@mozilla.com>
+diff --git a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+--- a/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
++++ b/gfx/layers/ipc/ShadowLayerUtilsGralloc.cpp
+@@ -275,16 +275,18 @@ GrallocBufferActor::~GrallocBufferActor(
+ }
+ 
+ /*static*/ PGrallocBufferParent*
+ GrallocBufferActor::Create(const gfx::IntSize& aSize,
+                            const uint32_t& aFormat,
+                            const uint32_t& aUsage,
+                            MaybeMagicGrallocBufferHandle* aOutHandle)
+ {
++  printf_stderr("bignose GrallocBufferActor::Create (%d,%d)",aSize.width,aSize.height);
++
+   PROFILER_LABEL("GrallocBufferActor", "Create");
+   GrallocBufferActor* actor = new GrallocBufferActor();
+   *aOutHandle = null_t();
+   uint32_t format = aFormat;
+   uint32_t usage = aUsage;
+ 
+   if (format == 0 || usage == 0) {
+     printf_stderr("GrallocBufferActor::Create -- format and usage must be non-zero");

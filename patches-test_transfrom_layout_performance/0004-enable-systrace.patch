@@ -1,0 +1,84 @@
+From 2a07164fccfd434083539998f77f9cc84f89885d Mon Sep 17 00:00:00 2001
+From: peter chang <pchang@mozilla.com>
+Date: Thu, 17 Oct 2013 14:25:31 +0800
+Subject: [PATCH 4/4] enable systrace
+
+---
+ tools/profiler/GeckoProfilerImpl.h |    6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -833,16 +833,17 @@ pref("dom.mozInputMethod.enabled", true)
+ // to communicate with a usb cable via adb forward
+ pref("devtools.debugger.unix-domain-socket", "/data/local/debugger-socket");
+ 
+ // enable Skia/GL (OpenGL-accelerated 2D drawing) for large enough 2d canvases,
+ // falling back to Skia/software for smaller canvases
+ #ifdef MOZ_WIDGET_GONK
+ pref("gfx.canvas.azure.backends", "skia");
+ pref("gfx.canvas.azure.accelerated", true);
++//pref("gfx.canvas.azure.backends", "cario");
+ #endif
+ 
+ // Turn on dynamic cache size for Skia
+ pref("gfx.canvas.skiagl.dynamic-cache", true);
+ 
+ // enable fence with readpixels for SurfaceStream
+ pref("gfx.gralloc.fence-with-readpixels", true);
+ 
+diff --git a/tools/profiler/GeckoProfilerImpl.h b/tools/profiler/GeckoProfilerImpl.h
+--- a/tools/profiler/GeckoProfilerImpl.h
++++ b/tools/profiler/GeckoProfilerImpl.h
+@@ -212,44 +212,46 @@ static inline void profiler_tracing(cons
+     return;
+   }
+ 
+   mozilla_sampler_tracing(aCategory, aInfo, aMetaData);
+ }
+ 
+ // Uncomment this to turn on systrace or build with
+ // ac_add_options --enable-systace
+-//#define MOZ_USE_SYSTRACE
+-#ifdef MOZ_USE_SYSTRACE
++#define MOZ_USE_SYSTRACE
++#if defined(MOZ_USE_SYSTRACE) && ANDROID_VERSION >= 17
+ # define ATRACE_TAG ATRACE_TAG_GRAPHICS
+ // We need HAVE_ANDROID_OS to be defined for Trace.h.
+ // If its not set we will set it temporary and remove it.
+ # ifndef HAVE_ANDROID_OS
+ #   define HAVE_ANDROID_OS
+ #   define REMOVE_HAVE_ANDROID_OS
+ # endif
+ # include <utils/Trace.h>
+ # define MOZ_PLATFORM_TRACING ATRACE_CALL();
++# define MOZ_PLATFORM_TRACING_LABEL(name_space, info) ATRACE_NAME(name_space "::" info);
+ # ifdef REMOVE_HAVE_ANDROID_OS
+ #  undef HAVE_ANDROID_OS
+ #  undef REMOVE_HAVE_ANDROID_OS
+ # endif
+ #else
+ # define MOZ_PLATFORM_TRACING
++# define MOZ_PLATFORM_TRACING_LABEL
+ #endif
+ 
+ // we want the class and function name but can't easily get that using preprocessor macros
+ // __func__ doesn't have the class name and __PRETTY_FUNCTION__ has the parameters
+ 
+ #define SAMPLER_APPEND_LINE_NUMBER_PASTE(id, line) id ## line
+ #define SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, line) SAMPLER_APPEND_LINE_NUMBER_PASTE(id, line)
+ #define SAMPLER_APPEND_LINE_NUMBER(id) SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, __LINE__)
+ 
+-#define PROFILER_LABEL(name_space, info) MOZ_PLATFORM_TRACING mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
+-#define PROFILER_LABEL_PRINTF(name_space, info, ...) MOZ_PLATFORM_TRACING mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
++#define PROFILER_LABEL(name_space, info) MOZ_PLATFORM_TRACING_LABEL(name_space, info)
++#define PROFILER_LABEL_PRINTF(name_space, info, ...) MOZ_PLATFORM_TRACING
+ 
+ #define PROFILER_MARKER(info) mozilla_sampler_add_marker(info)
+ #define PROFILER_MARKER_PAYLOAD(info, payload) mozilla_sampler_add_marker(info, payload)
+ #define PROFILER_MAIN_THREAD_MARKER(info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla_sampler_add_marker(info)
+ 
+ #define PROFILER_MAIN_THREAD_LABEL(name_space, info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
+ #define PROFILER_MAIN_THREAD_LABEL_PRINTF(name_space, info, ...)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
+ 

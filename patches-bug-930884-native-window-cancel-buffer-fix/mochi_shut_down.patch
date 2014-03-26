@@ -1,0 +1,95 @@
+From: Andrew Halberstadt <ahalberstadt@mozilla.com>
+
+Bug 969146 - Pass in MOZ_CRASHREPORTER_SHUTDOWN into b2g process, r=ted
+
+diff --git a/testing/mochitest/runtestsb2g.py b/testing/mochitest/runtestsb2g.py
+--- a/testing/mochitest/runtestsb2g.py
++++ b/testing/mochitest/runtestsb2g.py
+@@ -133,16 +133,26 @@ class B2GMochitest(MochitestUtilsMixin):
+                             'devicemanager': self._dm,
+                             'marionette': self.marionette,
+                             'remote_test_root': self.remote_test_root,
+                             'symbols_path': options.symbolsPath,
+                             'test_script': self.test_script,
+                             'test_script_args': self.test_script_args }
+             self.runner = B2GRunner(**runner_args)
+             self.runner.start(outputTimeout=timeout)
++
++            import time
++            time.sleep(60)
++            self.marionette.set_context(self.marionette.CONTEXT_CHROME)
++            self.marionette.execute_script("""
++var appStartup = Components.classes['@mozilla.org/toolkit/app-startup;1'].
++                                    getService(Components.interfaces.nsIAppStartup);
++appStartup.quit(Components.interfaces.nsIAppStartup.eForceQuit);
++""")
++
+             status = self.runner.wait()
+             if status is None:
+                 # the runner has timed out
+                 status = 124
+         except KeyboardInterrupt:
+             log.info("runtests.py | Received keyboard interrupt.\n");
+             status = -1
+         except:
+diff --git a/testing/mozbase/mozrunner/mozrunner/remote.py b/testing/mozbase/mozrunner/mozrunner/remote.py
+--- a/testing/mozbase/mozrunner/mozrunner/remote.py
++++ b/testing/mozbase/mozrunner/mozrunner/remote.py
+@@ -106,16 +106,17 @@ class B2GRunner(RemoteRunner):
+         RemoteRunner.__init__(self, profile, devicemanager, **kwargs)
+         self.log = mozlog.getLogger('B2GRunner')
+ 
+         tmpfd, processLog = tempfile.mkstemp(suffix='pidlog')
+         os.close(tmpfd)
+         tmp_env = self.env or {}
+         self.env = { 'MOZ_CRASHREPORTER': '1',
+                      'MOZ_CRASHREPORTER_NO_REPORT': '1',
++                     'MOZ_CRASHREPORTER_SHUTDOWN': '1',
+                      'MOZ_HIDE_RESULTS_TABLE': '1',
+                      'MOZ_PROCESS_LOG': processLog,
+                      'NSPR_LOG_MODULES': 'signaling:5,mtransport:3',
+                      'R_LOG_LEVEL': '5',
+                      'R_LOG_DESTINATION': 'stderr',
+                      'R_LOG_VERBOSE': '1',
+                      'NO_EM_RESTART': '1', }
+         self.env.update(tmp_env)
+@@ -150,17 +151,18 @@ class B2GRunner(RemoteRunner):
+             if not self._wait_for_net():
+                 raise Exception("network did not come up, please configure the network" +
+                                 " prior to running before running the automation framework")
+ 
+         self.dm.shellCheckOutput(['stop', 'b2g'])
+ 
+         self.kp_kwargs.update({'stream': sys.stdout,
+                                'processOutputLine': self.on_output,
+-                               'onTimeout': self.on_timeout,})
++                               'onTimeout': self.on_timeout,
++                               'onFinish': self.on_finish})
+         self.process_handler = self.process_class(self.command, **self.kp_kwargs)
+         self.process_handler.run(timeout=timeout, outputTimeout=outputTimeout)
+ 
+         # Set up port forwarding again for Marionette, since any that
+         # existed previously got wiped out by the reboot.
+         if not self.marionette.emulator:
+             subprocess.Popen([self.dm._adbPath,
+                               'forward',
+@@ -216,16 +218,19 @@ class B2GRunner(RemoteRunner):
+             timeout = self.timeout
+         else:
+             timeout = self.outputTimeout
+             msg = "%s with no output" % msg
+ 
+         self.log.testFail(msg % (self.last_test, timeout))
+         self.check_for_crashes()
+ 
++    def on_finish(self):
++        self.check_for_crashes()
++
+     def _reboot_device(self):
+         serial, status = self._get_device_status()
+ 
+         buf = StringIO()
+         self.dm.shell('/system/bin/reboot', buf)
+         buf.close()
+ 
+         # The reboot command can return while adb still thinks the device is
