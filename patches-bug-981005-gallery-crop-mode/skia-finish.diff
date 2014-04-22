@@ -232,7 +232,7 @@ diff --git a/gfx/2d/DrawTargetSkia.cpp b/gfx/2d/DrawTargetSkia.cpp
 diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient.cpp
 --- a/gfx/layers/client/CanvasClient.cpp
 +++ b/gfx/layers/client/CanvasClient.cpp
-@@ -105,16 +105,18 @@ CanvasClientSurfaceStream::CanvasClientS
+@@ -105,16 +105,20 @@ CanvasClientSurfaceStream::CanvasClientS
                                                       TextureFlags aFlags)
    : CanvasClient(aLayerForwarder, aFlags)
  {
@@ -241,6 +241,8 @@ diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient
  void
  CanvasClientSurfaceStream::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
  {
++  aLayer->mGLContext->MakeCurrent();
++
 +  printf_stderr("bignose CanvasClientSurfaceStream::Update, (%d,%d)",aSize.width,aSize.height);
 +
    GLScreenBuffer* screen = aLayer->mGLContext->Screen();
@@ -251,7 +253,7 @@ diff --git a/gfx/layers/client/CanvasClient.cpp b/gfx/layers/client/CanvasClient
  
      // Copy our current surface to the current producer surface in our stream, then
      // call SwapProducer to make a new buffer ready.
-@@ -124,16 +126,20 @@ CanvasClientSurfaceStream::Update(gfx::I
+@@ -124,16 +128,20 @@ CanvasClientSurfaceStream::Update(gfx::I
      stream = screen->Stream();
    }
  

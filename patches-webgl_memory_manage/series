@@ -1,0 +1,4 @@
+gfx_trace_makefile.patch
+restore_when_foreground.patch
+dump_layer.patch
+debug_rotate.patch

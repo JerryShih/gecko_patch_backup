@@ -7,31 +7,10 @@ Subject: [PATCH 4/4] enable systrace
  tools/profiler/GeckoProfilerImpl.h |    6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)
 
-diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
---- a/b2g/app/b2g.js
-+++ b/b2g/app/b2g.js
-@@ -833,16 +833,17 @@ pref("dom.mozInputMethod.enabled", true)
- // to communicate with a usb cable via adb forward
- pref("devtools.debugger.unix-domain-socket", "/data/local/debugger-socket");
- 
- // enable Skia/GL (OpenGL-accelerated 2D drawing) for large enough 2d canvases,
- // falling back to Skia/software for smaller canvases
- #ifdef MOZ_WIDGET_GONK
- pref("gfx.canvas.azure.backends", "skia");
- pref("gfx.canvas.azure.accelerated", true);
-+//pref("gfx.canvas.azure.backends", "cario");
- #endif
- 
- // Turn on dynamic cache size for Skia
- pref("gfx.canvas.skiagl.dynamic-cache", true);
- 
- // enable fence with readpixels for SurfaceStream
- pref("gfx.gralloc.fence-with-readpixels", true);
- 
 diff --git a/tools/profiler/GeckoProfilerImpl.h b/tools/profiler/GeckoProfilerImpl.h
 --- a/tools/profiler/GeckoProfilerImpl.h
 +++ b/tools/profiler/GeckoProfilerImpl.h
-@@ -212,44 +212,46 @@ static inline void profiler_tracing(cons
+@@ -240,44 +240,46 @@ static inline void profiler_tracing(cons
      return;
    }
  

@@ -1,8 +1,7 @@
 # HG changeset patch
-# Parent e79d23fbbf2f3bb92657fd5597015281f1eee6e3
+# Parent 3e3d2347fa5dd7fbafceaffdfd733dd8cef10a78
 # User Jerry Shih <hshih@mozilla.com>
 remove file_rule, CalcStyleDifference tag
-
 
 diff --git a/layout/style/nsStyleContext.cpp b/layout/style/nsStyleContext.cpp
 --- a/layout/style/nsStyleContext.cpp

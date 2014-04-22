@@ -1,8 +1,8 @@
 gfx_trace_makefile.patch
 0004-enable-systrace.patch
 remove_trace_tag.patch
+restyle-descendants-test.patch
+test_restyle_depth.patch
 print_gralloc_log.patch
-restyle-descendants-new.patch
 add_label
-restyle-descendants.patch
 enable-will-change.patch

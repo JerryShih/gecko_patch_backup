@@ -1,0 +1,56 @@
+# HG changeset patch
+# Parent 9464c420fb20aeeb965024a07c7cd5d4bdb7dff6
+# User Jerry Shih <hshih@mozilla.com>
+debug rotate
+
+
+diff --git a/widget/gonk/nsWindow.cpp b/widget/gonk/nsWindow.cpp
+--- a/widget/gonk/nsWindow.cpp
++++ b/widget/gonk/nsWindow.cpp
+@@ -44,16 +44,18 @@
+ #include "pixelflinger/format.h"
+ #include "mozilla/BasicEvents.h"
+ #include "mozilla/layers/APZCTreeManager.h"
+ #include "mozilla/layers/CompositorParent.h"
+ #include "ParentProcessController.h"
+ #include "nsThreadUtils.h"
+ #include "HwcComposer2D.h"
+ 
++#include "cutils/properties.h"
++
+ #define LOG(args...)  __android_log_print(ANDROID_LOG_INFO, "Gonk" , ## args)
+ #define LOGW(args...) __android_log_print(ANDROID_LOG_WARN, "Gonk", ## args)
+ #define LOGE(args...) __android_log_print(ANDROID_LOG_ERROR, "Gonk", ## args)
+ 
+ #define IS_TOPLEVEL() (mWindowType == eWindowType_toplevel || mWindowType == eWindowType_dialog)
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+@@ -369,16 +371,27 @@ nsWindow::Resize(double aWidth,
+ 
+ NS_IMETHODIMP
+ nsWindow::Resize(double aX,
+                  double aY,
+                  double aWidth,
+                  double aHeight,
+                  bool   aRepaint)
+ {
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("test.window", propValue, "0");
++
++
++    if(atoi(propValue)==1){
++      aRepaint=false;
++    }
++
++    printf_stderr("bignose nsWindow::Resize(%lf,%lf,%lf,%lf,%d)",aX,aY,aWidth,aHeight,(int)aRepaint);
++
++
+     mBounds = nsIntRect(NSToIntRound(aX), NSToIntRound(aY),
+                         NSToIntRound(aWidth), NSToIntRound(aHeight));
+     if (mWidgetListener)
+         mWidgetListener->WindowResized(this, mBounds.width, mBounds.height);
+ 
+     if (aRepaint)
+         Invalidate(sVirtualBounds);
+ 

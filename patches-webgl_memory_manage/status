@@ -1,0 +1,4 @@
+adbcc346636d866331ab5ad6cc9a992da6394f39:gfx_trace_makefile.patch
+9464c420fb20aeeb965024a07c7cd5d4bdb7dff6:restore_when_foreground.patch
+91827c9009ba371f71db38252fd08d7762b7bac5:dump_layer.patch
+224cda7db0ecf1a6fd6cdba2ca3d1853ff519a18:debug_rotate.patch

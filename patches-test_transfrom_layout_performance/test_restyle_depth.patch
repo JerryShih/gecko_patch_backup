@@ -1,0 +1,47 @@
+# HG changeset patch
+# Parent d2d8b1a82a61132bad7201a9ac0c060e6e2b5302
+# User Jerry Shih <hshih@mozilla.com>
+diff --git a/layout/base/RestyleManager.cpp b/layout/base/RestyleManager.cpp
+--- a/layout/base/RestyleManager.cpp
++++ b/layout/base/RestyleManager.cpp
+@@ -2440,16 +2440,18 @@ StructsEqual(void* aStruct1, void* aStru
+  * mParentContent is the content node used to resolve the parent style
+  * context.  This means that, for pseudo-elements, it is the content
+  * that should be used for selector matching (rather than the fake
+  * content node attached to the frame).
+  */
+ void
+ ElementRestyler::Restyle(nsRestyleHint aRestyleHint)
+ {
++  PROFILER_LABEL("ElementRestyler", "Restyle");
++
+   // It would be nice if we could make stronger assertions here; they
+   // would let us simplify the ?: expressions below setting |content|
+   // and |pseudoContent| in sensible ways as well as making what
+   // |content| and |pseudoContent| mean, and their relationship to
+   // |mFrame->GetContent()|, make more sense.  However, we can't,
+   // because of frame trees like the one in
+   // https://bugzilla.mozilla.org/show_bug.cgi?id=472353#c14 .  Once we
+   // fix bug 242277 we should be able to make this make more sense.
+diff --git a/layout/style/nsStyleContext.cpp b/layout/style/nsStyleContext.cpp
+--- a/layout/style/nsStyleContext.cpp
++++ b/layout/style/nsStyleContext.cpp
+@@ -845,17 +845,17 @@ nsStyleContext::ApplyStyleFixups(bool aS
+ }
+ 
+ nsChangeHint
+ nsStyleContext::CalcStyleDifference(nsStyleContext* aOther,
+                                     nsChangeHint aParentHintsNotHandledForDescendants,
+                                     bool aSwapUnchangedOwnedStructs,
+                                     bool& aAnyChanges)
+ {
+-  PROFILER_LABEL("nsStyleContext", "CalcStyleDifference");
++  //PROFILER_LABEL("nsStyleContext", "CalcStyleDifference");
+ 
+   NS_ABORT_IF_FALSE(NS_IsHintSubset(aParentHintsNotHandledForDescendants,
+                                     nsChangeHint_Hints_NotHandledForDescendants),
+                     "caller is passing inherited hints, but shouldn't be");
+ 
+   nsChangeHint hint = NS_STYLE_HINT_NONE;
+   bool anyOtherChanges = false;
+   NS_ENSURE_TRUE(aOther, hint);
