@@ -1,0 +1,979 @@
+# HG changeset patch
+# Parent 5010b38abf18590cb17cf35e0cfaa933579cd748
+# User Jerry Shih <hshih@mozilla.com>
+remove will-change
+
+
+diff --git a/content/svg/content/src/nsSVGElement.cpp b/content/svg/content/src/nsSVGElement.cpp
+--- a/content/svg/content/src/nsSVGElement.cpp
++++ b/content/svg/content/src/nsSVGElement.cpp
+@@ -1202,17 +1202,17 @@ MappedAttrParser::ParseMappedAttrValue(n
+   if (!mDecl) {
+     mDecl = new css::Declaration();
+     mDecl->InitializeEmpty();
+   }
+ 
+   // Get the nsCSSProperty ID for our mapped attribute.
+   nsCSSProperty propertyID =
+     nsCSSProps::LookupProperty(nsDependentAtomString(aMappedAttrName),
+-                               nsCSSProps::eEnabledForAllContent);
++                               nsCSSProps::eEnabled);
+   if (propertyID != eCSSProperty_UNKNOWN) {
+     bool changed; // outparam for ParseProperty. (ignored)
+     mParser.ParseProperty(propertyID, aMappedAttrValue, mDocURI, mBaseURI,
+                           mNodePrincipal, mDecl, &changed, false, true);
+     return;
+   }
+   NS_ABORT_IF_FALSE(aMappedAttrName == nsGkAtoms::lang,
+                     "Only 'lang' should be unrecognized!");
+@@ -2536,17 +2536,17 @@ nsSVGElement::GetAnimatedAttr(int32_t aN
+     // targeting width/height on outer-<svg> don't appear to be ignored
+     // because we returned a nsISMILAttr for the corresponding
+     // SVGAnimatedLength.
+ 
+     // Mapped attributes:
+     if (IsAttributeMapped(aName)) {
+       nsCSSProperty prop =
+         nsCSSProps::LookupProperty(nsDependentAtomString(aName),
+-                                   nsCSSProps::eEnabledForAllContent);
++                                   nsCSSProps::eEnabled);
+       // Check IsPropertyAnimatable to avoid attributes that...
+       //  - map to explicitly unanimatable properties (e.g. 'direction')
+       //  - map to unsupported attributes (e.g. 'glyph-orientation-horizontal')
+       if (nsSMILCSSProperty::IsPropertyAnimatable(prop)) {
+         return new nsSMILMappedAttribute(prop, this);
+       }
+     }
+ 
+diff --git a/dom/base/nsDOMWindowUtils.cpp b/dom/base/nsDOMWindowUtils.cpp
+--- a/dom/base/nsDOMWindowUtils.cpp
++++ b/dom/base/nsDOMWindowUtils.cpp
+@@ -2773,18 +2773,18 @@ nsDOMWindowUtils::ComputeAnimationDistan
+   }
+ 
+   nsresult rv;
+   nsCOMPtr<nsIContent> content = do_QueryInterface(aElement, &rv);
+   NS_ENSURE_SUCCESS(rv, rv);
+ 
+   // Convert direction-dependent properties as appropriate, e.g.,
+   // border-left to border-left-value.
+-  nsCSSProperty property =
+-    nsCSSProps::LookupProperty(aProperty, nsCSSProps::eIgnoreEnabledState);
++  nsCSSProperty property = nsCSSProps::LookupProperty(aProperty,
++                                                      nsCSSProps::eAny);
+   if (property != eCSSProperty_UNKNOWN && nsCSSProps::IsShorthand(property)) {
+     nsCSSProperty subprop0 = *nsCSSProps::SubpropertyEntryFor(property);
+     if (nsCSSProps::PropHasFlags(subprop0, CSS_PROPERTY_REPORT_OTHER_NAME) &&
+         nsCSSProps::OtherNameFor(subprop0) == property) {
+       property = subprop0;
+     } else {
+       property = eCSSProperty_UNKNOWN;
+     }
+diff --git a/dom/bindings/GenerateCSS2PropertiesWebIDL.py b/dom/bindings/GenerateCSS2PropertiesWebIDL.py
+--- a/dom/bindings/GenerateCSS2PropertiesWebIDL.py
++++ b/dom/bindings/GenerateCSS2PropertiesWebIDL.py
+@@ -2,28 +2,19 @@
+ # License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ # You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ import sys
+ import string
+ 
+ propList = eval(sys.stdin.read())
+ props = ""
+-for [prop, id, flags, pref] in propList:
++for [prop, pref] in propList:
+     extendedAttrs = ["Throws", "TreatNullAs=EmptyString"]
+-    # To limit the overhead of Func= annotations, we only generate them when
+-    # necessary, which is when the
+-    # CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP flag is set.
+-    # Otherwise, we try to get by with just a Pref= annotation or no annotation
+-    # at all.
+-    if "CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP" in flags:
+-        extendedAttrs.append('Func="IsCSSPropertyExposedToJS<eCSSProperty_%s>"' % id)
+-    # The following is an 'elif' because it is the responsibility of
+-    # IsCSSPropertyExposedToJS to handle the pref if there is one.
+-    elif pref is not "":
++    if pref is not "":
+         extendedAttrs.append('Pref="%s"' % pref)
+     if not prop.startswith("Moz"):
+         prop = prop[0].lower() + prop[1:]
+     # Unfortunately, even some of the getters here are fallible
+     # (e.g. on nsComputedDOMStyle).
+     props += "  [%s] attribute DOMString %s;\n" % (", ".join(extendedAttrs),
+                                                    prop)
+ 
+diff --git a/dom/smil/nsSMILAnimationController.cpp b/dom/smil/nsSMILAnimationController.cpp
+--- a/dom/smil/nsSMILAnimationController.cpp
++++ b/dom/smil/nsSMILAnimationController.cpp
+@@ -789,17 +789,17 @@ nsSMILAnimationController::GetTargetIden
+       // width/height are special as they may be attributes or for
+       // outer-<svg> elements, mapped into style.
+       if (attributeName == nsGkAtoms::width ||
+           attributeName == nsGkAtoms::height) {
+         isCSS = targetElem->GetNameSpaceID() != kNameSpaceID_SVG;
+       } else {
+         nsCSSProperty prop =
+           nsCSSProps::LookupProperty(nsDependentAtomString(attributeName),
+-                                     nsCSSProps::eEnabledForAllContent);
++                                     nsCSSProps::eEnabled);
+         isCSS = nsSMILCSSProperty::IsPropertyAnimatable(prop);
+       }
+     }
+   } else {
+     isCSS = (attributeType == eSMILTargetAttrType_CSS);
+   }
+ 
+   // Construct the key
+diff --git a/dom/smil/nsSMILCompositor.cpp b/dom/smil/nsSMILCompositor.cpp
+--- a/dom/smil/nsSMILCompositor.cpp
++++ b/dom/smil/nsSMILCompositor.cpp
+@@ -120,17 +120,17 @@ nsSMILCompositor::ClearAnimationEffects(
+ // Protected Helper Functions
+ // --------------------------
+ nsISMILAttr*
+ nsSMILCompositor::CreateSMILAttr()
+ {
+   if (mKey.mIsCSS) {
+     nsCSSProperty propId =
+       nsCSSProps::LookupProperty(nsDependentAtomString(mKey.mAttributeName),
+-                                 nsCSSProps::eEnabledForAllContent);
++                                 nsCSSProps::eEnabled);
+     if (nsSMILCSSProperty::IsPropertyAnimatable(propId)) {
+       return new nsSMILCSSProperty(propId, mKey.mElement.get());
+     }
+   } else {
+     return mKey.mElement->GetAnimatedAttr(mKey.mAttributeNamespaceID,
+                                           mKey.mAttributeName);
+   }
+   return nullptr;
+diff --git a/dom/webidl/CSS2PropertiesProps.h b/dom/webidl/CSS2PropertiesProps.h
+--- a/dom/webidl/CSS2PropertiesProps.h
++++ b/dom/webidl/CSS2PropertiesProps.h
+@@ -1,39 +1,34 @@
+ /* A file meant as input to the preprocessor only */
+ 
+ /* DO_PROP serves as an extra level of indirection to allow expansion
+    of CSS_PROP_DOMPROP_PREFIXED */
+ 
+ [
+ 
+-#define PROP_STRINGIFY_INTERNAL(X) #X
+-#define PROP_STRINGIFY(X) PROP_STRINGIFY_INTERNAL(X)
+-
+-#define DO_PROP(method, id, flags, pref) \
+-  [ #method, #id, PROP_STRINGIFY(flags), pref ],
++#define DO_PROP(method, pref) \
++  [ #method, pref ],
+ #define CSS_PROP(name, id, method, flags, pref, parsevariant, kwtable, \
+ 		 stylestruct, stylestructofset, animtype) \
+-  DO_PROP(method, id, flags, pref)
++  DO_PROP(method, pref)
+ #define CSS_PROP_SHORTHAND(name, id, method, flags, pref) \
+-  DO_PROP(method, id, flags, pref)
++  DO_PROP(method, pref)
+ #define CSS_PROP_PUBLIC_OR_PRIVATE(publicname_, privatename_) publicname_
+ #define CSS_PROP_LIST_EXCLUDE_INTERNAL
+ 
+ #include "nsCSSPropList.h"
+ 
+ #undef CSS_PROP_LIST_EXCLUDE_INTERNAL
+ #undef CSS_PROP_PUBLIC_OR_PRIVATE
+ #undef CSS_PROP_SHORTHAND
+ #undef CSS_PROP
+ 
+ #define CSS_PROP_ALIAS(name, id, method, pref) \
+-  DO_PROP(method, id, 0, pref)
++  DO_PROP(method, pref)
+ 
+ #include "nsCSSPropAliasList.h"
+ 
+ #undef CSS_PROP_ALIAS
+ 
+ #undef DO_PROP
+-#undef PROP_STRINGIFY
+-#undef PROP_STRINGIFY_INTERNAL
+ 
+ ]
+diff --git a/editor/libeditor/html/nsHTMLCSSUtils.cpp b/editor/libeditor/html/nsHTMLCSSUtils.cpp
+--- a/editor/libeditor/html/nsHTMLCSSUtils.cpp
++++ b/editor/libeditor/html/nsHTMLCSSUtils.cpp
+@@ -560,17 +560,17 @@ nsHTMLCSSUtils::GetCSSInlinePropertyBase
+ 
+   MOZ_ASSERT(aStyleType == eSpecified);
+   nsRefPtr<css::StyleRule> rule = element->GetInlineStyleRule();
+   if (!rule) {
+     return NS_OK;
+   }
+   nsCSSProperty prop =
+     nsCSSProps::LookupProperty(nsDependentAtomString(aProperty),
+-                               nsCSSProps::eEnabledForAllContent);
++                               nsCSSProps::eEnabled);
+   MOZ_ASSERT(prop != eCSSProperty_UNKNOWN);
+   rule->GetDeclaration()->GetValue(prop, aValue);
+ 
+   return NS_OK;
+ }
+ 
+ already_AddRefed<nsComputedDOMStyle>
+ nsHTMLCSSUtils::GetComputedStyle(nsIDOMElement* aElement)
+diff --git a/layout/inspector/inCSSValueSearch.cpp b/layout/inspector/inCSSValueSearch.cpp
+--- a/layout/inspector/inCSSValueSearch.cpp
++++ b/layout/inspector/inCSSValueSearch.cpp
+@@ -220,17 +220,17 @@ inCSSValueSearch::SetNormalizeChromeURLs
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP 
+ inCSSValueSearch::AddPropertyCriteria(const char16_t *aPropName)
+ {
+   nsCSSProperty prop =
+     nsCSSProps::LookupProperty(nsDependentString(aPropName),
+-                               nsCSSProps::eIgnoreEnabledState);
++                               nsCSSProps::eAny);
+   mProperties[mPropertyCount] = prop;
+   mPropertyCount++;
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP 
+ inCSSValueSearch::GetTextCriteria(char16_t** aTextCriteria)
+ {
+diff --git a/layout/inspector/inDOMUtils.cpp b/layout/inspector/inDOMUtils.cpp
+--- a/layout/inspector/inDOMUtils.cpp
++++ b/layout/inspector/inDOMUtils.cpp
+@@ -388,18 +388,18 @@ inDOMUtils::SelectorMatchesElement(nsIDO
+   *aMatches = nsCSSRuleProcessor::SelectorListMatches(element, matchingContext,
+                                                       sel);
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ inDOMUtils::IsInheritedProperty(const nsAString &aPropertyName, bool *_retval)
+ {
+-  nsCSSProperty prop =
+-    nsCSSProps::LookupProperty(aPropertyName, nsCSSProps::eIgnoreEnabledState);
++  nsCSSProperty prop = nsCSSProps::LookupProperty(aPropertyName,
++                                                  nsCSSProps::eAny);
+   if (prop == eCSSProperty_UNKNOWN) {
+     *_retval = false;
+     return NS_OK;
+   }
+ 
+   if (prop == eCSSPropertyExtra_variable) {
+     *_retval = true;
+     return NS_OK;
+@@ -580,17 +580,17 @@ static void GetOtherValuesForProperty(co
+ }
+ 
+ NS_IMETHODIMP
+ inDOMUtils::GetCSSValuesForProperty(const nsAString& aProperty,
+                                     uint32_t* aLength,
+                                     char16_t*** aValues)
+ {
+   nsCSSProperty propertyID = nsCSSProps::LookupProperty(aProperty,
+-                                                        nsCSSProps::eEnabledForAllContent);
++                                                        nsCSSProps::eEnabled);
+   if (propertyID == eCSSProperty_UNKNOWN) {
+     return NS_ERROR_FAILURE;
+   }
+ 
+   nsTArray<nsString> array;
+   // We start collecting the values, BUT colors need to go in first, because array
+   // needs to stay sorted, and the colors are sorted, so we just append them.
+   if (propertyID == eCSSPropertyExtra_variable) {
+diff --git a/layout/style/Declaration.cpp b/layout/style/Declaration.cpp
+--- a/layout/style/Declaration.cpp
++++ b/layout/style/Declaration.cpp
+@@ -1118,18 +1118,17 @@ Declaration::GetValue(nsCSSProperty aPro
+       NS_ABORT_IF_FALSE(false, "no other shorthands");
+       break;
+   }
+ }
+ 
+ bool
+ Declaration::GetValueIsImportant(const nsAString& aProperty) const
+ {
+-  nsCSSProperty propID =
+-    nsCSSProps::LookupProperty(aProperty, nsCSSProps::eIgnoreEnabledState);
++  nsCSSProperty propID = nsCSSProps::LookupProperty(aProperty, nsCSSProps::eAny);
+   if (propID == eCSSProperty_UNKNOWN) {
+     return false;
+   }
+   if (propID == eCSSPropertyExtra_variable) {
+     const nsSubstring& variableName =
+       Substring(aProperty, CSS_CUSTOM_NAME_PREFIX_LENGTH);
+     return GetVariableValueIsImportant(variableName);
+   }
+diff --git a/layout/style/nsCSSParser.cpp b/layout/style/nsCSSParser.cpp
+--- a/layout/style/nsCSSParser.cpp
++++ b/layout/style/nsCSSParser.cpp
+@@ -40,17 +40,16 @@
+ #include "nsContentUtils.h"
+ #include "nsAutoPtr.h"
+ #include "CSSCalc.h"
+ #include "nsMediaFeatures.h"
+ #include "nsLayoutUtils.h"
+ #include "mozilla/Preferences.h"
+ #include "nsRuleData.h"
+ #include "mozilla/CSSVariableValues.h"
+-#include "mozilla/dom/URL.h"
+ 
+ using namespace mozilla;
+ 
+ typedef nsCSSProps::KTableValue KTableValue;
+ 
+ const uint32_t
+ nsCSSProps::kParserVariantTable[eCSSProperty_COUNT_no_shorthands] = {
+ #define CSS_PROP(name_, id_, method_, flags_, pref_, parsevariant_, kwtable_, \
+@@ -259,27 +258,19 @@ public:
+                                            nsIURI* aDocURL,
+                                            nsIURI* aBaseURL,
+                                            nsIPrincipal* aDocPrincipal,
+                                            nsCSSStyleSheet* aSheet,
+                                            uint32_t aLineNumber,
+                                            uint32_t aLineOffset);
+ 
+   nsCSSProperty LookupEnabledProperty(const nsAString& aProperty) {
+-    static_assert(nsCSSProps::eEnabledForAllContent == 0,
+-                  "nsCSSProps::eEnabledForAllContent should be zero for "
+-                  "this bitfield to work");
+-    nsCSSProps::EnabledState enabledState = nsCSSProps::eEnabledForAllContent;
+-    if (mUnsafeRulesEnabled) {
+-      enabledState |= nsCSSProps::eEnabledInUASheets;
+-    }
+-    if (mIsChromeOrCertifiedApp) {
+-      enabledState |= nsCSSProps::eEnabledInChromeOrCertifiedApp;
+-    }
+-    return nsCSSProps::LookupProperty(aProperty, enabledState);
++    return nsCSSProps::LookupProperty(aProperty, mUnsafeRulesEnabled ?
++                                                   nsCSSProps::eEnabledInUASheets :
++                                                   nsCSSProps::eEnabled);
+   }
+ 
+ protected:
+   class nsAutoParseCompoundProperty;
+   friend class nsAutoParseCompoundProperty;
+ 
+   class nsAutoFailingSupportsRule;
+   friend class nsAutoFailingSupportsRule;
+@@ -970,22 +961,16 @@ protected:
+   bool mHashlessColorQuirk : 1;
+ 
+   // True when the unitless length quirk applies.
+   bool mUnitlessLengthQuirk : 1;
+ 
+   // True if unsafe rules should be allowed
+   bool mUnsafeRulesEnabled : 1;
+ 
+-  // True if we are in parsing rules for Chrome or Certified App content,
+-  // in which case CSS properties with the
+-  // CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP
+-  // flag should be allowed.
+-  bool mIsChromeOrCertifiedApp : 1;
+-
+   // True if viewport units should be allowed.
+   bool mViewportUnitsEnabled : 1;
+ 
+   // True for parsing media lists for HTML attributes, where we have to
+   // ignore CSS comments.
+   bool mHTMLMediaMode : 1;
+ 
+   // This flag is set when parsing a non-box shorthand; it's used to not apply
+@@ -1070,17 +1055,16 @@ CSSParserImpl::CSSParserImpl()
+     mChildLoader(nullptr),
+     mSection(eCSSSection_Charset),
+     mNameSpaceMap(nullptr),
+     mHavePushBack(false),
+     mNavQuirkMode(false),
+     mHashlessColorQuirk(false),
+     mUnitlessLengthQuirk(false),
+     mUnsafeRulesEnabled(false),
+-    mIsChromeOrCertifiedApp(false),
+     mViewportUnitsEnabled(true),
+     mHTMLMediaMode(false),
+     mParsingCompoundProperty(false),
+     mInSupportsCondition(false),
+     mInFailingSupportsRule(false),
+     mSuppressErrors(false),
+     mNextFree(nullptr)
+ {
+@@ -1211,19 +1195,16 @@ CSSParserImpl::ParseSheet(const nsAStrin
+       }
+     }
+   }
+   else {
+     mSection = eCSSSection_Charset; // sheet is empty, any rules are fair
+   }
+ 
+   mUnsafeRulesEnabled = aAllowUnsafeRules;
+-  mIsChromeOrCertifiedApp =
+-    dom::IsChromeURI(aSheetURI) ||
+-    aSheetPrincipal->GetAppStatus() == nsIPrincipal::APP_STATUS_CERTIFIED;
+ 
+   nsCSSToken* tk = &mToken;
+   for (;;) {
+     // Get next non-whitespace token
+     if (!GetToken(true)) {
+       OUTPUT_ERROR();
+       break;
+     }
+@@ -1237,17 +1218,16 @@ CSSParserImpl::ParseSheet(const nsAStrin
+     UngetToken();
+     if (ParseRuleSet(AppendRuleToSheet, this)) {
+       mSection = eCSSSection_General;
+     }
+   }
+   ReleaseScanner();
+ 
+   mUnsafeRulesEnabled = false;
+-  mIsChromeOrCertifiedApp = false;
+ 
+   // XXX check for low level errors
+   return NS_OK;
+ }
+ 
+ /**
+  * Determines whether the identifier contained in the given string is a
+  * vendor-specific identifier, as described in CSS 2.1 section 4.1.2.1.
+diff --git a/layout/style/nsCSSPropList.h b/layout/style/nsCSSPropList.h
+--- a/layout/style/nsCSSPropList.h
++++ b/layout/style/nsCSSPropList.h
+@@ -3932,18 +3932,17 @@ CSS_PROP_SVGRESET(
+     offsetof(nsStyleSVGReset, mVectorEffect),
+     eStyleAnimType_EnumU8)
+ 
+ CSS_PROP_DISPLAY(
+     will-change,
+     will_change,
+     WillChange,
+     CSS_PROPERTY_PARSE_FUNCTION |
+-        CSS_PROPERTY_VALUE_LIST_USES_COMMAS |
+-        CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP,
++        CSS_PROPERTY_VALUE_LIST_USES_COMMAS,
+     "layout.css.will-change.enabled",
+     0,
+     nullptr,
+     CSS_PROP_NO_OFFSET,
+     eStyleAnimType_None)
+ 
+ // The shorthands below are essentially aliases, but they require different
+ // parsing rules, and are therefore implemented as shorthands.
+diff --git a/layout/style/nsCSSProps.cpp b/layout/style/nsCSSProps.cpp
+--- a/layout/style/nsCSSProps.cpp
++++ b/layout/style/nsCSSProps.cpp
+@@ -377,23 +377,23 @@ nsCSSProps::LookupProperty(const nsACStr
+   if (MOZ_LIKELY(res < eCSSProperty_COUNT)) {
+     if (res != eCSSProperty_UNKNOWN && !IsEnabled(res, aEnabled)) {
+       res = eCSSProperty_UNKNOWN;
+     }
+     return res;
+   }
+   MOZ_ASSERT(eCSSAliasCount != 0,
+              "'res' must be an alias at this point so we better have some!");
+-  // We intentionally don't support eEnabledInUASheets or eEnabledInChromeOrCertifiedApp
+-  // for aliases yet because it's unlikely there will be a need for it.
+-  if (IsEnabled(res) || aEnabled == eIgnoreEnabledState) {
++  // We intentionally don't support eEnabledInUASheets for aliases yet
++  // because it's unlikely there will be a need for it.
++  if (IsEnabled(res) || aEnabled == eAny) {
+     res = gAliases[res - eCSSProperty_COUNT];
+     NS_ABORT_IF_FALSE(0 <= res && res < eCSSProperty_COUNT,
+                       "aliases must not point to other aliases");
+-    if (IsEnabled(res) || aEnabled == eIgnoreEnabledState) {
++    if (IsEnabled(res) || aEnabled == eAny) {
+       return res;
+     }
+   }
+   return eCSSProperty_UNKNOWN;
+ }
+ 
+ nsCSSProperty
+ nsCSSProps::LookupProperty(const nsAString& aProperty, EnabledState aEnabled)
+@@ -413,21 +413,21 @@ nsCSSProps::LookupProperty(const nsAStri
+       res = eCSSProperty_UNKNOWN;
+     }
+     return res;
+   }
+   MOZ_ASSERT(eCSSAliasCount != 0,
+              "'res' must be an alias at this point so we better have some!");
+   // We intentionally don't support eEnabledInUASheets for aliases yet
+   // because it's unlikely there will be a need for it.
+-  if (IsEnabled(res) || aEnabled == eIgnoreEnabledState) {
++  if (IsEnabled(res) || aEnabled == eAny) {
+     res = gAliases[res - eCSSProperty_COUNT];
+     NS_ABORT_IF_FALSE(0 <= res && res < eCSSProperty_COUNT,
+                       "aliases must not point to other aliases");
+-    if (IsEnabled(res) || aEnabled == eIgnoreEnabledState) {
++    if (IsEnabled(res) || aEnabled == eAny) {
+       return res;
+     }
+   }
+   return eCSSProperty_UNKNOWN;
+ }
+ 
+ nsCSSFontDesc
+ nsCSSProps::LookupFontDesc(const nsACString& aFontDesc)
+diff --git a/layout/style/nsCSSProps.h b/layout/style/nsCSSProps.h
+--- a/layout/style/nsCSSProps.h
++++ b/layout/style/nsCSSProps.h
+@@ -200,24 +200,16 @@ static_assert((CSS_PROPERTY_PARSE_PROPER
+ 
+ // This property is always enabled in UA sheets.  This is meant to be used
+ // together with a pref that enables the property for non-UA sheets.
+ // Note that if such a property has an alias, then any use of that alias
+ // in an UA sheet will still be ignored unless the pref is enabled.
+ // In other words, this bit has no effect on the use of aliases.
+ #define CSS_PROPERTY_ALWAYS_ENABLED_IN_UA_SHEETS  (1<<22)
+ 
+-// This property is always enabled in chrome and in certified apps. This is
+-// meant to be used together with a pref that enables the property for
+-// non-privileged content. Note that if such a property has an alias, then any
+-// use of that alias in privileged content will still be ignored unless the
+-// pref is enabled. In other words, this bit has no effect on the use of
+-// aliases.
+-#define CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP (1<<23)
+-
+ /**
+  * Types of animatable values.
+  */
+ enum nsStyleAnimType {
+   // requires a custom implementation in
+   // nsStyleAnimation::ExtractComputedValue
+   eStyleAnimType_Custom,
+ 
+@@ -265,31 +257,22 @@ enum nsStyleAnimType {
+ 
+ class nsCSSProps {
+ public:
+   typedef int16_t KTableValue;
+ 
+   static void AddRefTable(void);
+   static void ReleaseTable(void);
+ 
++  // Given a property string, return the enum value
+   enum EnabledState {
+-    // The default EnabledState: only enable what's enabled for all content,
+-    // given the current values of preferences.
+-    eEnabledForAllContent = 0,
+-    // Enable a property in UA sheets.
+-    eEnabledInUASheets    = 0x01,
+-    // Enable a property in privileged content, i.e. chrome or Certified Apps
+-    eEnabledInChromeOrCertifiedApp = 0x02,
+-    // Special value to unconditionally enable a property. This implies all the
+-    // bits above, but is strictly more than just their OR-ed union.
+-    // This just skips any test so a property will be enabled even if it would
+-    // have been disabled with all the bits above set.
+-    eIgnoreEnabledState   = 0xff
++    eEnabled,
++    eEnabledInUASheets,
++    eAny
+   };
+-
+   // Looks up the property with name aProperty and returns its corresponding
+   // nsCSSProperty value.  If aProperty is the name of a custom property,
+   // then eCSSPropertyExtra_variable will be returned.
+   static nsCSSProperty LookupProperty(const nsAString& aProperty,
+                                       EnabledState aEnabled);
+   static nsCSSProperty LookupProperty(const nsACString& aProperty,
+                                       EnabledState aEnabled);
+   // Returns whether aProperty is a custom property name, i.e. begins with
+@@ -462,35 +445,21 @@ public:
+ 
+   static bool IsEnabled(nsCSSProperty aProperty) {
+     NS_ABORT_IF_FALSE(0 <= aProperty &&
+                       aProperty < eCSSProperty_COUNT_with_aliases,
+                       "out of range");
+     return gPropertyEnabled[aProperty];
+   }
+ 
+-  static bool IsEnabled(nsCSSProperty aProperty, EnabledState aEnabled)
+-  {
+-    if (IsEnabled(aProperty)) {
+-      return true;
+-    }
+-    if (aEnabled == eIgnoreEnabledState) {
+-      return true;
+-    }
+-    if ((aEnabled & eEnabledInUASheets) &&
+-        PropHasFlags(aProperty, CSS_PROPERTY_ALWAYS_ENABLED_IN_UA_SHEETS))
+-    {
+-      return true;
+-    }
+-    if ((aEnabled & eEnabledInChromeOrCertifiedApp) &&
+-        PropHasFlags(aProperty, CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP))
+-    {
+-      return true;
+-    }
+-    return false;
++  static bool IsEnabled(nsCSSProperty aProperty, EnabledState aEnabled) {
++    return IsEnabled(aProperty) ||
++      (aEnabled == eEnabledInUASheets &&
++       PropHasFlags(aProperty, CSS_PROPERTY_ALWAYS_ENABLED_IN_UA_SHEETS)) ||
++      aEnabled == eAny;
+   }
+ 
+ public:
+ 
+ #define CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(iter_, prop_)                    \
+   for (const nsCSSProperty* iter_ = nsCSSProps::SubpropertyEntryFor(prop_);   \
+        *iter_ != eCSSProperty_UNKNOWN; ++iter_) \
+     if (nsCSSProps::IsEnabled(*iter_))
+@@ -638,33 +607,9 @@ public:
+   static const KTableValue kWidthKTable[]; // also min-width, max-width
+   static const KTableValue kWindowShadowKTable[];
+   static const KTableValue kWordBreakKTable[];
+   static const KTableValue kWordWrapKTable[];
+   static const KTableValue kWritingModeKTable[];
+   static const KTableValue kHyphensKTable[];
+ };
+ 
+-inline nsCSSProps::EnabledState operator|(nsCSSProps::EnabledState a,
+-                                          nsCSSProps::EnabledState b)
+-{
+-  return nsCSSProps::EnabledState(int(a) | int(b));
+-}
+-
+-inline nsCSSProps::EnabledState operator&(nsCSSProps::EnabledState a,
+-                                          nsCSSProps::EnabledState b)
+-{
+-  return nsCSSProps::EnabledState(int(a) & int(b));
+-}
+-
+-inline nsCSSProps::EnabledState& operator|=(nsCSSProps::EnabledState& a,
+-                                            nsCSSProps::EnabledState b)
+-{
+-  return a = a | b;
+-}
+-
+-inline nsCSSProps::EnabledState& operator&=(nsCSSProps::EnabledState& a,
+-                                            nsCSSProps::EnabledState b)
+-{
+-  return a = a & b;
+-}
+-
+ #endif /* nsCSSProps_h___ */
+diff --git a/layout/style/nsComputedDOMStyle.cpp b/layout/style/nsComputedDOMStyle.cpp
+--- a/layout/style/nsComputedDOMStyle.cpp
++++ b/layout/style/nsComputedDOMStyle.cpp
+@@ -713,17 +713,17 @@ nsComputedDOMStyle::ClearCurrentStyleSou
+   // whenever a frame is not available.
+   mStyleContextHolder = nullptr;
+ }
+ 
+ already_AddRefed<CSSValue>
+ nsComputedDOMStyle::GetPropertyCSSValue(const nsAString& aPropertyName, ErrorResult& aRv)
+ {
+   nsCSSProperty prop = nsCSSProps::LookupProperty(aPropertyName,
+-                                                  nsCSSProps::eEnabledForAllContent);
++                                                  nsCSSProps::eEnabled);
+ 
+   bool needsLayoutFlush;
+   nsComputedStyleMap::Entry::ComputeMethod getter;
+ 
+   if (prop == eCSSPropertyExtra_variable) {
+     needsLayoutFlush = false;
+     getter = nullptr;
+   } else {
+diff --git a/layout/style/nsDOMCSSDeclaration.cpp b/layout/style/nsDOMCSSDeclaration.cpp
+--- a/layout/style/nsDOMCSSDeclaration.cpp
++++ b/layout/style/nsDOMCSSDeclaration.cpp
+@@ -11,18 +11,16 @@
+ #include "nsCSSStyleSheet.h"
+ #include "mozilla/css/Rule.h"
+ #include "mozilla/css/Declaration.h"
+ #include "mozilla/dom/CSS2PropertiesBinding.h"
+ #include "nsCSSProps.h"
+ #include "nsCOMPtr.h"
+ #include "mozAutoDocUpdate.h"
+ #include "nsIURI.h"
+-#include "mozilla/dom/BindingUtils.h"
+-#include "nsContentUtils.h"
+ 
+ using namespace mozilla;
+ 
+ nsDOMCSSDeclaration::~nsDOMCSSDeclaration()
+ {
+ }
+ 
+ /* virtual */ JSObject*
+@@ -164,19 +162,18 @@ nsDOMCSSDeclaration::IndexedGetter(uint3
+   css::Declaration* decl = GetCSSDeclaration(false);
+   aFound = decl && decl->GetNthProperty(aIndex, aPropName);
+ }
+ 
+ NS_IMETHODIMP
+ nsDOMCSSDeclaration::GetPropertyValue(const nsAString& aPropertyName,
+                                       nsAString& aReturn)
+ {
+-  const nsCSSProperty propID =
+-    nsCSSProps::LookupProperty(aPropertyName,
+-                               nsCSSProps::eEnabledForAllContent);
++  const nsCSSProperty propID = nsCSSProps::LookupProperty(aPropertyName,
++                                                          nsCSSProps::eEnabled);
+   if (propID == eCSSProperty_UNKNOWN) {
+     aReturn.Truncate();
+     return NS_OK;
+   }
+ 
+   if (propID == eCSSPropertyExtra_variable) {
+     GetCustomPropertyValue(aPropertyName, aReturn);
+     return NS_OK;
+@@ -184,19 +181,18 @@ nsDOMCSSDeclaration::GetPropertyValue(co
+ 
+   return GetPropertyValue(propID, aReturn);
+ }
+ 
+ NS_IMETHODIMP
+ nsDOMCSSDeclaration::GetAuthoredPropertyValue(const nsAString& aPropertyName,
+                                               nsAString& aReturn)
+ {
+-  const nsCSSProperty propID =
+-    nsCSSProps::LookupProperty(aPropertyName,
+-                               nsCSSProps::eEnabledForAllContent);
++  const nsCSSProperty propID = nsCSSProps::LookupProperty(aPropertyName,
++                                                          nsCSSProps::eEnabled);
+   if (propID == eCSSProperty_UNKNOWN) {
+     aReturn.Truncate();
+     return NS_OK;
+   }
+ 
+   if (propID == eCSSPropertyExtra_variable) {
+     GetCustomPropertyValue(aPropertyName, aReturn);
+     return NS_OK;
+@@ -226,19 +222,18 @@ nsDOMCSSDeclaration::GetPropertyPriority
+ }
+ 
+ NS_IMETHODIMP
+ nsDOMCSSDeclaration::SetProperty(const nsAString& aPropertyName,
+                                  const nsAString& aValue,
+                                  const nsAString& aPriority)
+ {
+   // In the common (and fast) cases we can use the property id
+-  nsCSSProperty propID =
+-    nsCSSProps::LookupProperty(aPropertyName,
+-                               nsCSSProps::eEnabledForAllContent);
++  nsCSSProperty propID = nsCSSProps::LookupProperty(aPropertyName,
++                                                    nsCSSProps::eEnabled);
+   if (propID == eCSSProperty_UNKNOWN) {
+     return NS_OK;
+   }
+ 
+   if (aValue.IsEmpty()) {
+     // If the new value of the property is an empty string we remove the
+     // property.
+     // XXX this ignores the priority string, should it?
+@@ -263,19 +258,18 @@ nsDOMCSSDeclaration::SetProperty(const n
+   }
+   return ParsePropertyValue(propID, aValue, important);
+ }
+ 
+ NS_IMETHODIMP
+ nsDOMCSSDeclaration::RemoveProperty(const nsAString& aPropertyName,
+                                     nsAString& aReturn)
+ {
+-  const nsCSSProperty propID =
+-    nsCSSProps::LookupProperty(aPropertyName,
+-                               nsCSSProps::eEnabledForAllContent);
++  const nsCSSProperty propID = nsCSSProps::LookupProperty(aPropertyName,
++                                                          nsCSSProps::eEnabled);
+   if (propID == eCSSProperty_UNKNOWN) {
+     aReturn.Truncate();
+     return NS_OK;
+   }
+ 
+   if (propID == eCSSPropertyExtra_variable) {
+     RemoveCustomProperty(aPropertyName);
+     return NS_OK;
+@@ -427,28 +421,8 @@ nsDOMCSSDeclaration::RemoveCustomPropert
+   mozAutoDocConditionalContentUpdateBatch autoUpdate(DocToUpdate(), true);
+ 
+   decl = decl->EnsureMutable();
+   decl->RemoveVariableDeclaration(Substring(aPropertyName,
+                                             CSS_CUSTOM_NAME_PREFIX_LENGTH));
+   return SetCSSDeclaration(decl);
+ }
+ 
+-bool IsCSSPropertyExposedToJS(nsCSSProperty aProperty, JSContext* cx, JSObject* obj)
+-{
+-  nsCSSProps::EnabledState enabledState = nsCSSProps::eEnabledForAllContent;
+-
+-  // Optimization: we skip checking properties of the JSContext
+-  // in the majority case where the property does not have the
+-  // CSS_PROPERTY_ALWAYS_ENABLED_IN_PRIVILEGED_CONTENT flag.
+-  bool isEnabledInChromeOrCertifiedApp
+-    = nsCSSProps::PropHasFlags(aProperty,
+-                               CSS_PROPERTY_ALWAYS_ENABLED_IN_CHROME_OR_CERTIFIED_APP);
+-
+-  if (isEnabledInChromeOrCertifiedApp) {
+-    if (dom::IsInCertifiedApp(cx, obj) ||
+-        nsContentUtils::ThreadsafeIsCallerChrome())
+-    {
+-      enabledState |= nsCSSProps::eEnabledInChromeOrCertifiedApp;
+-    }
+-  }
+-  return nsCSSProps::IsEnabled(aProperty, enabledState);
+-}
+diff --git a/layout/style/nsDOMCSSDeclaration.h b/layout/style/nsDOMCSSDeclaration.h
+--- a/layout/style/nsDOMCSSDeclaration.h
++++ b/layout/style/nsDOMCSSDeclaration.h
+@@ -10,18 +10,16 @@
+ 
+ #include "nsICSSDeclaration.h"
+ 
+ #include "mozilla/Attributes.h"
+ #include "nsCOMPtr.h"
+ 
+ class nsIPrincipal;
+ class nsIDocument;
+-struct JSContext;
+-class JSObject;
+ 
+ namespace mozilla {
+ namespace css {
+ class Declaration;
+ class Loader;
+ class Rule;
+ }
+ }
+@@ -148,17 +146,9 @@ protected:
+ protected:
+   virtual ~nsDOMCSSDeclaration();
+   nsDOMCSSDeclaration()
+   {
+     SetIsDOMBinding();
+   }
+ };
+ 
+-bool IsCSSPropertyExposedToJS(nsCSSProperty aProperty, JSContext* cx, JSObject* obj);
+-
+-template <nsCSSProperty Property>
+-MOZ_ALWAYS_INLINE bool IsCSSPropertyExposedToJS(JSContext* cx, JSObject* obj)
+-{
+-  return IsCSSPropertyExposedToJS(Property, cx, obj);
+-}
+-
+ #endif // nsDOMCSSDeclaration_h___
+diff --git a/layout/style/nsRuleNode.cpp b/layout/style/nsRuleNode.cpp
+--- a/layout/style/nsRuleNode.cpp
++++ b/layout/style/nsRuleNode.cpp
+@@ -4862,19 +4862,18 @@ nsRuleNode::ComputeDisplayData(void* aSt
+     } else if (property.unit == eCSSUnit_None) {
+       transition->SetProperty(eCSSPropertyExtra_no_properties);
+     } else if (property.list) {
+       const nsCSSValue &val = property.list->mValue;
+ 
+       if (val.GetUnit() == eCSSUnit_Ident) {
+         nsDependentString
+           propertyStr(property.list->mValue.GetStringBufferValue());
+-        nsCSSProperty prop =
+-          nsCSSProps::LookupProperty(propertyStr,
+-                                     nsCSSProps::eEnabledForAllContent);
++        nsCSSProperty prop = nsCSSProps::LookupProperty(propertyStr,
++                                                        nsCSSProps::eEnabled);
+         if (prop == eCSSProperty_UNKNOWN) {
+           transition->SetUnknownProperty(propertyStr);
+         } else {
+           transition->SetProperty(prop);
+         }
+       } else {
+         NS_ABORT_IF_FALSE(val.GetUnit() == eCSSUnit_All,
+                           nsPrintfCString("Invalid transition property unit %d",
+@@ -5507,18 +5506,17 @@ nsRuleNode::ComputeDisplayData(void* aSt
+         if (buffer.EqualsLiteral("opacity")) {
+           display->mWillChangeBitField |= NS_STYLE_WILL_CHANGE_OPACITY;
+         }
+         if (buffer.EqualsLiteral("scroll-position")) {
+           display->mWillChangeBitField |= NS_STYLE_WILL_CHANGE_SCROLL;
+         }
+ 
+         nsCSSProperty prop =
+-          nsCSSProps::LookupProperty(buffer,
+-                                     nsCSSProps::eEnabledForAllContent);
++          nsCSSProps::LookupProperty(buffer, nsCSSProps::eEnabled);
+         if (prop != eCSSProperty_UNKNOWN &&
+             nsCSSProps::PropHasFlags(prop,
+                                      CSS_PROPERTY_CREATES_STACKING_CONTEXT))
+         {
+           display->mWillChangeBitField |= NS_STYLE_WILL_CHANGE_STACKING_CONTEXT;
+         }
+       }
+     }
+diff --git a/layout/style/nsStyleStruct.cpp b/layout/style/nsStyleStruct.cpp
+--- a/layout/style/nsStyleStruct.cpp
++++ b/layout/style/nsStyleStruct.cpp
+@@ -2297,17 +2297,17 @@ void nsTransition::SetInitialValues()
+   mDuration = 0.0;
+   mDelay = 0.0;
+   mProperty = eCSSPropertyExtra_all_properties;
+ }
+ 
+ void nsTransition::SetUnknownProperty(const nsAString& aUnknownProperty)
+ {
+   NS_ASSERTION(nsCSSProps::LookupProperty(aUnknownProperty,
+-                                          nsCSSProps::eEnabledForAllContent) ==
++                                          nsCSSProps::eEnabled) ==
+                  eCSSProperty_UNKNOWN,
+                "should be unknown property");
+   mProperty = eCSSProperty_UNKNOWN;
+   mUnknownProperty = do_GetAtom(aUnknownProperty);
+ }
+ 
+ nsAnimation::nsAnimation(const nsAnimation& aCopy)
+   : mTimingFunction(aCopy.mTimingFunction)
+diff --git a/layout/style/test/TestCSSPropertyLookup.cpp b/layout/style/test/TestCSSPropertyLookup.cpp
+--- a/layout/style/test/TestCSSPropertyLookup.cpp
++++ b/layout/style/test/TestCSSPropertyLookup.cpp
+@@ -35,49 +35,47 @@ TestProps()
+   const char*const* et = &kCSSRawProperties[0];
+   const char*const* end = &kCSSRawProperties[eCSSProperty_COUNT];
+   index = eCSSProperty_UNKNOWN;
+   while (et < end) {
+     char tagName[100];
+     PL_strcpy(tagName, *et);
+     index = nsCSSProperty(int32_t(index) + 1);
+ 
+-    id = nsCSSProps::LookupProperty(nsCString(tagName),
+-                                    nsCSSProps::eIgnoreEnabledState);
++    id = nsCSSProps::LookupProperty(nsCString(tagName), nsCSSProps::eAny);
+     if (id == eCSSProperty_UNKNOWN) {
+       printf("bug: can't find '%s'\n", tagName);
+       success = false;
+     }
+     if (id != index) {
+       printf("bug: name='%s' id=%d index=%d\n", tagName, id, index);
+       success = false;
+     }
+ 
+     // fiddle with the case to make sure we can still find it
+     if (('a' <= tagName[0]) && (tagName[0] <= 'z')) {
+       tagName[0] = tagName[0] - 32;
+     }
+     id = nsCSSProps::LookupProperty(NS_ConvertASCIItoUTF16(tagName),
+-                                    nsCSSProps::eIgnoreEnabledState);
++                                    nsCSSProps::eAny);
+     if (id < 0) {
+       printf("bug: can't find '%s'\n", tagName);
+       success = false;
+     }
+     if (index != id) {
+       printf("bug: name='%s' id=%d index=%d\n", tagName, id, index);
+       success = false;
+     }
+     et++;
+   }
+ 
+   // Now make sure we don't find some garbage
+   for (int i = 0; i < (int) (sizeof(kJunkNames) / sizeof(const char*)); i++) {
+     const char* const tag = kJunkNames[i];
+-    id = nsCSSProps::LookupProperty(nsAutoCString(tag),
+-                                    nsCSSProps::eIgnoreEnabledState);
++    id = nsCSSProps::LookupProperty(nsAutoCString(tag), nsCSSProps::eAny);
+     if (id >= 0) {
+       printf("bug: found '%s'\n", tag ? tag : "(null)");
+       success = false;
+     }
+   }
+ 
+   nsCSSProps::ReleaseTable();
+   return success;

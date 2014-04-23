@@ -1,0 +1,203 @@
+# HG changeset patch
+# Parent 5010b38abf18590cb17cf35e0cfaa933579cd748
+# User Jerry Shih <hshih@mozilla.com>
+debug rotate
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -772,17 +772,18 @@ pref("memory.dump_reports_on_oom", false
+ pref("layout.imagevisibility.enabled", true);
+ pref("layout.imagevisibility.numscrollportwidths", 1);
+ pref("layout.imagevisibility.numscrollportheights", 1);
+ 
+ // Enable native identity (persona/browserid)
+ pref("dom.identity.enabled", true);
+ 
+ // Wait up to this much milliseconds when orientation changed
+-pref("layers.orientation.sync.timeout", 1000);
++//pref("layers.orientation.sync.timeout", 1000);
++pref("layers.orientation.sync.timeout", 5000);
+ 
+ // Don't discard WebGL contexts for foreground apps on memory
+ // pressure.
+ pref("webgl.can-lose-context-in-foreground", false);
+ 
+ // Allow nsMemoryInfoDumper to create a fifo in the temp directory.  We use
+ // this fifo to trigger about:memory dumps, among other things.
+ pref("memory_info_dumper.watch_fifo.enabled", true);
+diff --git a/gfx/layers/composite/AsyncCompositionManager.cpp b/gfx/layers/composite/AsyncCompositionManager.cpp
+--- a/gfx/layers/composite/AsyncCompositionManager.cpp
++++ b/gfx/layers/composite/AsyncCompositionManager.cpp
+@@ -96,16 +96,17 @@ WalkTheTree(Layer* aLayer,
+ }
+ 
+ void
+ AsyncCompositionManager::ResolveRefLayers()
+ {
+   if (!mLayerManager->GetRoot()) {
+     return;
+   }
++  mReadyForCompose = true;
+   WalkTheTree<Resolve>(mLayerManager->GetRoot(),
+                        mReadyForCompose,
+                        mTargetConfig);
+ }
+ 
+ void
+ AsyncCompositionManager::DetachRefLayers()
+ {
+diff --git a/gfx/layers/composite/AsyncCompositionManager.h b/gfx/layers/composite/AsyncCompositionManager.h
+--- a/gfx/layers/composite/AsyncCompositionManager.h
++++ b/gfx/layers/composite/AsyncCompositionManager.h
+@@ -104,17 +104,21 @@ public:
+   }
+ 
+   bool RequiresReorientation(mozilla::dom::ScreenOrientation aOrientation)
+   {
+     return mTargetConfig.orientation() != aOrientation;
+   }
+ 
+   // True if the underlying layer tree is ready to be composited.
+-  bool ReadyForCompose() { return mReadyForCompose; }
++  bool ReadyForCompose()
++  {
++    printf_stderr("bignose ReadyForCompose:%d",(int)mReadyForCompose);
++    return mReadyForCompose;
++  }
+ 
+   // Returns true if the next composition will be the first for a
+   // particular document.
+   bool IsFirstPaint() { return mIsFirstPaint; }
+ 
+ private:
+   void TransformScrollableLayer(Layer* aLayer);
+   // Return true if an AsyncPanZoomController content transform was
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -47,16 +47,18 @@
+ #ifdef XP_WIN
+ #include "mozilla/layers/CompositorD3D11.h"
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ #include "mozilla/unused.h"
+ 
++#include "cutils/properties.h"
++
+ using namespace base;
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+ 
+ namespace mozilla {
+ namespace layers {
+@@ -434,16 +436,17 @@ CompositorParent::ResumeComposition()
+   lock.NotifyAll();
+ }
+ 
+ void
+ CompositorParent::ForceComposition()
+ {
+   // Cancel the orientation changed state to force composition
+   mForceCompositionTask = nullptr;
++  printf_stderr("bignose trigger ForceComposition");
+   ScheduleRenderOnCompositorThread();
+ }
+ 
+ void
+ CompositorParent::CancelCurrentCompositeTask()
+ {
+   if (mCurrentCompositeTask) {
+     mCurrentCompositeTask->Cancel();
+@@ -621,21 +624,39 @@ CompositorParent::CompositeToTarget(Draw
+   AutoResolveRefLayers resolve(mCompositionManager);
+ 
+   if (aTarget) {
+     mLayerManager->BeginTransactionWithDrawTarget(aTarget);
+   } else {
+     mLayerManager->BeginTransaction();
+   }
+ 
+-  if (mForceCompositionTask && !mOverrideComposeReadiness) {
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.rotate.compositor", propValue, "0");
++
++  if(atoi(propValue)==0){
++    if (mForceCompositionTask && !mOverrideComposeReadiness) {
++      if (mCompositionManager->ReadyForCompose()) {
++        printf_stderr("bignose cancel mForceCompositionTask() in CompositeToTarget 1");
++        mForceCompositionTask->Cancel();
++        mForceCompositionTask = nullptr;
++      } else {
++        return;
++      }
++    }
++  }
++  else{
+     if (mCompositionManager->ReadyForCompose()) {
+-      mForceCompositionTask->Cancel();
+-      mForceCompositionTask = nullptr;
+-    } else {
++      if(mForceCompositionTask){
++        printf_stderr("bignose cancel mForceCompositionTask() in CompositeToTarget 2");
++        mForceCompositionTask->Cancel();
++        mForceCompositionTask = nullptr;
++      }
++    }
++    else{
+       return;
+     }
+   }
+ 
+   TimeStamp time = mIsTesting ? mTestTime : mLastCompose;
+   bool requestNextFrame = mCompositionManager->TransformShadowTree(time);
+   if (requestNextFrame) {
+     ScheduleComposition();
+@@ -738,24 +759,36 @@ SetShadowProperties(Layer* aLayer)
+ }
+ 
+ void
+ CompositorParent::ShadowLayersUpdated(LayerTransactionParent* aLayerTree,
+                                       const TargetConfig& aTargetConfig,
+                                       bool aIsFirstPaint,
+                                       bool aScheduleComposite)
+ {
+-  if (!aIsFirstPaint &&
+-      !mCompositionManager->IsFirstPaint() &&
+-      mCompositionManager->RequiresReorientation(aTargetConfig.orientation())) {
+-    if (mForceCompositionTask != nullptr) {
+-      mForceCompositionTask->Cancel();
++  printf_stderr("bignose in CompositorParent::ShadowLayersUpdated, need rotate:%d",(int)mCompositionManager->RequiresReorientation(aTargetConfig.orientation()));
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.rotate.shadowlayer", propValue, "0");
++
++  if(atoi(propValue)==0){
++    if (!aIsFirstPaint &&
++        !mCompositionManager->IsFirstPaint() &&
++        mCompositionManager->RequiresReorientation(aTargetConfig.orientation())) {
++      if (mForceCompositionTask != nullptr) {
++        printf_stderr("bignose cancel mForceCompositionTask() in shadowlayer update");
++        mForceCompositionTask->Cancel();
++      }
++      mForceCompositionTask = NewRunnableMethod(this, &CompositorParent::ForceComposition);
++      //ScheduleTask(mForceCompositionTask, gfxPrefs::OrientationSyncMillis());
++      ScheduleTask(mForceCompositionTask, 10000);
+     }
+-    mForceCompositionTask = NewRunnableMethod(this, &CompositorParent::ForceComposition);
+-    ScheduleTask(mForceCompositionTask, gfxPrefs::OrientationSyncMillis());
++  }
++  else{
++
+   }
+ 
+   // Instruct the LayerManager to update its render bounds now. Since all the orientation
+   // change, dimension change would be done at the stage, update the size here is free of
+   // race condition.
+   mLayerManager->UpdateRenderBounds(aTargetConfig.clientBounds());
+   mLayerManager->SetRegionToClear(aTargetConfig.clearRegion());
+ 
