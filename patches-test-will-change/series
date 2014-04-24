@@ -1,2 +1,3 @@
 debug_rotate.patch
+4.2.2_build_break_fix.patch
 remove-will-change.patch

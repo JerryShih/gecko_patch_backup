@@ -1,0 +1,20 @@
+# HG changeset patch
+# Parent 50d37f9acd5e82f255e950e627a764ae2d5c3677
+# User Jerry Shih <hshih@mozilla.com>
+for 4.2.2 LulElf.cpp build break
+
+
+diff --git a/tools/profiler/moz.build b/tools/profiler/moz.build
+--- a/tools/profiler/moz.build
++++ b/tools/profiler/moz.build
+@@ -99,8 +99,10 @@ if CONFIG['MOZ_ENABLE_PROFILER_SPS']:
+ 
+     FINAL_LIBRARY = 'xul'
+ 
+ EXPORTS += [
+     'GeckoProfiler.h',
+ ]
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['tests/xpcshell.ini']
++
++DEFINES['ELFSIZE'] = 32
