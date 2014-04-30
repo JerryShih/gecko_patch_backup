@@ -1,0 +1,21 @@
+# HG changeset patch
+# Parent 5010b38abf18590cb17cf35e0cfaa933579cd748
+# User Jerry Shih <hshih@mozilla.com>
+fix jb-4.2.2 build break
+
+
+diff --git a/tools/profiler/moz.build b/tools/profiler/moz.build
+--- a/tools/profiler/moz.build
++++ b/tools/profiler/moz.build
+@@ -99,8 +99,11 @@ if CONFIG['MOZ_ENABLE_PROFILER_SPS']:
+ 
+     FINAL_LIBRARY = 'xul'
+ 
+ EXPORTS += [
+     'GeckoProfiler.h',
+ ]
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['tests/xpcshell.ini']
++
++DEFINES['ELFSIZE'] = 32
++

@@ -1,0 +1,279 @@
+# HG changeset patch
+# Parent 609c7f4c3b74cf214f22bef53b79c379d8b63a68
+# User Jerry Shih <hshih@mozilla.com>
+dump layer
+
+diff --git a/gfx/layers/LayersTypes.h b/gfx/layers/LayersTypes.h
+--- a/gfx/layers/LayersTypes.h
++++ b/gfx/layers/LayersTypes.h
+@@ -26,16 +26,29 @@
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)         \
+   do { if (layer->AsShadowableLayer()) { PR_LOG(LayerManager::GetLog(), PR_LOG_DEBUG, _args); } } while (0)
+ #else
+ struct PRLogModuleInfo;
+ #  define MOZ_LAYERS_LOG(_args)
+ #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
+ #endif  // if defined(DEBUG) || defined(PR_LOGGING)
+ 
++
++#define MOZ_LAYERS_HAVE_LOG
++#define PR_BEGIN_MACRO  do {
++#define PR_END_MACRO    } while (0)
++
++#define MOZ_LAYERS_LOG(args...) TMOZ_LAYERS_LOG args
++
++#define TMOZ_LAYERS_LOG(args...) \
++  PR_BEGIN_MACRO \
++    __android_log_print(ANDROID_LOG_INFO, "LM" , ## args); \
++  PR_END_MACRO
++
++
+ namespace android {
+ class GraphicBuffer;
+ }
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ class TextureHost;
+diff --git a/gfx/layers/basic/BasicLayerManager.cpp b/gfx/layers/basic/BasicLayerManager.cpp
+--- a/gfx/layers/basic/BasicLayerManager.cpp
++++ b/gfx/layers/basic/BasicLayerManager.cpp
+@@ -337,17 +337,17 @@ BasicLayerManager::PopGroupToSourceWithC
+ }
+ 
+ void
+ BasicLayerManager::BeginTransactionWithTarget(gfxContext* aTarget)
+ {
+   mInTransaction = true;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("[----- BeginTransaction"));
++  //MOZ_LAYERS_LOG(("[----- BeginTransaction"));
+   Log();
+ #endif
+ 
+   NS_ASSERTION(!InTransaction(), "Nested transactions not allowed");
+   mPhase = PHASE_CONSTRUCTION;
+   mTarget = aTarget;
+ }
+ 
+@@ -570,17 +570,17 @@ BasicLayerManager::RenderDebugOverlay()
+ 
+ bool
+ BasicLayerManager::EndTransactionInternal(DrawThebesLayerCallback aCallback,
+                                           void* aCallbackData,
+                                           EndTransactionFlags aFlags)
+ {
+   PROFILER_LABEL("BasicLayerManager", "EndTransactionInternal");
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
++  //MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+   Log();
+ #endif
+ 
+   NS_ASSERTION(InConstruction(), "Should be in construction phase");
+   mPhase = PHASE_DRAWING;
+ 
+   RenderTraceLayers(mRoot, "FF00");
+ 
+@@ -645,17 +645,17 @@ BasicLayerManager::EndTransactionInterna
+     if (!mTransactionIncomplete) {
+       // Clear out target if we have a complete transaction.
+       mTarget = nullptr;
+     }
+   }
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   Log();
+-  MOZ_LAYERS_LOG(("]----- EndTransaction"));
++  //MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ 
+   // Go back to the construction phase if the transaction isn't complete.
+   // Layout will update the layer tree and call EndTransaction().
+   mPhase = mTransactionIncomplete ? PHASE_CONSTRUCTION : PHASE_NONE;
+ 
+   if (!mTransactionIncomplete) {
+     // This is still valid if the transaction was incomplete.
+diff --git a/gfx/layers/client/ClientLayerManager.cpp b/gfx/layers/client/ClientLayerManager.cpp
+--- a/gfx/layers/client/ClientLayerManager.cpp
++++ b/gfx/layers/client/ClientLayerManager.cpp
+@@ -26,16 +26,18 @@
+ #include "nsIWidgetListener.h"
+ #include "nsTArray.h"                   // for AutoInfallibleTArray
+ #include "nsXULAppAPI.h"                // for XRE_GetProcessType, etc
+ #include "TiledLayerBuffer.h"
+ #ifdef MOZ_WIDGET_ANDROID
+ #include "AndroidBridge.h"
+ #endif
+ 
++#include "cutils/properties.h"
++
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ ClientLayerManager::ClientLayerManager(nsIWidget* aWidget)
+   : mPhase(PHASE_NONE)
+@@ -103,17 +105,17 @@ ClientLayerManager::Mutated(Layer* aLaye
+ }
+ 
+ void
+ ClientLayerManager::BeginTransactionWithTarget(gfxContext* aTarget)
+ {
+   mInTransaction = true;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("[----- BeginTransaction"));
++  //MOZ_LAYERS_LOG(("[----- BeginTransaction"));
+   Log();
+ #endif
+ 
+   NS_ASSERTION(!InTransaction(), "Nested transactions not allowed");
+   mPhase = PHASE_CONSTRUCTION;
+ 
+   NS_ABORT_IF_FALSE(mKeepAlive.IsEmpty(), "uncommitted txn?");
+   nsRefPtr<gfxContext> targetContext = aTarget;
+@@ -161,17 +163,17 @@ ClientLayerManager::BeginTransaction()
+ 
+ bool
+ ClientLayerManager::EndTransactionInternal(DrawThebesLayerCallback aCallback,
+                                            void* aCallbackData,
+                                            EndTransactionFlags)
+ {
+   PROFILER_LABEL("ClientLayerManager", "EndTransactionInternal");
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
++  //MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+   Log();
+ #endif
+   profiler_tracing("Paint", "Rasterize", TRACING_INTERVAL_START);
+ 
+   NS_ASSERTION(InConstruction(), "Should be in construction phase");
+   mPhase = PHASE_DRAWING;
+ 
+   ClientLayer* root = ClientLayer::ToClientLayer(GetRoot());
+@@ -186,16 +188,24 @@ ClientLayerManager::EndTransactionIntern
+   mThebesLayerCallbackData = aCallbackData;
+ 
+   GetRoot()->ComputeEffectiveTransforms(Matrix4x4());
+ 
+   root->RenderLayer();
+   if (!mRepeatTransaction && !GetRoot()->GetInvalidRegion().IsEmpty()) {
+     GetRoot()->Mutated();
+   }
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("dump_layer.client", propValue, "0");
++  if(atoi(propValue)==1){
++    char prefix_string[35];
++    sprintf(prefix_string,"bignose client tid:%d:",gettid());
++    Dump(nullptr,prefix_string,false);
++  }
+   
+   mThebesLayerCallback = nullptr;
+   mThebesLayerCallbackData = nullptr;
+ 
+   // Go back to the construction phase if the transaction isn't complete.
+   // Layout will update the layer tree and call EndTransaction().
+   mPhase = mTransactionIncomplete ? PHASE_CONSTRUCTION : PHASE_NONE;
+ 
+diff --git a/gfx/layers/composite/LayerManagerComposite.cpp b/gfx/layers/composite/LayerManagerComposite.cpp
+--- a/gfx/layers/composite/LayerManagerComposite.cpp
++++ b/gfx/layers/composite/LayerManagerComposite.cpp
+@@ -48,16 +48,18 @@
+ #include "nsRect.h"                     // for nsIntRect
+ #include "nsRegion.h"                   // for nsIntRegion, etc
+ #ifdef MOZ_WIDGET_ANDROID
+ #include <android/log.h>
+ #endif
+ #include "GeckoProfiler.h"
+ #include "TextRenderer.h"               // for TextRenderer
+ 
++#include "cutils/properties.h"
++
+ class gfxContext;
+ struct nsIntSize;
+ 
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ class ImageLayer;
+@@ -166,17 +168,17 @@ LayerManagerComposite::BeginTransactionW
+ {
+   mInTransaction = true;
+   
+   if (!mCompositor->Ready()) {
+     return;
+   }
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("[----- BeginTransaction"));
++  //MOZ_LAYERS_LOG(("[----- BeginTransaction"));
+   Log();
+ #endif
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+@@ -209,17 +211,17 @@ LayerManagerComposite::EndTransaction(Dr
+   mInTransaction = false;
+ 
+   if (!mIsCompositorReady) {
+     return;
+   }
+   mIsCompositorReady = false;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+-  MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
++  //MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
+   Log();
+ #endif
+ 
+   if (mDestroyed) {
+     NS_WARNING("Call on destroyed layer manager");
+     return;
+   }
+ 
+@@ -240,25 +242,34 @@ LayerManagerComposite::EndTransaction(Dr
+       mRoot->ApplyPendingUpdatesToSubtree();
+     }
+ 
+     // The results of our drawing always go directly into a pixel buffer,
+     // so we don't need to pass any global transform here.
+     mRoot->ComputeEffectiveTransforms(gfx::Matrix4x4());
+ 
+     Render();
++
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("dump_layer.b2g", propValue, "0");
++    if(atoi(propValue)==1){
++      char prefix_string[35];
++      sprintf(prefix_string,"bignose b2g tid:%d:",gettid());
++      Dump(nullptr,prefix_string,false);
++    }
++
+     mGeometryChanged = false;
+   }
+ 
+   mCompositor->SetTargetContext(nullptr);
+   mTarget = nullptr;
+ 
+ #ifdef MOZ_LAYERS_HAVE_LOG
+   Log();
+-  MOZ_LAYERS_LOG(("]----- EndTransaction"));
++  //MOZ_LAYERS_LOG(("]----- EndTransaction"));
+ #endif
+ }
+ 
+ TemporaryRef<DrawTarget>
+ LayerManagerComposite::CreateOptimalMaskDrawTarget(const IntSize &aSize)
+ {
+   NS_RUNTIMEABORT("Should only be called on the drawing side");
+   return nullptr;

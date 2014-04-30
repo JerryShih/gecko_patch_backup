@@ -1,0 +1,586 @@
+# HG changeset patch
+# Parent 11994624c909e8affeb375a619fad864ccfbefcf
+# User Jerry Shih <hshih@mozilla.com>
+Bug 998916 - part 2: restore webgl context when visible
+
+diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLContext.cpp
+--- a/content/canvas/src/WebGLContext.cpp
++++ b/content/canvas/src/WebGLContext.cpp
+@@ -47,16 +47,17 @@
+ 
+ #include "prenv.h"
+ 
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ #include "mozilla/Telemetry.h"
+ 
+ #include "nsIObserverService.h"
++#include "nsIDOMEvent.h"
+ #include "mozilla/Services.h"
+ #include "mozilla/dom/WebGLRenderingContextBinding.h"
+ #include "mozilla/dom/BindingUtils.h"
+ #include "mozilla/dom/ImageData.h"
+ #include "mozilla/ProcessPriorityManager.h"
+ 
+ #include "Layers.h"
+ 
+@@ -65,39 +66,142 @@
+ #endif
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ using namespace mozilla::gl;
+ using namespace mozilla::layers;
+ 
++WebGLObserver::WebGLObserver(WebGLContext* aContext)
++    : mContext(aContext)
++{
++
++}
++
++WebGLObserver::~WebGLObserver()
++{
++    printf_stderr("bignose WebGLObserver::~WebGLObserver");
++
++    UnregisterMemoryPressureEvent();
++    UnregisterVisibilityChangeEvent();
++}
++
++void
++WebGLObserver::RegisterVisibilityChangeEvent(void)
++{
++    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
++
++    if (canvasElement) {
++        nsCOMPtr<nsIDOMEventTarget> target =
++            do_QueryInterface(canvasElement->OwnerDoc());
++        NS_ENSURE_TRUE_VOID(target);
++
++        printf_stderr("bignose register visibilitychange event");
++        target->AddSystemEventListener(NS_LITERAL_STRING("visibilitychange"),
++                                       this,
++                                       true,
++                                       false);
++    }
++}
++
++void
++WebGLObserver::UnregisterVisibilityChangeEvent(void)
++{
++    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
++
++    if (canvasElement) {
++        nsCOMPtr<nsIDOMEventTarget> target =
++            do_QueryInterface(canvasElement->OwnerDoc());
++        NS_ENSURE_TRUE_VOID(target);
++
++        printf_stderr("bignose unregister visibilitychange event");
++        target->RemoveSystemEventListener(NS_LITERAL_STRING("visibilitychange"),
++                                          this,
++                                          true);
++    }
++}
++
++void
++WebGLObserver::RegisterMemoryPressureEvent(void)
++{
++    nsCOMPtr<nsIObserverService> observerService =
++        mozilla::services::GetObserverService();
++
++    if (observerService) {
++        printf_stderr("bignose register memory-pressure event");
++        observerService->AddObserver(this, "memory-pressure", false);
++    }
++}
++
++void
++WebGLObserver::UnregisterMemoryPressureEvent(void)
++{
++    nsCOMPtr<nsIObserverService> observerService =
++        mozilla::services::GetObserverService();
++
++    if (observerService) {
++        printf_stderr("bignose unregister memory-pressure event");
++        observerService->RemoveObserver(this, "memory-pressure");
++    }
++}
++
+ NS_IMETHODIMP
+-WebGLMemoryPressureObserver::Observe(nsISupports* aSubject,
+-                                     const char* aTopic,
+-                                     const char16_t* aSomeData)
++WebGLObserver::Observe(nsISupports* aSubject,
++                       const char* aTopic,
++                       const char16_t* aSomeData)
+ {
+-    if (strcmp(aTopic, "memory-pressure"))
++    if (strcmp(aTopic, "memory-pressure")) {
+         return NS_OK;
++    }
++
++    printf_stderr("bignose in WebGLObserver::Observe memory-pressure event");
+ 
+     bool wantToLoseContext = true;
+ 
+     if (!mContext->mCanLoseContextInForeground &&
+-        ProcessPriorityManager::CurrentProcessIsForeground())
++            ProcessPriorityManager::CurrentProcessIsForeground()) {
+         wantToLoseContext = false;
+-    else if (!nsCRT::strcmp(aSomeData,
+-                            MOZ_UTF16("heap-minimize")))
+-        wantToLoseContext = mContext->mLoseContextOnHeapMinimize;
++    } else {
++        wantToLoseContext = mContext->mLoseContextOnMemoryPressure;
++    }
+ 
+-    if (wantToLoseContext)
++    if (wantToLoseContext) {
++        printf_stderr("bignose in WebGLObserver::Observe, want to lose");
+         mContext->ForceLoseContext();
++    }
+ 
+     return NS_OK;
+ }
+ 
++NS_IMETHODIMP
++WebGLObserver::HandleEvent(nsIDOMEvent *aEvent)
++{
++    nsAutoString type;
++    aEvent->GetType(type);
++    if (!type.EqualsLiteral("visibilitychange")) {
++        return NS_OK;
++    }
++
++    printf_stderr("bignose in WebGLObserver::HandleEvent visibilitychange event");
++
++    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
++
++    if (canvasElement) {
++      bool isActive = false;
++
++      canvasElement->OwnerDoc()->GetDocShell()->GetIsActive(&isActive);
++      if (isActive) {
++          printf_stderr("bignose in WebGLObserver::HandleEvent, want to restore");
++          mContext->ForceRestoreContext();
++      }
++    }
++
++    return NS_OK;
++}
+ 
+ WebGLContextOptions::WebGLContextOptions()
+     : alpha(true), depth(true), stencil(false),
+       premultipliedAlpha(true), antialias(true),
+       preserveDrawingBuffer(false)
+ {
+     // Set default alpha state based on preference.
+     if (Preferences::GetBool("webgl.default-no-alpha", false))
+@@ -168,20 +272,23 @@ WebGLContext::WebGLContext()
+     WebGLMemoryTracker::AddWebGLContext(this);
+ 
+     mAllowRestore = true;
+     mContextLossTimerRunning = false;
+     mDrawSinceContextLossTimerSet = false;
+     mContextRestorer = do_CreateInstance("@mozilla.org/timer;1");
+     mContextStatus = ContextNotLost;
+     mContextLostErrorSet = false;
+-    mLoseContextOnHeapMinimize = false;
+-    mCanLoseContextInForeground = true;
+     mWaitRestoreContextExt = false;
++    mLoseContextOnMemoryPressure = false;
++    mCanLoseContextInForeground = false;
++    mRestoreWhenVisible = false;
+ 
++    mMemoryPressureObserver = new WebGLObserver(this);
++ 
+     mAlreadyGeneratedWarnings = 0;
+     mAlreadyWarnedAboutFakeVertexAttrib0 = false;
+     mAlreadyWarnedAboutViewportLargerThanDest = false;
+     mMaxWarnings = Preferences::GetInt("webgl.max-warnings-per-context", 32);
+     if (mMaxWarnings < -1)
+     {
+         GenerateWarning("webgl.max-warnings-per-context size is too large (seems like a negative value wrapped)");
+         mMaxWarnings = 0;
+@@ -204,29 +311,23 @@ WebGLContext::~WebGLContext()
+     WebGLMemoryTracker::RemoveWebGLContext(this);
+     TerminateContextLossTimer();
+     mContextRestorer = nullptr;
+ }
+ 
+ void
+ WebGLContext::DestroyResourcesAndContext()
+ {
+-    if (mMemoryPressureObserver) {
+-        nsCOMPtr<nsIObserverService> observerService
+-            = mozilla::services::GetObserverService();
+-        if (observerService) {
+-            observerService->RemoveObserver(mMemoryPressureObserver,
+-                                            "memory-pressure");
+-        }
+-        mMemoryPressureObserver = nullptr;
+-    }
++    mMemoryPressureObserver->UnregisterMemoryPressureEvent();
+ 
+     if (!gl)
+         return;
+ 
++    printf_stderr("bignose in WebGLContext::DestroyResourcesAndContext");
++
+     gl->MakeCurrent();
+ 
+     mBound2DTextures.Clear();
+     mBoundCubeMapTextures.Clear();
+     mBoundArrayBuffer = nullptr;
+     mBoundTransformFeedbackBuffer = nullptr;
+     mCurrentProgram = nullptr;
+     mBoundFramebuffer = nullptr;
+@@ -1219,17 +1320,21 @@ WebGLContext::RobustnessTimerCallback(ns
+         // If the script didn't handle the event, we don't allow restores.
+         if (defaultAction)
+             mAllowRestore = false;
+ 
+         // If the script handled the event and we are allowing restores, then
+         // mark it to be restored. Otherwise, leave it as context lost
+         // (unusable).
+         if (!defaultAction && mAllowRestore) {
+-            if (!mWaitRestoreContextExt) {
++            // If we set mRestoreOnForeground, defer the restore until the app
++            // becomes visible.
++            if (!mRestoreWhenVisible && !mWaitRestoreContextExt) {
++                // Restart the timer so that it will be restored on the next
++                // callback.
+                 ForceRestoreContext();
+             }
+         } else {
+             mContextStatus = ContextLost;
+         }
+     } else if (mContextStatus == ContextLostAwaitingRestore) {
+         // Try to restore the context. If it fails, try again later.
+         if (NS_FAILED(SetDimensions(mWidth, mHeight))) {
+@@ -1314,28 +1419,34 @@ WebGLContext::ForceLoseContext()
+ {
+     if (mContextStatus == ContextLostAwaitingEvent)
+         return;
+ 
+     mContextStatus = ContextLostAwaitingEvent;
+     // Queue up a task to restore the event.
+     SetupContextLossTimer();
+     DestroyResourcesAndContext();
++
++    if (mRestoreWhenVisible && !mWaitRestoreContextExt) {
++        mMemoryPressureObserver->RegisterVisibilityChangeEvent();
++    }
+ }
+ 
+ void
+ WebGLContext::ForceRestoreContext()
+ {
+     if (mContextStatus == ContextLostAwaitingRestore)
+         return;
+ 
+     mContextStatus = ContextLostAwaitingRestore;
+ 
+     // Queue up a task to restore the event.
+     SetupContextLossTimer();
++
++    mMemoryPressureObserver->UnregisterVisibilityChangeEvent();
+ }
+ 
+ void
+ WebGLContext::MakeContextCurrent() const { gl->MakeCurrent(); }
+ 
+ mozilla::TemporaryRef<mozilla::gfx::SourceSurface>
+ WebGLContext::GetSurfaceSnapshot(bool* aPremultAlpha)
+ {
+diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext.h
+--- a/content/canvas/src/WebGLContext.h
++++ b/content/canvas/src/WebGLContext.h
+@@ -15,16 +15,17 @@
+ #include "nsTArray.h"
+ #include "nsCycleCollectionNoteChild.h"
+ 
+ #include "nsIDOMWebGLRenderingContext.h"
+ #include "nsICanvasRenderingContextInternal.h"
+ #include "mozilla/dom/HTMLCanvasElement.h"
+ #include "nsWrapperCache.h"
+ #include "nsIObserver.h"
++#include "nsIDOMEventListener.h"
+ #include "nsLayoutUtils.h"
+ 
+ #include "GLContextProvider.h"
+ 
+ #include "mozilla/LinkedList.h"
+ #include "mozilla/CheckedInt.h"
+ #include "mozilla/Scoped.h"
+ #include "mozilla/gfx/2D.h"
+@@ -53,17 +54,17 @@ class nsIDocShell;
+ #define MINVALUE_GL_MAX_VARYING_VECTORS               8     // Page 164
+ #define MINVALUE_GL_MAX_TEXTURE_IMAGE_UNITS           8     // Page 164
+ #define MINVALUE_GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS    0     // Page 164
+ #define MINVALUE_GL_MAX_RENDERBUFFER_SIZE             1024  // Different from the spec, which sets it to 1 on page 164
+ #define MINVALUE_GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS  8     // Page 164
+ 
+ namespace mozilla {
+ 
+-class WebGLMemoryPressureObserver;
++class WebGLObserver;
+ class WebGLContextBoundObject;
+ class WebGLActiveInfo;
+ class WebGLExtensionBase;
+ class WebGLBuffer;
+ class WebGLVertexAttribData;
+ class WebGLShader;
+ class WebGLProgram;
+ class WebGLQuery;
+@@ -124,17 +125,17 @@ class WebGLContext :
+     friend class WebGLExtensionCompressedTextureATC;
+     friend class WebGLExtensionCompressedTextureETC1;
+     friend class WebGLExtensionCompressedTexturePVRTC;
+     friend class WebGLExtensionCompressedTextureS3TC;
+     friend class WebGLExtensionDepthTexture;
+     friend class WebGLExtensionDrawBuffers;
+     friend class WebGLExtensionLoseContext;
+     friend class WebGLExtensionVertexArray;
+-    friend class WebGLMemoryPressureObserver;
++    friend class WebGLObserver;
+     friend class WebGLMemoryTracker;
+ 
+     enum {
+         UNPACK_FLIP_Y_WEBGL = 0x9240,
+         UNPACK_PREMULTIPLY_ALPHA_WEBGL = 0x9241,
+         CONTEXT_LOST_WEBGL = 0x9242,
+         UNPACK_COLORSPACE_CONVERSION_WEBGL = 0x9243,
+         BROWSER_DEFAULT_WEBGL = 0x9244,
+@@ -830,18 +831,19 @@ protected:
+ 
+     bool mInvalidated;
+     bool mResetLayer;
+     bool mOptionsFrozen;
+     bool mMinCapability;
+     bool mDisableExtensions;
+     bool mHasRobustness;
+     bool mIsMesa;
+-    bool mLoseContextOnHeapMinimize;
++    bool mLoseContextOnMemoryPressure;
+     bool mCanLoseContextInForeground;
++    bool mRestoreWhenVisible;
+     bool mShouldPresent;
+     bool mBackbufferNeedsClear;
+     bool mDisableFragHighP;
+ 
+     template<typename WebGLObjectType>
+     void DeleteWebGLObjectsArray(nsTArray<WebGLObjectType>& array);
+ 
+     GLuint mActiveTexture;
+@@ -1209,17 +1211,17 @@ protected:
+     // see bug 713305. This RAII helper guarantees that we're on the discrete GPU, during its lifetime
+     // Debouncing note: we don't want to switch GPUs too frequently, so try to not create and destroy
+     // these objects at high frequency. Having WebGLContext's hold one such object seems fine,
+     // because WebGLContext objects only go away during GC, which shouldn't happen too frequently.
+     // If in the future GC becomes much more frequent, we may have to revisit then (maybe use a timer).
+     ForceDiscreteGPUHelperCGL mForceDiscreteGPUHelper;
+ #endif
+ 
+-    nsRefPtr<WebGLMemoryPressureObserver> mMemoryPressureObserver;
++    nsRefPtr<WebGLObserver> mMemoryPressureObserver;
+ 
+ public:
+     // console logging helpers
+     void GenerateWarning(const char *fmt, ...);
+     void GenerateWarning(const char *fmt, va_list ap);
+ 
+     friend class WebGLTexture;
+     friend class WebGLFramebuffer;
+@@ -1305,26 +1307,34 @@ WebGLContext::ValidateObject(const char*
+     if (!aObject) {
+         ErrorInvalidValue("%s: null object passed as argument", info);
+         return false;
+     }
+ 
+     return ValidateObjectAssumeNonNull(info, aObject);
+ }
+ 
+-class WebGLMemoryPressureObserver MOZ_FINAL
++// Listen visibilitychange and memory-pressure event for context lose/restore
++class WebGLObserver MOZ_FINAL
+     : public nsIObserver
++    , public nsIDOMEventListener
+ {
+ public:
+-  NS_DECL_ISUPPORTS
+-  NS_DECL_NSIOBSERVER
++    NS_DECL_ISUPPORTS
++    NS_DECL_NSIOBSERVER
++    NS_DECL_NSIDOMEVENTLISTENER
+ 
+-  WebGLMemoryPressureObserver(WebGLContext *context)
+-    : mContext(context)
+-  {}
++    WebGLObserver(WebGLContext* aContext);
++    ~WebGLObserver();
++
++    void RegisterVisibilityChangeEvent(void);
++    void UnregisterVisibilityChangeEvent(void);
++
++    void RegisterMemoryPressureEvent(void);
++    void UnregisterMemoryPressureEvent(void);
+ 
+ private:
+-  WebGLContext *mContext;
++    WebGLContext* mContext;
+ };
+ 
+ } // namespace mozilla
+ 
+ #endif
+diff --git a/content/canvas/src/WebGLContextLossTimer.cpp b/content/canvas/src/WebGLContextLossTimer.cpp
+--- a/content/canvas/src/WebGLContextLossTimer.cpp
++++ b/content/canvas/src/WebGLContextLossTimer.cpp
+@@ -19,19 +19,19 @@ WebGLContext::SetupContextLossTimer() {
+     // This is an optimization to prevent unnecessary cross-communication
+     // between threads.
+     if (mContextLossTimerRunning) {
+         mDrawSinceContextLossTimerSet = true;
+         return;
+     }
+ 
+     mContextRestorer->InitWithFuncCallback(RobustnessTimerCallbackStatic,
+-                                            static_cast<void*>(this),
+-                                            1000,
+-                                            nsITimer::TYPE_ONE_SHOT);
++                                           static_cast<void*>(this),
++                                           1000,
++                                           nsITimer::TYPE_ONE_SHOT);
+     mContextLossTimerRunning = true;
+     mDrawSinceContextLossTimerSet = false;
+ }
+ 
+ void
+ WebGLContext::TerminateContextLossTimer() {
+     if (mContextLossTimerRunning) {
+         mContextRestorer->Cancel();
+diff --git a/content/canvas/src/WebGLContextReporter.cpp b/content/canvas/src/WebGLContextReporter.cpp
+--- a/content/canvas/src/WebGLContextReporter.cpp
++++ b/content/canvas/src/WebGLContextReporter.cpp
+@@ -3,17 +3,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "WebGLContext.h"
+ #include "WebGLMemoryTracker.h"
+ 
+ using namespace mozilla;
+ 
+-NS_IMPL_ISUPPORTS1(WebGLMemoryPressureObserver, nsIObserver)
++NS_IMPL_ISUPPORTS1(WebGLObserver, nsIObserver)
+ 
+ NS_IMETHODIMP
+ WebGLMemoryTracker::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                    nsISupports* aData)
+ {
+ #define REPORT(_path, _kind, _units, _amount, _desc)                          \
+     do {                                                                      \
+       nsresult rv;                                                            \
+diff --git a/content/canvas/src/WebGLContextValidate.cpp b/content/canvas/src/WebGLContextValidate.cpp
+--- a/content/canvas/src/WebGLContextValidate.cpp
++++ b/content/canvas/src/WebGLContextValidate.cpp
+@@ -1614,18 +1614,23 @@ WebGLContext::InitAndValidateGL()
+     GLenum error = gl->fGetError();
+     if (error != LOCAL_GL_NO_ERROR) {
+         GenerateWarning("GL error 0x%x occurred during OpenGL context initialization, before WebGL initialization!", error);
+         return false;
+     }
+ 
+     mMinCapability = Preferences::GetBool("webgl.min_capability_mode", false);
+     mDisableExtensions = Preferences::GetBool("webgl.disable-extensions", false);
+-    mLoseContextOnHeapMinimize = Preferences::GetBool("webgl.lose-context-on-heap-minimize", false);
++    mLoseContextOnMemoryPressure = Preferences::GetBool("webgl.lose-context-on-memory-preasure", false);
+     mCanLoseContextInForeground = Preferences::GetBool("webgl.can-lose-context-in-foreground", true);
++    mRestoreWhenVisible = Preferences::GetBool("webgl.restore-context-when-visible", true);
++
++    mLoseContextOnMemoryPressure = true;
++    mCanLoseContextInForeground = true;
++    mRestoreWhenVisible = true;
+ 
+     if (MinCapabilityMode()) {
+       mDisableFragHighP = true;
+     }
+ 
+     // These are the default values, see 6.2 State tables in the
+     // OpenGL ES 2.0.25 spec.
+     mColorWriteMask[0] = 1;
+@@ -1812,24 +1817,18 @@ WebGLContext::InitAndValidateGL()
+ 
+     if (IsWebGL2() &&
+         !InitWebGL2())
+     {
+         // Todo: Bug 898404: Only allow WebGL2 on GL>=3.0 on desktop GL.
+         return false;
+     }
+ 
+-    mMemoryPressureObserver
+-        = new WebGLMemoryPressureObserver(this);
+-    nsCOMPtr<nsIObserverService> observerService
+-        = mozilla::services::GetObserverService();
+-    if (observerService) {
+-        observerService->AddObserver(mMemoryPressureObserver,
+-                                     "memory-pressure",
+-                                     false);
+-    }
+-
+     mDefaultVertexArray = new WebGLVertexArray(this);
+     mDefaultVertexArray->mAttribs.SetLength(mGLMaxVertexAttribs);
+     mBoundVertexArray = mDefaultVertexArray;
+ 
++    if (mLoseContextOnMemoryPressure) {
++      mMemoryPressureObserver->RegisterMemoryPressureEvent();
++    }
++
+     return true;
+ }
+diff --git a/dom/ipc/ProcessPriorityManager.cpp b/dom/ipc/ProcessPriorityManager.cpp
+--- a/dom/ipc/ProcessPriorityManager.cpp
++++ b/dom/ipc/ProcessPriorityManager.cpp
+@@ -1052,16 +1052,17 @@ ParticularProcessPriorityManager::SetPri
+   hal::SetProcessPriority(Pid(), mPriority, mCPUPriority);
+ 
+   if (oldPriority != mPriority) {
+     unused << mContentParent->SendNotifyProcessPriorityChanged(mPriority);
+   }
+ 
+   if (aPriority < PROCESS_PRIORITY_FOREGROUND) {
+     unused << mContentParent->SendFlushMemory(NS_LITERAL_STRING("low-memory"));
++    printf_stderr("bignose in SetPriorityNow, send low-memory");
+   }
+ 
+   FireTestOnlyObserverNotification("process-priority-set",
+     ProcessPriorityToString(mPriority, mCPUPriority));
+ 
+   if (oldPriority != mPriority) {
+     ProcessPriorityManagerImpl::GetSingleton()->
+       NotifyProcessPriorityChanged(this, oldPriority);
+diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
+--- a/modules/libpref/src/init/all.js
++++ b/modules/libpref/src/init/all.js
+@@ -3951,18 +3951,19 @@ pref("webgl.disabled", false);
+ pref("webgl.shader_validator", true);
+ pref("webgl.prefer-native-gl", false);
+ pref("webgl.min_capability_mode", false);
+ pref("webgl.disable-extensions", false);
+ pref("webgl.msaa-force", false);
+ pref("webgl.prefer-16bpp", false);
+ pref("webgl.default-no-alpha", false);
+ pref("webgl.force-layers-readback", false);
+-pref("webgl.lose-context-on-heap-minimize", false);
++pref("webgl.lose-context-on-memory-preasure", false);
+ pref("webgl.can-lose-context-in-foreground", true);
++pref("webgl.restore-context-when-visible", true);
+ pref("webgl.max-warnings-per-context", 32);
+ pref("webgl.enable-draft-extensions", false);
+ pref("webgl.enable-privileged-extensions", false);
+ #ifdef MOZ_WIDGET_GONK
+ pref("gfx.gralloc.fence-with-readpixels", false);
+ #endif
+ 
+ 

@@ -1,4 +1,3 @@
 gfx_trace_makefile.patch
+fix_webgl_loseContext_ext.patch
 restore_when_visible.patch
-dump_layer.patch
-debug_rotate.patch

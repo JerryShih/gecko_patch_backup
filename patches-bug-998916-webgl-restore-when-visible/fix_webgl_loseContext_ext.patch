@@ -1,0 +1,129 @@
+# HG changeset patch
+# Parent 6b9bc0fc59249b6ac3a39b7249e074196565bc7f
+# User Jerry Shih <hshih@mozilla.com>
+Bug 998916 - part 1: webglext loseContext() will remain lost until restoreContext() is called.
+
+diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLContext.cpp
+--- a/content/canvas/src/WebGLContext.cpp
++++ b/content/canvas/src/WebGLContext.cpp
+@@ -170,16 +170,17 @@ WebGLContext::WebGLContext()
+     mAllowRestore = true;
+     mContextLossTimerRunning = false;
+     mDrawSinceContextLossTimerSet = false;
+     mContextRestorer = do_CreateInstance("@mozilla.org/timer;1");
+     mContextStatus = ContextNotLost;
+     mContextLostErrorSet = false;
+     mLoseContextOnHeapMinimize = false;
+     mCanLoseContextInForeground = true;
++    mWaitRestoreContextExt = false;
+ 
+     mAlreadyGeneratedWarnings = 0;
+     mAlreadyWarnedAboutFakeVertexAttrib0 = false;
+     mAlreadyWarnedAboutViewportLargerThanDest = false;
+     mMaxWarnings = Preferences::GetInt("webgl.max-warnings-per-context", 32);
+     if (mMaxWarnings < -1)
+     {
+         GenerateWarning("webgl.max-warnings-per-context size is too large (seems like a negative value wrapped)");
+@@ -1218,20 +1219,19 @@ WebGLContext::RobustnessTimerCallback(ns
+         // If the script didn't handle the event, we don't allow restores.
+         if (defaultAction)
+             mAllowRestore = false;
+ 
+         // If the script handled the event and we are allowing restores, then
+         // mark it to be restored. Otherwise, leave it as context lost
+         // (unusable).
+         if (!defaultAction && mAllowRestore) {
+-            ForceRestoreContext();
+-            // Restart the timer so that it will be restored on the next
+-            // callback.
+-            SetupContextLossTimer();
++            if (!mWaitRestoreContextExt) {
++                ForceRestoreContext();
++            }
+         } else {
+             mContextStatus = ContextLost;
+         }
+     } else if (mContextStatus == ContextLostAwaitingRestore) {
+         // Try to restore the context. If it fails, try again later.
+         if (NS_FAILED(SetDimensions(mWidth, mHeight))) {
+             SetupContextLossTimer();
+             return;
+@@ -1319,17 +1319,23 @@ WebGLContext::ForceLoseContext()
+     // Queue up a task to restore the event.
+     SetupContextLossTimer();
+     DestroyResourcesAndContext();
+ }
+ 
+ void
+ WebGLContext::ForceRestoreContext()
+ {
++    if (mContextStatus == ContextLostAwaitingRestore)
++        return;
++
+     mContextStatus = ContextLostAwaitingRestore;
++
++    // Queue up a task to restore the event.
++    SetupContextLossTimer();
+ }
+ 
+ void
+ WebGLContext::MakeContextCurrent() const { gl->MakeCurrent(); }
+ 
+ mozilla::TemporaryRef<mozilla::gfx::SourceSurface>
+ WebGLContext::GetSurfaceSnapshot(bool* aPremultAlpha)
+ {
+diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext.h
+--- a/content/canvas/src/WebGLContext.h
++++ b/content/canvas/src/WebGLContext.h
+@@ -1178,16 +1178,17 @@ protected:
+     bool mAlreadyWarnedAboutViewportLargerThanDest;
+ 
+     nsCOMPtr<nsITimer> mContextRestorer;
+     bool mAllowRestore;
+     bool mContextLossTimerRunning;
+     bool mDrawSinceContextLossTimerSet;
+     ContextStatus mContextStatus;
+     bool mContextLostErrorSet;
++    bool mWaitRestoreContextExt;
+ 
+     // Used for some hardware (particularly Tegra 2 and 4) that likes to
+     // be Flushed while doing hundreds of draw calls.
+     int mDrawCallsSinceLastFlush;
+ 
+     int mAlreadyGeneratedWarnings;
+     int mMaxWarnings;
+     bool mAlreadyWarnedAboutFakeVertexAttrib0;
+diff --git a/content/canvas/src/WebGLContextGL.cpp b/content/canvas/src/WebGLContextGL.cpp
+--- a/content/canvas/src/WebGLContextGL.cpp
++++ b/content/canvas/src/WebGLContextGL.cpp
+@@ -3863,28 +3863,30 @@ WebGLContext::TexSubImage2D(GLenum targe
+ }
+ 
+ bool
+ WebGLContext::LoseContext()
+ {
+     if (IsContextLost())
+         return false;
+ 
++    mWaitRestoreContextExt = true;
+     ForceLoseContext();
+ 
+     return true;
+ }
+ 
+ bool
+ WebGLContext::RestoreContext()
+ {
+     if (!IsContextLost() || !mAllowRestore) {
+         return false;
+     }
+ 
++    mWaitRestoreContextExt = false;
+     ForceRestoreContext();
+ 
+     return true;
+ }
+ 
+ bool
+ BaseTypeAndSizeFromUniformType(GLenum uType, GLenum *baseType, GLint *unitSize)
+ {

@@ -1,3 +1,7 @@
-debug_rotate.patch
 4.2.2_build_break_fix.patch
+reset_rotation_status.patch
+final_version_rotation.patch
+try
+debug_rotate.patch
+dump_layer.patch
 remove-will-change.patch

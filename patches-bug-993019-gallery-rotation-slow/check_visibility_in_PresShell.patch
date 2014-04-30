@@ -1,0 +1,164 @@
+# HG changeset patch
+# Parent 014481bc0ad093f0952a4f2ae77b75549a5eff40
+# User Jerry Shih <hshih@mozilla.com>
+check visibilityChange in PresShell
+
+diff --git a/dom/ipc/TabChild.cpp b/dom/ipc/TabChild.cpp
+--- a/dom/ipc/TabChild.cpp
++++ b/dom/ipc/TabChild.cpp
+@@ -77,16 +77,18 @@
+ #include "ClientLayerManager.h"
+ 
+ #include "nsColorPickerProxy.h"
+ 
+ #ifdef DEBUG
+ #include "PCOMContentPermissionRequestChild.h"
+ #endif /* DEBUG */
+ 
++#include "cutils/properties.h"
++
+ #define BROWSER_ELEMENT_CHILD_SCRIPT \
+     NS_LITERAL_STRING("chrome://global/content/BrowserElementChild.js")
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::dom::ipc;
+ using namespace mozilla::ipc;
+ using namespace mozilla::layers;
+@@ -1602,16 +1604,28 @@ TabChild::RecvShow(const nsIntSize& size
+     baseWindow->SetVisibility(true);
+ 
+     return InitTabChildGlobal();
+ }
+ 
+ bool
+ TabChild::RecvUpdateDimensions(const nsRect& rect, const nsIntSize& size, const ScreenOrientation& orientation)
+ {
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("test.rotate", propValue, "0");
++
++  if(atoi(propValue) != 0){
++    property_get("test.tid", propValue, "0");
++    if(atoi(propValue) != gettid()){
++      printf_stderr("bignose tid:%d TabChild::RecvUpdateDimensions, drop update dimension", gettid());
++      return true;
++    }
++  }
++
++
+     if (!mRemoteFrame) {
+         return true;
+     }
+ 
+     mOuterRect.x = rect.x;
+     mOuterRect.y = rect.y;
+     mOuterRect.width = rect.width;
+     mOuterRect.height = rect.height;
+diff --git a/layout/base/nsPresShell.cpp b/layout/base/nsPresShell.cpp
+--- a/layout/base/nsPresShell.cpp
++++ b/layout/base/nsPresShell.cpp
+@@ -170,16 +170,18 @@
+ #include "nsIDragSession.h"
+ #include "nsIFrameInlines.h"
+ #include "mozilla/gfx/2D.h"
+ 
+ #ifdef ANDROID
+ #include "nsIDocShellTreeOwner.h"
+ #endif
+ 
++#include "cutils/properties.h"
++
+ #define ANCHOR_SCROLL_FLAGS \
+   (nsIPresShell::SCROLL_OVERFLOW_HIDDEN | nsIPresShell::SCROLL_NO_PARENT_FRAMES)
+ 
+ using namespace mozilla;
+ using namespace mozilla::css;
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ using namespace mozilla::layers;
+@@ -7986,16 +7988,28 @@ PresShell::DidPaintWindow()
+   if (nsContentUtils::XPConnect()) {
+     nsContentUtils::XPConnect()->NotifyDidPaint();
+   }
+ }
+ 
+ bool
+ PresShell::IsVisible()
+ {
++  PROFILER_LABEL("bignose", "PresShell::IsVisible");
++
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("test.visible", propValue, "0");
++  if(atoi(propValue)==1){
++    if(mDocument){
++      printf_stderr("bignose tid:%d PresShell::IsVisible:%d", gettid(),((int)!(mDocument->Hidden())));
++      return !mDocument->Hidden();
++    }
++  }
++
++
+   if (!mViewManager)
+     return false;
+ 
+   nsView* view = mViewManager->GetRootView();
+   if (!view)
+     return true;
+ 
+   // inner view of subdoc frame
+diff --git a/view/src/nsViewManager.cpp b/view/src/nsViewManager.cpp
+--- a/view/src/nsViewManager.cpp
++++ b/view/src/nsViewManager.cpp
+@@ -185,30 +185,34 @@ nsViewManager::GetWindowDimensions(nscoo
+     {
+       *aWidth = 0;
+       *aHeight = 0;
+     }
+ }
+ 
+ void nsViewManager::DoSetWindowDimensions(nscoord aWidth, nscoord aHeight)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::DoSetWindowDimensions");
++
+   nsRect oldDim = mRootView->GetDimensions();
+   nsRect newDim(0, 0, aWidth, aHeight);
+   // We care about resizes even when one dimension is already zero.
+   if (!oldDim.IsEqualEdges(newDim)) {
+     // Don't resize the widget. It is already being set elsewhere.
+     mRootView->SetDimensions(newDim, true, false);
+     if (mPresShell)
+       mPresShell->ResizeReflow(aWidth, aHeight);
+   }
+ }
+ 
+ void
+ nsViewManager::SetWindowDimensions(nscoord aWidth, nscoord aHeight)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::SetWindowDimensions");
++
+   if (mRootView) {
+     if (mRootView->IsEffectivelyVisible() && mPresShell && mPresShell->IsVisible()) {
+       if (mDelayedResize != nsSize(NSCOORD_NONE, NSCOORD_NONE) &&
+           mDelayedResize != nsSize(aWidth, aHeight)) {
+         // We have a delayed resize; that now obsolete size may already have
+         // been flushed to the PresContext so we need to update the PresContext
+         // with the new size because if the new size is exactly the same as the
+         // root view's current size then DoSetWindowDimensions will not
+@@ -225,16 +229,18 @@ nsViewManager::SetWindowDimensions(nscoo
+       }
+     }
+   }
+ }
+ 
+ void
+ nsViewManager::FlushDelayedResize(bool aDoReflow)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::FlushDelayedResize");
++
+   if (mDelayedResize != nsSize(NSCOORD_NONE, NSCOORD_NONE)) {
+     if (aDoReflow) {
+       DoSetWindowDimensions(mDelayedResize.width, mDelayedResize.height);
+       mDelayedResize.SizeTo(NSCOORD_NONE, NSCOORD_NONE);
+     } else if (mPresShell) {
+       nsPresContext* presContext = mPresShell->GetPresContext();
+       if (presContext) {
+         presContext->SetVisibleArea(nsRect(nsPoint(0, 0), mDelayedResize));

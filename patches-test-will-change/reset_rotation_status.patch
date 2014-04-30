@@ -1,0 +1,28 @@
+# HG changeset patch
+# Parent 4f4b7547c284b23b22d0493495c6d0a12efe0798
+# User Jerry Shih <hshih@mozilla.com>
+reset rotation status
+
+
+diff --git a/gfx/layers/composite/AsyncCompositionManager.cpp b/gfx/layers/composite/AsyncCompositionManager.cpp
+--- a/gfx/layers/composite/AsyncCompositionManager.cpp
++++ b/gfx/layers/composite/AsyncCompositionManager.cpp
+@@ -96,16 +96,18 @@ WalkTheTree(Layer* aLayer,
+ }
+ 
+ void
+ AsyncCompositionManager::ResolveRefLayers()
+ {
+   if (!mLayerManager->GetRoot()) {
+     return;
+   }
++
++  mReadyForCompose = true;
+   WalkTheTree<Resolve>(mLayerManager->GetRoot(),
+                        mReadyForCompose,
+                        mTargetConfig);
+ }
+ 
+ void
+ AsyncCompositionManager::DetachRefLayers()
+ {

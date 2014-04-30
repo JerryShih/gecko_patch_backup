@@ -3,29 +3,6 @@
 # User Jerry Shih <hshih@mozilla.com>
 Bug 993019 - handle scheduling rendering task for cross-process rotation
 
-diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
---- a/b2g/app/b2g.js
-+++ b/b2g/app/b2g.js
-@@ -772,17 +772,18 @@ pref("memory.dump_reports_on_oom", false
- pref("layout.imagevisibility.enabled", true);
- pref("layout.imagevisibility.numscrollportwidths", 1);
- pref("layout.imagevisibility.numscrollportheights", 1);
- 
- // Enable native identity (persona/browserid)
- pref("dom.identity.enabled", true);
- 
- // Wait up to this much milliseconds when orientation changed
--pref("layers.orientation.sync.timeout", 1000);
-+//pref("layers.orientation.sync.timeout", 1000);
-+pref("layers.orientation.sync.timeout", 5000);
- 
- // Don't discard WebGL contexts for foreground apps on memory
- // pressure.
- pref("webgl.can-lose-context-in-foreground", false);
- 
- // Allow nsMemoryInfoDumper to create a fifo in the temp directory.  We use
- // this fifo to trigger about:memory dumps, among other things.
- pref("memory_info_dumper.watch_fifo.enabled", true);
 diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
 --- a/gfx/layers/ipc/CompositorParent.cpp
 +++ b/gfx/layers/ipc/CompositorParent.cpp
@@ -108,7 +85,7 @@ diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent
    void NotifyShadowTreeTransaction(uint64_t aId, bool aIsFirstPaint, bool aScheduleComposite);
  
    /**
-+   * Check the rotation info and schedule the rendering task if needs.
++   * Check rotation info and schedule a rendering task if needed.
 +   * Only can be called from compositor thread.
 +   */
 +  void ScheduleRotationOnCompositorThread(const TargetConfig& aTargetConfig, bool aIsFirstPaint);
