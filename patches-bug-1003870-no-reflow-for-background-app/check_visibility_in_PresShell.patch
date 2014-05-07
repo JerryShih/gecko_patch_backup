@@ -1,0 +1,235 @@
+# HG changeset patch
+# Parent c52acd35580f702da5f5e6a6b4ed2804ff5c386b
+# User Jerry Shih <hshih@mozilla.com>
+check visibilityChange in PresShell
+
+diff --git a/dom/base/nsScreen.cpp b/dom/base/nsScreen.cpp
+--- a/dom/base/nsScreen.cpp
++++ b/dom/base/nsScreen.cpp
+@@ -153,16 +153,18 @@ nsScreen::Notify(const hal::ScreenConfig
+ 
+   NS_ASSERTION(mOrientation == eScreenOrientation_PortraitPrimary ||
+                mOrientation == eScreenOrientation_PortraitSecondary ||
+                mOrientation == eScreenOrientation_LandscapePrimary ||
+                mOrientation == eScreenOrientation_LandscapeSecondary,
+                "Invalid orientation value passed to notify method!");
+ 
+   if (mOrientation != previousOrientation) {
++    printf_stderr("bignose tid:%d nsScreen::Notify, send mozorientationchange",gettid());
++
+     DispatchTrustedEvent(NS_LITERAL_STRING("mozorientationchange"));
+   }
+ }
+ 
+ void
+ nsScreen::GetMozOrientation(nsString& aOrientation)
+ {
+   switch (mOrientation) {
+diff --git a/dom/ipc/TabChild.cpp b/dom/ipc/TabChild.cpp
+--- a/dom/ipc/TabChild.cpp
++++ b/dom/ipc/TabChild.cpp
+@@ -77,16 +77,18 @@
+ #include "ClientLayerManager.h"
+ 
+ #include "nsColorPickerProxy.h"
+ 
+ #ifdef DEBUG
+ #include "PCOMContentPermissionRequestChild.h"
+ #endif /* DEBUG */
+ 
++#include "cutils/properties.h"
++
+ #define BROWSER_ELEMENT_CHILD_SCRIPT \
+     NS_LITERAL_STRING("chrome://global/content/BrowserElementChild.js")
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::dom::ipc;
+ using namespace mozilla::ipc;
+ using namespace mozilla::layers;
+@@ -1599,16 +1601,28 @@ TabChild::RecvShow(const nsIntSize& size
+     baseWindow->SetVisibility(true);
+ 
+     return InitTabChildGlobal();
+ }
+ 
+ bool
+ TabChild::RecvUpdateDimensions(const nsRect& rect, const nsIntSize& size, const ScreenOrientation& orientation)
+ {
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("test.rotate", propValue, "0");
++
++  if(atoi(propValue) != 0){
++    property_get("test.tid", propValue, "0");
++    if(atoi(propValue) != gettid()){
++      printf_stderr("bignose tid:%d TabChild::RecvUpdateDimensions, drop update dimension", gettid());
++      return true;
++    }
++  }
++
++
+     if (!mRemoteFrame) {
+         return true;
+     }
+ 
+     mOuterRect.x = rect.x;
+     mOuterRect.y = rect.y;
+     mOuterRect.width = rect.width;
+     mOuterRect.height = rect.height;
+diff --git a/layout/base/nsPresShell.cpp b/layout/base/nsPresShell.cpp
+--- a/layout/base/nsPresShell.cpp
++++ b/layout/base/nsPresShell.cpp
+@@ -175,16 +175,18 @@
+ #include "nsIDocShellTreeOwner.h"
+ #endif
+ 
+ #ifdef MOZ_TASK_TRACER
+ #include "GeckoTaskTracer.h"
+ using namespace mozilla::tasktracer;
+ #endif
+ 
++#include "cutils/properties.h"
++
+ #define ANCHOR_SCROLL_FLAGS \
+   (nsIPresShell::SCROLL_OVERFLOW_HIDDEN | nsIPresShell::SCROLL_NO_PARENT_FRAMES)
+ 
+ using namespace mozilla;
+ using namespace mozilla::css;
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ using namespace mozilla::layers;
+@@ -8004,16 +8006,28 @@ PresShell::DidPaintWindow()
+   if (nsContentUtils::XPConnect()) {
+     nsContentUtils::XPConnect()->NotifyDidPaint();
+   }
+ }
+ 
+ bool
+ PresShell::IsVisible()
+ {
++  PROFILER_LABEL("bignose", "PresShell::IsVisible");
++
++//  char propValue[PROPERTY_VALUE_MAX];
++//  property_get("test.visible", propValue, "0");
++//  if(atoi(propValue)==1){
++//    if(mDocument){
++//      printf_stderr("bignose tid:%d PresShell::IsVisible:%d", gettid(),((int)!(mDocument->Hidden())));
++//      return !mDocument->Hidden();
++//    }
++//  }
++
++
+   if (!mViewManager)
+     return false;
+ 
+   nsView* view = mViewManager->GetRootView();
+   if (!view)
+     return true;
+ 
+   // inner view of subdoc frame
+diff --git a/view/src/nsViewManager.cpp b/view/src/nsViewManager.cpp
+--- a/view/src/nsViewManager.cpp
++++ b/view/src/nsViewManager.cpp
+@@ -185,56 +185,79 @@ nsViewManager::GetWindowDimensions(nscoo
+     {
+       *aWidth = 0;
+       *aHeight = 0;
+     }
+ }
+ 
+ void nsViewManager::DoSetWindowDimensions(nscoord aWidth, nscoord aHeight)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::DoSetWindowDimensions");
++
+   nsRect oldDim = mRootView->GetDimensions();
+   nsRect newDim(0, 0, aWidth, aHeight);
+   // We care about resizes even when one dimension is already zero.
+   if (!oldDim.IsEqualEdges(newDim)) {
+     // Don't resize the widget. It is already being set elsewhere.
+     mRootView->SetDimensions(newDim, true, false);
+     if (mPresShell)
+       mPresShell->ResizeReflow(aWidth, aHeight);
+   }
+ }
+ 
+ void
+ nsViewManager::SetWindowDimensions(nscoord aWidth, nscoord aHeight)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::SetWindowDimensions");
++
++  printf_stderr("bignose tid:%d nsViewManager::SetWindowDimensions (%d,%d)",gettid(),aWidth,aHeight);
++
++  bool isVisible = false;
++  bool isHidden = false;
++
++  if (mPresShell) {
++    isVisible = mPresShell->IsVisible();
++    nsIDocument* document = mPresShell->GetDocument();
++    if (document) {
++      isHidden = document->Hidden();
++    }
++  }
++
+   if (mRootView) {
+-    if (mRootView->IsEffectivelyVisible() && mPresShell && mPresShell->IsVisible()) {
++    if (mRootView->IsEffectivelyVisible() && isVisible && !isHidden) {
++      printf_stderr("bignose tid:%d nsViewManager::SetWindowDimensions, visible",gettid());
++
+       if (mDelayedResize != nsSize(NSCOORD_NONE, NSCOORD_NONE) &&
+           mDelayedResize != nsSize(aWidth, aHeight)) {
+         // We have a delayed resize; that now obsolete size may already have
+         // been flushed to the PresContext so we need to update the PresContext
+         // with the new size because if the new size is exactly the same as the
+         // root view's current size then DoSetWindowDimensions will not
+         // request a resize reflow (which would correct it). See bug 617076.
+         mDelayedResize = nsSize(aWidth, aHeight);
+         FlushDelayedResize(false);
+       }
+       mDelayedResize.SizeTo(NSCOORD_NONE, NSCOORD_NONE);
+       DoSetWindowDimensions(aWidth, aHeight);
+     } else {
++      printf_stderr("bignose tid:%d nsViewManager::SetWindowDimensions, not visible, do delay resize",gettid());
++
+       mDelayedResize.SizeTo(aWidth, aHeight);
+       if (mPresShell && mPresShell->GetDocument()) {
+         mPresShell->GetDocument()->SetNeedStyleFlush();
+       }
+     }
+   }
+ }
+ 
+ void
+ nsViewManager::FlushDelayedResize(bool aDoReflow)
+ {
++  PROFILER_LABEL("bignose", "nsViewManager::FlushDelayedResize");
++
+   if (mDelayedResize != nsSize(NSCOORD_NONE, NSCOORD_NONE)) {
+     if (aDoReflow) {
+       DoSetWindowDimensions(mDelayedResize.width, mDelayedResize.height);
+       mDelayedResize.SizeTo(NSCOORD_NONE, NSCOORD_NONE);
+     } else if (mPresShell) {
+       nsPresContext* presContext = mPresShell->GetPresContext();
+       if (presContext) {
+         presContext->SetVisibleArea(nsRect(nsPoint(0, 0), mDelayedResize));
+diff --git a/widget/gonk/nsWindow.cpp b/widget/gonk/nsWindow.cpp
+--- a/widget/gonk/nsWindow.cpp
++++ b/widget/gonk/nsWindow.cpp
+@@ -740,16 +740,18 @@ nsScreenGonk::GetRotation(uint32_t* aRot
+ {
+     *aRotation = sScreenRotation;
+     return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsScreenGonk::SetRotation(uint32_t aRotation)
+ {
++    printf_stderr("bignose tid:%d nsScreenGonk::SetRotation",gettid());
++
+     if (!(aRotation <= ROTATION_270_DEG))
+         return NS_ERROR_ILLEGAL_VALUE;
+ 
+     if (sScreenRotation == aRotation)
+         return NS_OK;
+ 
+     sScreenRotation = aRotation;
+     uint32_t rotation = EffectiveScreenRotation();

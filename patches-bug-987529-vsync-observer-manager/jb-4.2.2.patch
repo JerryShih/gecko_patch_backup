@@ -1,0 +1,20 @@
+# HG changeset patch
+# Parent 722639db67c858eed8672071e0ea129e832f8353
+# User Jerry Shih <hshih@mozilla.com>
+fix jb-4.2.2 build break
+
+diff --git a/tools/profiler/moz.build b/tools/profiler/moz.build
+--- a/tools/profiler/moz.build
++++ b/tools/profiler/moz.build
+@@ -109,8 +109,11 @@ if CONFIG['MOZ_TASK_TRACER']:
+         'TracedTaskCommon.h',
+     ]
+     UNIFIED_SOURCES += [
+         'GeckoTaskTracer.cpp',
+         'TracedTaskCommon.cpp',
+     ]
+ 
+ XPCSHELL_TESTS_MANIFESTS += ['tests/xpcshell.ini']
++
++DEFINES['ELFSIZE'] = 32
++

@@ -1,3 +1,4 @@
 gfx_trace_makefile.patch
+jb-4.2.2.patch
 fix_webgl_loseContext_ext.patch
 restore_when_visible.patch

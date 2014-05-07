@@ -1,0 +1,1309 @@
+# HG changeset patch
+# User vlin <vlin@mozilla.com>
+# Date 1398066688 -28800
+# Node ID fe3f3f8d229688469f790184f1e4bab67be3b177
+# Parent 0cbf1f25d9231deaf55df4801704a5df82c6f18d
+Bug 987529: Implement an observer manager for vsync in gecko/hal
+
+diff --git a/hal/Hal.cpp b/hal/Hal.cpp
+--- a/hal/Hal.cpp
++++ b/hal/Hal.cpp
+@@ -19,16 +19,17 @@
+ #include "nsITabChild.h"
+ #include "nsIDocShell.h"
+ #include "mozilla/StaticPtr.h"
+ #include "mozilla/ClearOnShutdown.h"
+ #include "WindowIdentifier.h"
+ #include "mozilla/dom/ScreenOrientation.h"
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/ContentParent.h"
++#include "VsyncDispatcher.h"
+ 
+ #ifdef XP_WIN
+ #include <process.h>
+ #define getpid _getpid
+ #endif
+ 
+ using namespace mozilla::services;
+ using namespace mozilla::dom;
+@@ -727,16 +728,138 @@ LockScreenOrientation(const dom::ScreenO
+ 
+ void
+ UnlockScreenOrientation()
+ {
+   AssertMainThread();
+   PROXY_IF_SANDBOXED(UnlockScreenOrientation());
+ }
+ 
++class VsyncObserverManager : public CachingObserversManager<VsyncInfo>
++{
++public:
++  VsyncObserverManager()
++  {
++  }
++
++  void NotifyVsyncChange(const VsyncInfo& aInfo)
++  {
++    VsyncDispatcher *dispatcher = VsyncDispatcher::GetInstance();
++    if (!dispatcher)
++      return;
++
++    // Content process receive a vsync notification from parent
++    if (InSandbox())
++    {
++      //printf_stderr("VDispatcher: InSandBox!!\n\r");
++      dispatcher->Tick(aInfo);
++    }
++    // Chrome process receive a vsync notification from vsync event source
++    else
++    {
++      dispatcher->EventDispatchAndCompose(aInfo);
++      NS_DispatchToMainThread(new NotificationRunnable(*this, aInfo));
++    }
++  }
++
++private:
++  void EnableNotifications() MOZ_OVERRIDE {
++    PROXY_IF_SANDBOXED(EnableVsyncNotifications());
++  }
++
++  void DisableNotifications() MOZ_OVERRIDE {
++    PROXY_IF_SANDBOXED(DisableVsyncNotifications());
++  }
++
++  void GetCurrentInformationInternal(VsyncInfo* aInfo) MOZ_OVERRIDE {
++    PROXY_IF_SANDBOXED(GetCurrentVsyncInfo(aInfo));
++  }
++
++  class NotificationRunnable : public nsRunnable
++  {
++  public:
++    NotificationRunnable(VsyncObserverManager &aManager, const hal::VsyncInfo &aInfo)
++      : mManager(aManager),
++        mInfo(aInfo)
++    {
++      // Do nothing.
++    }
++
++    NS_IMETHOD Run() MOZ_OVERRIDE
++    {
++      // Notify client process.
++      // TODO:
++      // Why we need to cache this?? In fact, I don't think VsyncObserverManager should
++      // be inherited from CachingObserversManager.
++      mManager.CacheInformation(mInfo);
++      mManager.BroadcastInformation(mInfo);
++
++      // Then, tick refresh driver of chrome process.
++      VsyncDispatcher *dispatcher = VsyncDispatcher::GetInstance();
++      if (dispatcher)
++      {
++        dispatcher->Tick(mInfo);
++      }
++
++      return NS_OK;
++    }
++
++  private:
++    VsyncObserverManager &mManager;
++    hal::VsyncInfo mInfo;
++  };
++};
++
++static VsyncObserverManager sVsyncObserverManager;
++
++void
++StartRecieveVsyncNotification(bool aStart)
++{
++  if (aStart)
++  {
++    PROXY_IF_SANDBOXED(EnableVsyncNotifications());
++  }
++  else
++  {
++    PROXY_IF_SANDBOXED(DisableVsyncNotifications());
++  }
++}
++
++void
++RegisterVsyncObserver(VsyncObserver* aObserver)
++{
++  // Register and Unregiser action must be done in main thread.
++  sVsyncObserverManager.AddObserver(aObserver);
++}
++
++void
++UnregisterVsyncObserver(VsyncObserver* aObserver)
++{
++  // Register and Unregiser action must be done in main thread.
++  AssertMainThread();
++  sVsyncObserverManager.RemoveObserver(aObserver);
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsyncInfo)
++{
++  // TODO: remove this function.
++  AssertMainThread();
++  *aVsyncInfo = sVsyncObserverManager.GetCurrentInformation();
++}
++
++void
++NotifyVsyncChange(const VsyncInfo& atimestamp)
++{
++  // In content process, this function is been called from PHal channel open thread.
++  // Normally, it's main thread.
++  // In chrome process, this function is been called from vsync thread.
++  sVsyncObserverManager.NotifyVsyncChange(atimestamp);
++}
++
+ void
+ EnableSwitchNotifications(SwitchDevice aDevice) {
+   AssertMainThread();
+   PROXY_IF_SANDBOXED(EnableSwitchNotifications(aDevice));
+ }
+ 
+ void
+ DisableSwitchNotifications(SwitchDevice aDevice) {
+diff --git a/hal/Hal.h b/hal/Hal.h
+--- a/hal/Hal.h
++++ b/hal/Hal.h
+@@ -15,16 +15,17 @@
+ #include "nsTArray.h"
+ #include "prlog.h"
+ #include "mozilla/dom/battery/Types.h"
+ #include "mozilla/dom/network/Types.h"
+ #include "mozilla/dom/power/Types.h"
+ #include "mozilla/hal_sandbox/PHal.h"
+ #include "mozilla/dom/ScreenOrientation.h"
+ #include "mozilla/HalScreenConfiguration.h"
++#include "mozilla/HalVsyncInfo.h"
+ 
+ /*
+  * Hal.h contains the public Hal API.
+  *
+  * By default, this file defines its functions in the hal namespace, but if
+  * MOZ_HAL_NAMESPACE is defined, we'll define our functions in that namespace.
+  *
+  * This is used by HalImpl.h and HalSandbox.h, which define copies of all the
+@@ -407,16 +408,46 @@ void NotifyScreenConfigurationChange(con
+  */
+ bool LockScreenOrientation(const dom::ScreenOrientation& aOrientation);
+ 
+ /**
+  * Unlock the screen orientation.
+  */
+ void UnlockScreenOrientation();
+ 
++void StartRecieveVsyncNotification(bool aStart);
++
++/**
++ * Inform the backend there is a new Vsync observer being registered.
++ * @param aObserver The observer that should be added.
++ */
++void RegisterVsyncObserver(hal::VsyncObserver* aObserver);
++
++/**
++ * Inform the backend a Vsync observer being unregistered.
++ * @param aObserver The observer that should be removed.
++ */
++void UnregisterVsyncObserver(hal::VsyncObserver* aObserver);
++
++/**
++ * Stop to dispatch vsync event to current process.
++ */
++void StopRecieveVsyncNotification();
++
++/**
++ * Returns the current Vsync information.
++ */
++void GetCurrentVsyncInfo(hal::VsyncInfo* aVsyncInfo);
++
++/**
++ * Notify of a change in the Vsync information.
++ * @param atimestamp The new Vsync information.
++ */
++void NotifyVsyncChange(const hal::VsyncInfo& atimestamp);
++
+ /**
+  * Register an observer for the switch of given SwitchDevice.
+  *
+  * The observer will receive data whenever the data generated by the
+  * given switch.
+  */
+ void RegisterSwitchObserver(hal::SwitchDevice aDevice, hal::SwitchObserver *aSwitchObserver);
+ 
+diff --git a/hal/HalInternal.h b/hal/HalInternal.h
+--- a/hal/HalInternal.h
++++ b/hal/HalInternal.h
+@@ -50,16 +50,28 @@ void DisableNetworkNotifications();
+ void EnableScreenConfigurationNotifications();
+ 
+ /**
+  * Disables screen orientation notifications from the backend.
+  */
+ void DisableScreenConfigurationNotifications();
+ 
+ /**
++ * Enables Vsync notifications from the backend.
++ */
++void
++EnableVsyncNotifications();
++
++/**
++ * Disables Vsync notifications from the backend.
++ */
++void
++DisableVsyncNotifications();
++
++/**
+  * Enable switch notifications from the backend
+  */
+ void EnableSwitchNotifications(hal::SwitchDevice aDevice);
+ 
+ /**
+  * Disable switch notifications from the backend
+  */
+ void DisableSwitchNotifications(hal::SwitchDevice aDevice);
+diff --git a/hal/HalVsyncInfo.h b/hal/HalVsyncInfo.h
+new file mode 100644
+--- /dev/null
++++ b/hal/HalVsyncInfo.h
+@@ -0,0 +1,28 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_HalVsyncInfo_h
++#define mozilla_HalVsyncInfo_h
++
++#include "mozilla/Observer.h"
++
++namespace mozilla {
++namespace hal {
++struct VsyncInfo;
++typedef Observer<VsyncInfo> VsyncObserver;
++enum VsyncObserverType {
++  VSYNC_TYPE_UNKNOWN = -1,
++  VSYNC_TYPE_INPUT,
++  VSYNC_TYPE_COMPOSITE,
++  VSYNC_TYPE_HALPARENT,
++  VSYNC_TYPE_REFRESH,
++  NUM_VSYNC_TYPE
++};
++} // namespace hal
++} // namespace mozilla
++
++#endif  // mozilla_HalVsyncInfo_h
++
+diff --git a/hal/VsyncDispatcher.cpp b/hal/VsyncDispatcher.cpp
+new file mode 100644
+--- /dev/null
++++ b/hal/VsyncDispatcher.cpp
+@@ -0,0 +1,334 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "VsyncDispatcher.h"
++#include "mozilla/Hal.h"
++#include "mozilla/StaticPtr.h"
++#include "mozilla/layers/CompositorParent.h"
++#include "nsRefreshDriver.h"
++#ifdef MOZ_WIDGET_GONK
++#include "nsAppShell.h"
++#endif
++
++#define DEBUG_VSYNC
++#ifdef DEBUG_VSYNC
++#define VSYNC_PRINT(...) do { printf_stderr("VDispatcher: " __VA_ARGS__); } while (0)
++#else
++#define VSYNC_PRINT(...) do { } while (0)
++#endif
++
++// Enable vsycn reciever get vsync event one by one
++// Enable Vsync driven refresh driver. Define this flag only after original
++// timer trigger flow have been removed
++#define ENABLE_REFRESHDRIVER_NOTIFY
++// Enable Vsync driven input dispatch. Define this flag only after original
++// NativeEventProcess flow be removed.
++//#define ENABLE_INPUTDISPATCHER_NOTIFY
++// Enable Vsync driven composition. Define this flag only after original
++// SchdedulCompositor callers been removed.
++//#define ENABLE_COMPOSITOR_NOTIFY
++
++namespace mozilla {
++
++// Change content of a list in specific thread.
++template <typename T>
++class ChangeListRunnable: public nsRunnable
++{
++public:
++  ChangeListRunnable(nsTArray<nsRefPtr<T> > &aList, nsRefPtr<T> aItem, bool aAdd)
++  : mList(aList), mItem(aItem), mAdd(aAdd)
++  {
++
++  }
++
++  NS_IMETHOD Run() MOZ_OVERRIDE
++  {
++    int count = VsyncDispatcher::GetInstance()->GetRegistedObjectCount();
++
++    if (0 == count)
++    {
++      hal::StartRecieveVsyncNotification(false);
++    }
++    else if (1 == count)
++    {
++      hal::StartRecieveVsyncNotification(true);
++    }
++
++    // Add an item into the target list(mList).
++    if (mAdd)
++    {
++      // Try to add an existed item into list.
++      MOZ_ASSERT(!mList.Contains(mItem));
++
++      if (!mList.Contains(mItem))
++      {
++        mList.AppendElement(mItem);
++      }
++    }
++    // Remove a Target from the target list.
++    else
++    {
++      typename nsTArray<nsRefPtr<T> >::index_type index = mList.IndexOf(mItem);
++
++      // Try to remove a non-existed item from list.
++      MOZ_ASSERT(index != nsTArray<nsRefPtr<T> >::NoIndex);
++
++      if (index != nsTArray<nsRefPtr<T> >::NoIndex)
++      {
++        mList.RemoveElementAt(index);
++      }
++    }
++
++    return NS_OK;
++  }
++
++private:
++  // Target list to be added or removed one item.
++  nsTArray<nsRefPtr<T> > &mList;
++
++  // A item to be added or removed from mList.
++  nsRefPtr<T> mItem;
++
++  // Add or remove mItem from mList
++  bool mAdd;
++};
++
++// Singleton
++// TODO: where to distroy sVsyncDispatcher?
++// Caller should not be able to call any publuc member function of this
++// singleton after VsyncDispatcher::Shutdown
++static StaticRefPtr<VsyncDispatcher> sVsyncDispatcher;
++
++// TODO:
++// Generically, introduce a new singleton casue trouble in at_exit process.
++// Try to find a holder to houl VsyncDispatcher.
++/* static */
++VsyncDispatcher *VsyncDispatcher::GetInstance()
++{
++  if (sVsyncDispatcher.get() == nullptr)
++  {
++    sVsyncDispatcher = new VsyncDispatcher();
++  }
++
++  return sVsyncDispatcher;
++}
++
++// TODO:
++// 1. VSyncDispather::GetInstance and Shutdown need to be thread safe
++// 2. Call Shutdown at? gfxPlatform or?
++void VsyncDispatcher::Shutdown()
++{
++  if (sVsyncDispatcher.get())
++  {
++    delete sVsyncDispatcher;
++    sVsyncDispatcher = nullptr;
++  }
++}
++
++VsyncDispatcher::VsyncDispatcher()
++  : mMonitor("VsyncDispathcerMonitor"),
++    mEnd(true),
++    mInputDispatcher(false),
++    mEnableDispatcherThread(false),
++    mTicketNo(0)
++{
++  // Do nothing.
++}
++
++VsyncDispatcher::~VsyncDispatcher()
++{
++  if (!mEnd && mEnableDispatcherThread)
++  {
++    StopDispatchThread();
++  }
++}
++
++int VsyncDispatcher::GetRegistedObjectCount() const
++{
++   int count = mCompositorList.Length();
++   count += mRefreshDriverList.Length();
++   count += (mInputDispatcher ? 1 : 0);
++
++   return count;
++}
++
++void VsyncDispatcher::RegisterInputDispatcher(bool aReg)
++{
++  VSYNC_PRINT("RegisterInputDispatcher(%d)\n\r", aReg);
++
++  // This function should be called in chrome process only.
++  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  if (mEnableDispatcherThread)
++  {
++    mDispatchThread->Dispatch(
++      NS_NewRunnableMethodWithArg<bool>(
++        this,
++        &VsyncDispatcher::RegisterInputDispatcherInternal,
++        aReg),
++      NS_DISPATCH_NORMAL);
++  }
++  else
++  {
++    NS_DispatchToMainThread(NS_NewRunnableMethodWithArg<bool>(
++        this,
++        &VsyncDispatcher::RegisterInputDispatcherInternal,
++        aReg),
++        NS_DISPATCH_NORMAL);
++   }
++}
++
++void VsyncDispatcher::RegisterInputDispatcherInternal(bool aReg)
++{
++  mInputDispatcher = aReg;
++}
++
++void VsyncDispatcher::RegisterCompositer(layers::CompositorParent *aParent, bool aReg)
++{
++  VSYNC_PRINT("RegisterCompositor(%d)\n\r", aReg);
++
++  // This function should be called in chrome process only.
++  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  nsRefPtr<ChangeListRunnable<layers::CompositorParent> > runnable =
++     new ChangeListRunnable<layers::CompositorParent>(mCompositorList,
++                                                      aParent,
++                                                      aReg);
++  if (mEnableDispatcherThread)
++  {
++    mDispatchThread->Dispatch(runnable, NS_DISPATCH_NORMAL);
++  }
++  else
++  {
++    NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
++  }
++}
++
++void VsyncDispatcher::RegisterRefreshDriver(nsRefreshDriver *aDriver, bool aReg)
++{
++  VSYNC_PRINT("RegisterRefreshDriver(%d)\n\r", aReg);
++
++  nsRefPtr<ChangeListRunnable<nsRefreshDriver> > runnable =
++     new ChangeListRunnable<nsRefreshDriver>(mRefreshDriverList,
++                                             aDriver,
++                                             aReg);
++
++  // Add/ Remove refresh driver in a specific thread to keep thread safe.
++  if (mEnableDispatcherThread)
++  {
++    mDispatchThread->Dispatch(runnable, NS_DISPATCH_NORMAL);
++  }
++  else
++  {
++    NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
++  }
++}
++
++void VsyncDispatcher::EventDispatchAndCompose(const hal::VsyncInfo& aInfo)
++{
++  if (mEnd && mEnableDispatcherThread)
++  {
++    StartDispatchThread();
++  }
++
++  // TODO
++  // Base on benchmark data to determine whether prevent allocation here.
++  // In the first version, do all the work in main thread.
++  if (mEnableDispatcherThread)
++  {
++    mDispatchThread->Dispatch(
++      NS_NewRunnableMethodWithArg<const hal::VsyncInfo>(
++        this,
++        &VsyncDispatcher::EventDispatchAndComposeInternal,
++        aInfo),
++      NS_DISPATCH_NORMAL);
++  }
++  else
++  {
++    NS_DispatchToMainThread(NS_NewRunnableMethodWithArg<const hal::VsyncInfo>(
++        this,
++        &VsyncDispatcher::EventDispatchAndComposeInternal,
++        aInfo),
++        NS_DISPATCH_NORMAL);
++   }
++}
++
++void VsyncDispatcher::Tick(const hal::VsyncInfo& aInfo)
++{
++  MOZ_ASSERT(NS_IsMainThread());
++
++#ifdef ENABLE_REFRESHDRIVER_NOTIFY
++  typedef nsTArray<nsRefreshDriver *>::size_type size_type;
++
++  // Tick all registered refresh drivers.
++  for (size_type i = 0; i < mRefreshDriverList.Length(); i++)
++  {
++    nsRefreshDriver *driver = mRefreshDriverList[i];
++    driver->DoTick();
++  }
++#endif
++}
++
++void VsyncDispatcher::StartDispatchThread()
++{
++  MonitorAutoLock lock(mMonitor);
++
++  MOZ_ASSERT(mEnd);
++  mEnd = false;
++
++  MOZ_ASSERT(!mDispatchThread);
++  if (!mDispatchThread)
++  {
++    NS_NewNamedThread("VsyncDispather", getter_AddRefs(mDispatchThread));
++  }
++}
++
++void VsyncDispatcher::StopDispatchThread()
++{
++  MonitorAutoLock lock(mMonitor);
++
++  MOZ_ASSERT(!mEnd);
++  mEnd = true;
++
++  MOZ_ASSERT(mDispatchThread);
++  if (mDispatchThread)
++  {
++    mDispatchThread->Shutdown();
++    mDispatchThread = nullptr;
++  }
++}
++
++void VsyncDispatcher::EventDispatchAndComposeInternal(const hal::VsyncInfo aInfo)
++{
++  mTicketNo++;
++
++#ifdef ENABLE_INPUTDISPATCHER_NOTIFY
++  typedef nsTArray<nsRefreshDriver *>::size_type size_type;
++
++  // 1. Trigger input event handling.
++#ifdef MOZ_WIDGET_GONK
++  if (mInputDispatcher)
++  {
++    ProcessNextEvent();
++  }
++#endif
++#endif
++
++  // 2. Trigger composition.
++#ifdef ENABLE_COMPOSITOR_NOTIFY
++  // CompositorParent::ScheduleComposition is an async call, assume it takes minor
++  // period.
++  for (size_type i = 0; i < mCompositorList.Length(); i++)
++  {
++    layers::CompositorParent *compositor =mCompositorList[i];
++    // TODO: need to change behaviro of ScheduleComposition(). No Delay, fire
++    // Composit ASAP.
++    compositor->ScheduleRenderOnCompositorThread();
++  }
++#endif
++}
++
++} // namespace mozilla
+diff --git a/hal/VsyncDispatcher.h b/hal/VsyncDispatcher.h
+new file mode 100644
+--- /dev/null
++++ b/hal/VsyncDispatcher.h
+@@ -0,0 +1,124 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++ #ifndef mozilla_VsyncDispatcher_h
++#define mozilla_VsyncDispatcher_h
++
++#include "mozilla/hal_sandbox/PHal.h"
++#include <queue>
++#include "mozilla/RefPtr.h"
++#include "mozilla/Monitor.h"
++#include "nsThreadUtils.h"
++#include "nsTArray.h"
++#include "HalVsyncInfo.h"
++
++
++class nsRefreshDriver;
++
++namespace mozilla {
++
++namespace layers {
++  class CompositorParent;
++}
++
++class VsyncDispatcher
++{
++public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(VsyncDispatcher);
++
++  static VsyncDispatcher *GetInstance();
++
++  // TODO
++  // Find a correct place call Shutdown.
++  static void Shutdown();
++
++  // Regist input dispatcher.
++  void RegisterInputDispatcher(bool aReg);
++
++  // Regist compositor.
++  void RegisterCompositer(layers::CompositorParent *aParent, bool aReg);
++
++  // Regist refresh driver.
++  void RegisterRefreshDriver(nsRefreshDriver *aDriver, bool aReg);
++
++  // 1. Tell the input dispatcher to handle input event.
++  // 2. Tell compisitors to do composition.
++  void EventDispatchAndCompose(const hal::VsyncInfo& aInfo);
++
++  // Tick refresh driver.
++  void Tick(const hal::VsyncInfo& aInfo);
++
++  // Return total registed object number.
++  int GetRegistedObjectCount() const;
++
++private:
++  // Singletone object. Hide constructor and destructor.
++  VsyncDispatcher();
++  ~VsyncDispatcher();
++
++  // Create and start dispatch thread.
++  void StartDispatchThread();
++
++  // Stop and terminate dispatch thread
++  void StopDispatchThread();
++
++  void RegisterInputDispatcherInternal(bool aReg);
++  void EventDispatchAndComposeInternal(const hal::VsyncInfo aInfo);
++
++private:
++  // A dedicate thread to dispatch vsync envet.
++  nsCOMPtr<nsIThread>  mDispatchThread;
++
++  // Keep dispather/main thread safe.
++  Monitor mMonitor;
++
++  // Whether terminate dispatcher thread.
++  bool mEnd;
++
++  // Registered compositors
++  nsTArray<nsRefPtr<layers::CompositorParent> > mCompositorList;
++
++  // Registered refresh drivers.
++  nsTArray<nsRefPtr<nsRefreshDriver> > mRefreshDriverList;
++
++  // Sent vsync event to input dispatcher.
++  bool mInputDispatcher;
++
++  // Dispatch vsync event to client in dispatch thread(true) or main thread(false)
++  // We need to dispatch vsync to 4 registered targets
++  // 1. InputDispatcher - must be in main thread
++  // 2. Compositor - can be off main thread
++  // 3. Remote refresh driver - must be in main thread, since we use PHal protocol
++  //    to sent tick event.
++  // 4. Refresh driver of chrome process - can be off main thread
++  // #1 and #3 are both need to call triggered in main thread, before we fix that
++  // problem, dispather thread is not really useful.
++  bool mEnableDispatcherThread;
++
++  // Keep vync tick count.
++  // For debugging purpose
++  // In log, you should see not see log with ticket number interlef
++  // Correct log
++  //   InputDispatch(tn:100)
++  //   Compositor(tn:100)
++  //   RefreshDriverTick(tn:100)
++  //   InputDispatch(tn:101)
++  //   Compositor(tn:101)
++  //   RefreshDriverTick(tn:101)
++  // Error log
++  //   InputDispatch(tn:100)
++  //   Compositor(tn:101) << interleaf
++  //   RefreshDriverTick(tn:100)
++  //   InputDispatch(tn:101)
++  //   Compositor(tn:100)
++  //   RefreshDriverTick(tn:101)
++  //
++  unsigned int mTicketNo;
++}; // class VsyncDispatcher
++
++} // namespace mozilla
++
++#endif // mozilla_VsyncDispatcher_h
+diff --git a/hal/fallback/FallbackVsync.cpp b/hal/fallback/FallbackVsync.cpp
+new file mode 100644
+--- /dev/null
++++ b/hal/fallback/FallbackVsync.cpp
+@@ -0,0 +1,26 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++* License, v. 2.0. If a copy of the MPL was not distributed with this file,
++* You can obtain one at http://mozilla.org/MPL/2.0/. */
++ 
++#include "Hal.h"
++ 
++ 
++namespace mozilla {
++namespace hal {
++struct VsyncInfo;
++}
++ 
++namespace hal_impl {
++void
++EnableVsyncNotifications() {
++}
++ 
++void
++DisableVsyncNotifications() {
++}
++ 
++void
++GetCurrentVsyncInfo(hal::VsyncInfo* /*aInfo*/) {
++}
++} // hal_impl
++} // mozilla
+diff --git a/hal/gonk/GonkHal.cpp b/hal/gonk/GonkHal.cpp
+--- a/hal/gonk/GonkHal.cpp
++++ b/hal/gonk/GonkHal.cpp
+@@ -861,16 +861,34 @@ LockScreenOrientation(const dom::ScreenO
+ }
+ 
+ void
+ UnlockScreenOrientation()
+ {
+   OrientationObserver::GetInstance()->UnlockScreenOrientation();
+ }
+ 
++// Nothing to do here.  Parent process listens to Vsync changes
++// by hal::RegisterVsyncObserver() directly.
++void
++EnableVsyncNotifications()
++{
++}
++
++void
++DisableVsyncNotifications()
++{
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsynInfo)
++{
++  hal::GetCurrentVsyncInfo(aVsynInfo);
++}
++
+ // This thread will wait for the alarm firing by a blocking IO.
+ static pthread_t sAlarmFireWatcherThread;
+ 
+ // If |sAlarmData| is non-null, it's owned by the alarm-watcher thread.
+ struct AlarmData {
+ public:
+   AlarmData(int aFd) : mFd(aFd),
+                        mGeneration(sNextGeneration++),
+diff --git a/hal/moz.build b/hal/moz.build
+--- a/hal/moz.build
++++ b/hal/moz.build
+@@ -12,23 +12,26 @@ XPIDL_MODULE = 'hal'
+ 
+ EXPORTS.mozilla += [
+     'Hal.h',
+     'HalImpl.h',
+     'HalSandbox.h',
+     'HalScreenConfiguration.h',
+     'HalSensor.h',
+     'HalTypes.h',
++    'HalVsyncInfo.h',
+     'HalWakeLock.h',
++    'VsyncDispatcher.h',
+ ]
+ 
+ TEST_DIRS += ['tests']
+ UNIFIED_SOURCES += [
+     'HalWakeLock.cpp',
+     'sandbox/SandboxHal.cpp',
++    'VsyncDispatcher.cpp',
+     'WindowIdentifier.cpp',
+ ]
+ 
+ # Hal.cpp cannot be built in unified mode because it relies on HalImpl.h.
+ SOURCES += [
+     'Hal.cpp',
+ ]
+ 
+@@ -147,16 +150,17 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] != 'gonk
+         'fallback/FallbackDiskSpaceWatcher.cpp',
+         'fallback/FallbackFactoryReset.cpp',
+         'fallback/FallbackFMRadio.cpp',
+         'fallback/FallbackLights.cpp',
+         'fallback/FallbackProcessPriority.cpp',
+         'fallback/FallbackScreenPower.cpp',
+         'fallback/FallbackSwitch.cpp',
+         'fallback/FallbackTime.cpp',
++        'fallback/FallbackVsync.cpp',
+         'fallback/FallbackWakeLocks.cpp',
+     ]
+ 
+ # Fallbacks for backends implemented on Android only.
+ if CONFIG['MOZ_WIDGET_TOOLKIT'] != 'android':
+     UNIFIED_SOURCES += [
+         'fallback/FallbackNetwork.cpp',
+     ]
+diff --git a/hal/sandbox/PHal.ipdl b/hal/sandbox/PHal.ipdl
+--- a/hal/sandbox/PHal.ipdl
++++ b/hal/sandbox/PHal.ipdl
+@@ -68,16 +68,20 @@ struct WakeLockInformation {
+ 
+ struct ScreenConfiguration {
+   nsIntRect rect;
+   ScreenOrientation orientation;
+   uint32_t colorDepth;
+   uint32_t pixelDepth;
+ };
+ 
++struct VsyncInfo {
++  int64_t timestamp;
++};
++
+ struct FMRadioOperationInformation {
+   FMRadioOperation operation;
+   FMRadioOperationStatus status;
+   uint32_t frequency;
+ };
+ 
+ struct FMRadioSettings {
+   FMRadioCountry country;
+@@ -101,16 +105,17 @@ namespace hal_sandbox {
+ sync protocol PHal {
+     manager PContent;
+ 
+ child:
+     NotifyBatteryChange(BatteryInformation aBatteryInfo);
+     NotifyNetworkChange(NetworkInformation aNetworkInfo);
+     NotifyWakeLockChange(WakeLockInformation aWakeLockInfo);
+     NotifyScreenConfigurationChange(ScreenConfiguration aScreenOrientation);
++    NotifyVsyncChange(VsyncInfo aVsyncInfo);
+     NotifySwitchChange(SwitchEvent aEvent);
+     NotifySystemClockChange(int64_t aClockDeltaMS); 
+     NotifySystemTimezoneChange(SystemTimezoneChangeInformation aSystemTimezoneChangeInfo); 
+ 
+ parent:
+     Vibrate(uint32_t[] pattern, uint64_t[] id, PBrowser browser);
+     CancelVibrate(uint64_t[] id, PBrowser browser);
+ 
+@@ -161,16 +166,21 @@ parent:
+     EnableScreenConfigurationNotifications();
+     DisableScreenConfigurationNotifications();
+     sync GetCurrentScreenConfiguration()
+       returns (ScreenConfiguration aScreenConfiguration);
+     sync LockScreenOrientation(ScreenOrientation aOrientation)
+       returns (bool allowed);
+     UnlockScreenOrientation();
+  
++    EnableVsyncNotifications();
++    DisableVsyncNotifications();
++    sync GetCurrentVsyncInfo()
++      returns (VsyncInfo aVsyncInfo);
++
+     EnableSwitchNotifications(SwitchDevice aDevice);
+     DisableSwitchNotifications(SwitchDevice aDevice);
+     sync GetCurrentSwitchState(SwitchDevice aDevice)
+       returns (SwitchState aState);
+     NotifySwitchStateFromInputDevice(SwitchDevice aDevice, SwitchState aState);
+ 
+     FactoryReset();
+ 
+diff --git a/hal/sandbox/SandboxHal.cpp b/hal/sandbox/SandboxHal.cpp
+--- a/hal/sandbox/SandboxHal.cpp
++++ b/hal/sandbox/SandboxHal.cpp
+@@ -129,16 +129,34 @@ LockScreenOrientation(const dom::ScreenO
+ }
+ 
+ void
+ UnlockScreenOrientation()
+ {
+   Hal()->SendUnlockScreenOrientation();
+ }
+ 
++void
++EnableVsyncNotifications()
++{
++  Hal()->SendEnableVsyncNotifications();
++}
++
++void
++DisableVsyncNotifications()
++{
++  Hal()->SendDisableVsyncNotifications();
++}
++
++void
++GetCurrentVsyncInfo(VsyncInfo* aVsyncInfo)
++{
++  Hal()->SendGetCurrentVsyncInfo(aVsyncInfo);
++}
++
+ bool
+ GetScreenEnabled()
+ {
+   bool enabled = false;
+   Hal()->SendGetScreenEnabled(&enabled);
+   return enabled;
+ }
+ 
+@@ -441,26 +459,28 @@ class HalParent : public PHalParent
+                 , public BatteryObserver
+                 , public NetworkObserver
+                 , public ISensorObserver
+                 , public WakeLockObserver
+                 , public ScreenConfigurationObserver
+                 , public SwitchObserver
+                 , public SystemClockChangeObserver
+                 , public SystemTimezoneChangeObserver
++                , public VsyncObserver
+ {
+ public:
+   virtual void
+   ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE
+   {
+     // NB: you *must* unconditionally unregister your observer here,
+     // if it *may* be registered below.
+     hal::UnregisterBatteryObserver(this);
+     hal::UnregisterNetworkObserver(this);
+     hal::UnregisterScreenConfigurationObserver(this);
++    hal::UnregisterVsyncObserver(this);
+     for (int32_t sensor = SENSOR_UNKNOWN + 1;
+          sensor < NUM_SENSOR_TYPE; ++sensor) {
+       hal::UnregisterSensorObserver(SensorType(sensor), this);
+     }
+     hal::UnregisterWakeLockObserver(this);
+     hal::UnregisterSystemClockChangeObserver(this);
+     hal::UnregisterSystemTimezoneChangeObserver(this);
+     for (int32_t switchDevice = SWITCH_DEVICE_UNKNOWN + 1;
+@@ -580,16 +600,38 @@ public:
+     return true;
+   }
+ 
+   void Notify(const ScreenConfiguration& aScreenConfiguration) {
+     unused << SendNotifyScreenConfigurationChange(aScreenConfiguration);
+   }
+ 
+   virtual bool
++  RecvEnableVsyncNotifications() MOZ_OVERRIDE {
++    hal::RegisterVsyncObserver(this);
++    return true;
++  }
++
++  virtual bool
++  RecvDisableVsyncNotifications() MOZ_OVERRIDE {
++    hal::UnregisterVsyncObserver(this);
++    return true;
++  }
++
++  virtual bool
++  RecvGetCurrentVsyncInfo(VsyncInfo* aVsyncInfo) MOZ_OVERRIDE {
++    hal::GetCurrentVsyncInfo(aVsyncInfo);
++    return true;
++  }
++
++  void Notify(const VsyncInfo& aVsyncInfo) {
++    unused << SendNotifyVsyncChange(aVsyncInfo);
++  }
++
++  virtual bool
+   RecvGetScreenEnabled(bool *enabled) MOZ_OVERRIDE
+   {
+     if (!AssertAppProcessPermission(this, "power")) {
+       return false;
+     }
+     *enabled = hal::GetScreenEnabled();
+     return true;
+   }
+@@ -894,16 +936,22 @@ public:
+ 
+   virtual bool
+   RecvNotifyScreenConfigurationChange(const ScreenConfiguration& aScreenConfiguration) MOZ_OVERRIDE {
+     hal::NotifyScreenConfigurationChange(aScreenConfiguration);
+     return true;
+   }
+ 
+   virtual bool
++  RecvNotifyVsyncChange(const VsyncInfo& aVsyncInfo) MOZ_OVERRIDE {
++    hal::NotifyVsyncChange(aVsyncInfo);
++    return true;
++  }
++
++  virtual bool
+   RecvNotifySwitchChange(const mozilla::hal::SwitchEvent& aEvent) MOZ_OVERRIDE {
+     hal::NotifySwitchChange(aEvent);
+     return true;
+   }
+ 
+   virtual bool
+   RecvNotifySystemClockChange(const int64_t& aClockDeltaMS) {
+     hal::NotifySystemClockChange(aClockDeltaMS);
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -22,16 +22,17 @@
+ // mmsystem isn't part of WIN32_LEAN_AND_MEAN, so we have
+ // to manually include it
+ #include <mmsystem.h>
+ #include "WinUtils.h"
+ #endif
+ 
+ #include "mozilla/ArrayUtils.h"
+ #include "mozilla/AutoRestore.h"
++#include "mozilla/VsyncDispatcher.h"
+ #include "nsRefreshDriver.h"
+ #include "nsITimer.h"
+ #include "nsLayoutUtils.h"
+ #include "nsPresContext.h"
+ #include "nsComponentManagerUtils.h"
+ #include "prlog.h"
+ #include "nsAutoPtr.h"
+ #include "nsIDocument.h"
+@@ -181,16 +182,61 @@ protected:
+   // bacause of c++ protected shenanigans
+   static void TimerTick(nsITimer* aTimer, void* aClosure)
+   {
+     RefreshDriverTimer *timer = static_cast<RefreshDriverTimer*>(aClosure);
+     timer->Tick();
+   }
+ };
+ 
++// After register this nsRefreshDriver into VsyncDispatcher, VsyncDispatcher
++// calls nsRefereshDriver::Tick function while vsync event recieve.
++// The only reason to construct this Timer is to minimize code change in
++// nsRefreshDriver.
++class VsyncRefreshDriverTimer :
++    public RefreshDriverTimer
++{
++public:
++  VsyncRefreshDriverTimer(double aRate)
++    : RefreshDriverTimer(aRate)
++  {
++    // Do nothing.
++  }
++
++  virtual ~VsyncRefreshDriverTimer()
++  {
++    // Do nothing.
++  }
++
++  virtual void AddRefreshDriver(nsRefreshDriver* aDriver)
++  {
++    // VsyncDispatcher manages registered refresh driver in a list.
++    // We don't have to add this driver into RefreshDriverTimer's
++    // list anymore.
++    VsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver, true);
++  }
++
++  virtual void RemoveRefreshDriver(nsRefreshDriver* aDriver)
++  {
++    VsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver, false);
++  }
++
++protected:
++  virtual void StartTimer()
++  {
++    mLastFireEpoch = JS_Now();
++    mLastFireTime = TimeStamp::Now();
++
++    mTargetTime = mLastFireTime + mRateDuration;
++  }
++
++  virtual void StopTimer() { }
++  virtual void ScheduleNextTick(TimeStamp aNowTime) { }
++};
++
+ /*
+  * A RefreshDriverTimer that uses a nsITimer as the underlying timer.  Note that
+  * this is a ONE_SHOT timer, not a repeating one!  Subclasses are expected to
+  * implement ScheduleNextTick and intelligently calculate the next time to tick,
+  * and to reset mTimer.  Using a repeating nsITimer gets us into a lot of pain
+  * with its attempt at intelligent slack removal and such, so we don't do it.
+  */
+ class SimpleTimerBasedRefreshDriverTimer :
+@@ -556,17 +602,17 @@ GetFirstFrameDelay(imgIRequest* req)
+   // If this image isn't animated, there isn't a first frame delay.
+   int32_t delay = container->GetFirstFrameDelay();
+   if (delay < 0)
+     return 0;
+ 
+   return static_cast<uint32_t>(delay);
+ }
+ 
+-static PreciseRefreshDriverTimer *sRegularRateTimer = nullptr;
++static RefreshDriverTimer         *sRegularRateTimer = nullptr;
+ static InactiveRefreshDriverTimer *sThrottledRateTimer = nullptr;
+ 
+ #ifdef XP_WIN
+ static int32_t sHighPrecisionTimerRequests = 0;
+ // a bare pointer to avoid introducing a static constructor
+ static nsITimer *sDisableHighPrecisionTimersTimer = nullptr;
+ #endif
+ 
+@@ -661,23 +707,29 @@ nsRefreshDriver::ChooseTimer() const
+       sThrottledRateTimer = new InactiveRefreshDriverTimer(GetThrottledTimerInterval(),
+                                                            DEFAULT_INACTIVE_TIMER_DISABLE_SECONDS * 1000.0);
+     return sThrottledRateTimer;
+   }
+ 
+   if (!sRegularRateTimer) {
+     bool isDefault = true;
+     double rate = GetRegularTimerInterval(&isDefault);
++
++    if (Preferences::GetBool("hal.hw-vsync", true)) {
++      sRegularRateTimer = new VsyncRefreshDriverTimer(rate);
++    }
++    else {
+ #ifdef XP_WIN
+-    if (PreciseRefreshDriverTimerWindowsDwmVsync::IsSupported()) {
+-      sRegularRateTimer = new PreciseRefreshDriverTimerWindowsDwmVsync(rate, isDefault);
+-    }
++      if (PreciseRefreshDriverTimerWindowsDwmVsync::IsSupported()) {
++        sRegularRateTimer = new PreciseRefreshDriverTimerWindowsDwmVsync(rate, isDefault);
++      }
+ #endif
+-    if (!sRegularRateTimer) {
+-      sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      if (!sRegularRateTimer) {
++        sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      }
+     }
+   }
+   return sRegularRateTimer;
+ }
+ 
+ nsRefreshDriver::nsRefreshDriver(nsPresContext* aPresContext)
+   : mActiveTimer(nullptr),
+     mPresContext(aPresContext),
+@@ -759,17 +811,17 @@ nsRefreshDriver::AddRefreshObserver(nsAR
+   return success;
+ }
+ 
+ bool
+ nsRefreshDriver::RemoveRefreshObserver(nsARefreshObserver* aObserver,
+                                        mozFlushType aFlushType)
+ {
+   ObserverArray& array = ArrayFor(aFlushType);
+-  return array.RemoveElement(aObserver);
++  return  array.RemoveElement(aObserver);
+ }
+ 
+ void
+ nsRefreshDriver::AddPostRefreshObserver(nsAPostRefreshObserver* aObserver)
+ {
+   mPostRefreshObservers.AppendElement(aObserver);
+ }
+ 
+@@ -1050,16 +1102,17 @@ nsRefreshDriver::Tick(int64_t aNowEpoch,
+   if (!presShell || (ObserverCount() == 0 && ImageRequestCount() == 0)) {
+     // Things are being destroyed, or we no longer have any observers.
+     // We don't want to stop the timer when observers are initially
+     // removed, because sometimes observers can be added and removed
+     // often depending on what other things are going on and in that
+     // situation we don't want to thrash our timer.  So instead we
+     // wait until we get a Notify() call when we have no observers
+     // before stopping the timer.
++    //printf_stderr("nsRefreshDriver: Tick(1)(%d, %d, %d).\n\r", presShell ? 1 : 0, ObserverCount() ? 1 : 0, ImageRequestCount() ? 1 : 0);
+     StopTimer();
+     return;
+   }
+ 
+   profiler_tracing("Paint", "RD", TRACING_INTERVAL_START);
+ 
+   AutoRestore<bool> restoreInRefresh(mInRefresh);
+   mInRefresh = true;
+@@ -1288,16 +1341,17 @@ nsRefreshDriver::StartTableRefresh(const
+   }
+ 
+   return PL_DHASH_NEXT;
+ }
+ 
+ void
+ nsRefreshDriver::Freeze()
+ {
++  printf_stderr("nsRefreshDriver: Freeze.\n\r");
+   StopTimer();
+   mFreezeCount++;
+ }
+ 
+ void
+ nsRefreshDriver::Thaw()
+ {
+   NS_ASSERTION(mFreezeCount > 0, "Thaw() called on an unfrozen refresh driver");
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -104,17 +104,16 @@ NS_IMPL_ISUPPORTS_INHERITED1(nsAppShell,
+ 
+ static uint64_t
+ nanosecsToMillisecs(nsecs_t nsecs)
+ {
+     return nsecs / 1000000;
+ }
+ 
+ namespace mozilla {
+-
+ bool ProcessNextEvent()
+ {
+     return gAppShell->ProcessNextNativeEvent(true);
+ }
+ 
+ void NotifyEvent()
+ {
+     gAppShell->NotifyNativeEvent();
+@@ -834,16 +833,17 @@ GeckoInputDispatcher::notifyMotion(const
+            ((mEventQueue.back().action & AMOTION_EVENT_ACTION_MASK) ==
+              AMOTION_EVENT_ACTION_MOVE ||
+             (mEventQueue.back().action & AMOTION_EVENT_ACTION_MASK) ==
+              AMOTION_EVENT_ACTION_HOVER_MOVE))
+             mEventQueue.back() = data;
+         else
+             mEventQueue.push(data);
+     }
++
+     gAppShell->NotifyNativeEvent();
+ }
+ 
+ 
+ 
+ void GeckoInputDispatcher::notifySwitch(const NotifySwitchArgs* args)
+ {
+     if (!sDevInputAudioJack)

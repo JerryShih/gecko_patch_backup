@@ -1,0 +1,5 @@
+gfx_trace_makefile.patch
+jb-4.2.2.patch
+0004-enable-systrace.patch
+vsync_manager.patch
+hwc_send_vsync.patch
