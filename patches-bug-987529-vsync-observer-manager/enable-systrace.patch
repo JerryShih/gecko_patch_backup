@@ -1,0 +1,28 @@
+# HG changeset patch
+# Parent 85f5998604b60d43dd324fd713ba626e1b895e78
+# User Jerry Shih <hshih@mozilla.com>
+enable systrace
+
+
+diff --git a/tools/profiler/GeckoProfilerImpl.h b/tools/profiler/GeckoProfilerImpl.h
+--- a/tools/profiler/GeckoProfilerImpl.h
++++ b/tools/profiler/GeckoProfilerImpl.h
+@@ -272,17 +272,17 @@ static inline void profiler_tracing(cons
+     return;
+   }
+ 
+   mozilla_sampler_tracing(aCategory, aInfo, aMetaData);
+ }
+ 
+ // Uncomment this to turn on systrace or build with
+ // ac_add_options --enable-systace
+-//#define MOZ_USE_SYSTRACE
++#define MOZ_USE_SYSTRACE
+ #ifdef MOZ_USE_SYSTRACE
+ # define ATRACE_TAG ATRACE_TAG_ALWAYS
+ // We need HAVE_ANDROID_OS to be defined for Trace.h.
+ // If its not set we will set it temporary and remove it.
+ # ifndef HAVE_ANDROID_OS
+ #   define HAVE_ANDROID_OS
+ #   define REMOVE_HAVE_ANDROID_OS
+ # endif

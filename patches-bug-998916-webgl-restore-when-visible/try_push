@@ -1,0 +1,5 @@
+# HG changeset patch
+# Parent d41de45edb6d7cad179cb1a909e565b64f14aa66
+# User Jerry Shih <hshih@mozilla.com>
+try: -b do -p all -u reftest,reftest-ipc,reftest-no-accel,crashtest,mochitest-1,mochitest-2,mochitest-bc,mochitest-dt,mochitest-o,mochitest-2,mochitest-4,mochitest-gl -t none
+

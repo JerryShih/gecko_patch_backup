@@ -1,38 +1,29 @@
 # HG changeset patch
 # User vlin <vlin@mozilla.com>
-# Date 1399432697 -28800
-# Node ID 05e217c4a6b6e689ebd894bc2d1cb23de2b7ac72
-# Parent 0540d1ea5777ea0a8954228949d17943998f2188
+# Date 1398068233 -28800
+# Node ID 10e81e1b2f6204a53ffc3da21934ceaa93d59338
+# Parent 8cfe066598863db89f615918dd3f50f7d9a61832
 Bug 987527: Register Vsync monitor to HWComposer and notify to gecko/hal r=mwu
 
 diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
 --- a/b2g/app/b2g.js
 +++ b/b2g/app/b2g.js
-@@ -266,23 +266,32 @@ pref("ui.dragThresholdY", 25);
+@@ -286,21 +286,23 @@ pref("ui.dragThresholdX", 25);
+ pref("ui.dragThresholdY", 25);
  
  // Layers Acceleration.  We can only have nice things on gonk, because
  // they're not maintained anywhere else.
  pref("layers.offmainthreadcomposition.enabled", true);
+ pref("layers.offmainthreadcomposition.async-animations", true);
  #ifndef MOZ_WIDGET_GONK
  pref("dom.ipc.tabs.disabled", true);
- pref("layers.offmainthreadcomposition.async-animations", false);
- pref("layers.async-video.enabled", false);
-+pref("gfx.silk-enable", false);
 +pref("hal.hw-vsync", false);
  #else
  pref("dom.ipc.tabs.disabled", false);
  pref("layers.acceleration.disabled", false);
- pref("layers.offmainthreadcomposition.async-animations", true);
- pref("layers.async-video.enabled", true);
  pref("layers.async-pan-zoom.enabled", true);
  pref("gfx.content.azure.backends", "cairo");
-+// Project Silk(Bug 987532). Set "true" to enable it.
-+// Only support in B2G.
-+pref("gfx.silk-enable", false);
-+// Once "gfx.silk-enable" is true, below is considered to decide sw or hw vsync.
-+// hw vsync really reflects the tick of actual system vsync signal which is reported from hal.
-+// sw vsync is implemented by timer in gonk to simulate refresh tick. The refresh period is queried from hal(it's usually 60Hz.).
-+pref("hal.hw-vsync", false);
++pref("hal.hw-vsync", true);
  #endif
  
  // Web Notifications
@@ -44,16 +35,9 @@ diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
 diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 --- a/widget/gonk/HwcComposer2D.cpp
 +++ b/widget/gonk/HwcComposer2D.cpp
-@@ -21,22 +21,25 @@
- #include "Framebuffer.h"
- #include "GLContext.h"                  // for GLContext
- #include "HwcUtils.h"
- #include "HwcComposer2D.h"
- #include "mozilla/layers/LayerManagerComposite.h"
- #include "mozilla/layers/PLayerTransaction.h"
+@@ -27,16 +27,18 @@
  #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
  #include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
-+#include "mozilla/Preferences.h"
  #include "mozilla/StaticPtr.h"
  #include "cutils/properties.h"
  #include "gfx2DGlue.h"
@@ -70,18 +54,9 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
  #ifdef LOG_TAG
  #undef LOG_TAG
  #endif
-@@ -55,38 +58,78 @@
- #endif
- 
- #define LOGI(args...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, ## args)
- #define LOGE(args...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, ## args)
- 
- #define LAYER_COUNT_INCREMENTS 5
+@@ -61,32 +63,51 @@
  
  using namespace android;
-+#if ANDROID_VERSION >= 17
-+using namespace mozilla::hal;
-+#endif
  using namespace mozilla::layers;
  
  namespace mozilla {
@@ -99,10 +74,6 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 +    callbacks procs;
 +    HwcComposer2D* hwc;
 +};
-+static void eventControlCallback(bool enabled)
-+{
-+   HwcComposer2D::GetInstance()->eventControl(enabled);
-+}
 +#endif
 +
  HwcComposer2D::HwcComposer2D()
@@ -114,32 +85,18 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
  #if ANDROID_VERSION >= 17
      , mPrevRetireFence(Fence::NO_FENCE)
      , mPrevDisplayFence(Fence::NO_FENCE)
-+    , mTimeStamp(0)
 +    , mVSyncCount(0)
++    , mVsyncData(0, 0)
 +    , mCBContext(new cb_context)
-+    , mIsSilkEnabled(false)
-+    , mIsSupportHWVsync(false)
  #endif
      , mPrepared(false)
  {
-+#if ANDROID_VERSION >= 17
-+    if(Preferences::GetBool("gfx.silk-enable", false)) {
-+        if(Preferences::GetBool("hal.hw-vsync", false)) {
-+	     mIsSupportHWVsync = true;
-+        }
-+	 mIsSilkEnabled = true;
-+    }
-+#endif
  }
  
  HwcComposer2D::~HwcComposer2D() {
      free(mList);
 +#if ANDROID_VERSION >= 17
 +    delete mCBContext;	
-+    if (mVSyncThread != NULL) {
-+        mVSyncThread->requestExitAndWait();
-+    }
-+    GetGonkDisplay()->OnEventControl(nullptr);
 +#endif
  }
  
@@ -149,7 +106,7 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
      MOZ_ASSERT(!Initialized());
  
      mHwc = (HwcDevice*)GetGonkDisplay()->GetHWCDevice();
-@@ -109,16 +152,36 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+@@ -109,16 +130,28 @@ HwcComposer2D::Init(hwc_display_t dpy, h
          }
          if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
              mRBSwapSupport = !!supported;
@@ -159,25 +116,17 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
          mRBSwapSupport = false;
      }
 +
-+    if (mIsSilkEnabled) {
-+        if (mIsSupportHWVsync && mHwc->registerProcs) {
-+            mCBContext->hwc = this;
-+	     mCBContext->procs.invalidate = &hook_invalidate;
-+	     mCBContext->procs.vsync = &hook_vsync;
-+            mCBContext->procs.hotplug = &hook_hotplug;
-+	     memset(mCBContext->procs.zero, 0, sizeof(mCBContext->procs.zero));
-+	     mHwc->registerProcs(mHwc, &mCBContext->procs);
-+
-+            mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, 1);
-+        } else {
-+            LOGI("Creating VSyncThread");
-+            mVSyncThread = new VSyncThread(*this);
-+           if (mVSyncThread != NULL) {
-+             mVSyncThread->setEnabled(1);
-+           }
-+        }
-+	 GetGonkDisplay()->OnEventControl(eventControlCallback);
++    if (mHwc->registerProcs) {
++        mCBContext->hwc = this;
++	 mCBContext->procs.invalidate = &hook_invalidate;
++	 mCBContext->procs.vsync = &hook_vsync;
++        mCBContext->procs.hotplug = &hook_hotplug;
++	 memset(mCBContext->procs.zero, 0, sizeof(mCBContext->procs.zero));
++	 mHwc->registerProcs(mHwc, &mCBContext->procs);
 +    }
++
++    mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, 1);
++
  #else
      char propValue[PROPERTY_VALUE_MAX];
      property_get("ro.display.colorfill", propValue, "0");
@@ -186,7 +135,7 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
  #endif
  
      mDpy = dpy;
-@@ -132,16 +195,87 @@ HwcComposer2D::GetInstance()
+@@ -132,16 +165,73 @@ HwcComposer2D::GetInstance()
  {
      if (!sInstance) {
          LOGI("Creating new instance");
@@ -233,36 +182,22 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 +void
 +HwcComposer2D::vsync(int disp, int64_t timestamp)
 +{
-+#if defined(MOZ_USE_SYSTRACE)
-+    ATRACE_INT("VSYNC", ++mVSyncCount&1);
-+#endif
-+    hal::NotifyVsyncChange(VsyncInfo(timestamp));
-+    mTimeStamp = timestamp;
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("debug.vsync_div", propValue, "1");
++    int div = atoi(propValue);
++
++    if (!(mVSyncCount%div)) {
++        mVsyncData.timeStamp() = base::TimeTicks::HighResNow().ToInternalValue();
++        //mVsyncData.timeStamp() = timestamp;
++        ++(mVsyncData.frameNumber());
++        VsyncDispatcher::GetInstance()->NotifyVsync(mVsyncData);
++    }
 +}
 +
 +void
 +HwcComposer2D::hotplug(int disp, int connected)
 +{
 +    // N/A
-+}
-+
-+nsecs_t
-+HwcComposer2D::getRefreshPeriod(void) const
-+{
-+    return GetGonkDisplay()->getRefreshPeriod();
-+}
-+
-+void
-+HwcComposer2D::eventControl(bool enabled)
-+{
-+    if (mIsSupportHWVsync) {
-+	 if (mHwc)
-+            mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, enabled);
-+    }
-+    else {
-+	 if (mVSyncThread.get())
-+	     mVSyncThread->setEnabled(enabled);
-+    }
 +}
 +#endif
 +
@@ -274,110 +209,30 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
  
      HwcList* listrealloc = (HwcList*)realloc(mList, size);
  
-@@ -790,9 +924,70 @@ HwcComposer2D::TryRender(Layer* aRoot,
-         LOGD("H/W Composition failed");
-         return false;
-     }
- 
-     LOGD("Frame rendered");
-     return true;
- }
- 
-+// ---------------------------------------------------------------------------
-+#if ANDROID_VERSION >= 17
-+HwcComposer2D::VSyncThread::VSyncThread(HwcComposer2D& hwc)
-+    : mHwc(hwc), mEnabled(false),
-+      mNextFakeVSync(0),
-+      mRefreshPeriod(hwc.getRefreshPeriod()),
-+      mSWVsyncCount(0)
-+{
-+}
-+
-+void HwcComposer2D::VSyncThread::setEnabled(bool enabled) {
-+    android::Mutex::Autolock _l(mLock);
-+    if (mEnabled != enabled) {
-+        mEnabled = enabled;
-+        mCondition.signal();
-+    }
-+}
-+
-+void HwcComposer2D::VSyncThread::onFirstRef() {
-+    run("VSyncThread", PRIORITY_URGENT_DISPLAY + PRIORITY_MORE_FAVORABLE);
-+}
-+
-+bool HwcComposer2D::VSyncThread::threadLoop()
-+{
-+    { // scope for lock
-+        android::Mutex::Autolock _l(mLock);
-+        while (!mEnabled) {
-+            mCondition.wait(mLock);
-+        }
-+    }
-+
-+    const nsecs_t period = mRefreshPeriod;
-+    const nsecs_t now = systemTime(CLOCK_MONOTONIC);
-+    nsecs_t next_vsync = mNextFakeVSync;
-+    nsecs_t sleep = next_vsync - now;
-+    if (sleep < 0) {
-+        // we missed, find where the next vsync should be
-+        sleep = (period - ((now - next_vsync) % period));
-+        next_vsync = now + sleep;
-+    }
-+    mNextFakeVSync = next_vsync + period;
-+
-+    struct timespec spec;
-+    spec.tv_sec  = next_vsync / 1000000000;
-+    spec.tv_nsec = next_vsync % 1000000000;
-+
-+    int err;
-+    do {
-+        err = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &spec, NULL);
-+    } while (err<0 && errno == EINTR);
-+
-+    if (err == 0) {
-+#if defined(MOZ_USE_SYSTRACE)
-+        ATRACE_INT("SW-VSYNC", ++mSWVsyncCount&1);
-+#endif
-+	 hal::NotifyVsyncChange(VsyncInfo(next_vsync));
-+    }
-+
-+    return true;
-+}
-+#endif
- } // namespace mozilla
 diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
 --- a/widget/gonk/HwcComposer2D.h
 +++ b/widget/gonk/HwcComposer2D.h
-@@ -20,16 +20,28 @@
- #include "Composer2D.h"
- #include "Layers.h"
+@@ -22,16 +22,18 @@
  #include <vector>
  #include <list>
  
  #include <hardware/hwcomposer.h>
  #if ANDROID_VERSION >= 17
  #include <ui/Fence.h>
-+
-+#include <utils/Condition.h>
-+#include <utils/Mutex.h>
-+#include <utils/StrongPointer.h>
-+#include <utils/Thread.h>
-+#include <utils/Timers.h>
-+
-+#include "mozilla/Hal.h"
-+
-+extern "C" int clock_nanosleep(clockid_t clock_id, int flags,
-+                           const struct timespec *request,
-+                           struct timespec *remain);
  #endif
  
++#include "VsyncDispatcher.h"
++
  namespace mozilla {
  
  namespace layers {
  class ContainerLayer;
  class Layer;
  }
-@@ -70,16 +82,51 @@ public:
+ 
+ //Holds a dynamically allocated vector of rectangles
+@@ -69,16 +71,26 @@ public:
+     HwcComposer2D();
      virtual ~HwcComposer2D();
  
      int Init(hwc_display_t aDisplay, hwc_surface_t aSurface);
@@ -385,42 +240,17 @@ diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
      bool Initialized() const { return mHwc; }
  
      static HwcComposer2D* GetInstance();
- 
 +#if ANDROID_VERSION >= 17
 +    static void hook_invalidate(const struct hwc_procs* procs);
 +    static void hook_vsync(const struct hwc_procs* procs, int disp,
-+            int64_t timestamp);
++                           int64_t timestamp);
 +    static void hook_hotplug(const struct hwc_procs* procs, int disp,
-+            int connected);
-+ 
++                             int connected);
 +    inline void invalidate();
 +    inline void vsync(int disp, int64_t timestamp);
 +    inline void hotplug(int disp, int connected);
-+    mozilla::hal::VsyncInfo GetVsyncInfo() { return mozilla::hal::VsyncInfo(mTimeStamp); }
-+
-+    nsecs_t getRefreshPeriod(void) const;
-+    void eventControl(bool enabled);
-+
-+    // this class is only used to fake the VSync event on systems that don't
-+    // have it.
-+    class VSyncThread : public android::Thread {
-+        HwcComposer2D& mHwc;
-+        mutable android::Mutex mLock;
-+        android::Condition mCondition;
-+        bool mEnabled;
-+        mutable nsecs_t mNextFakeVSync;
-+        nsecs_t mRefreshPeriod;
-+        virtual void onFirstRef();
-+        virtual bool threadLoop();
-+	 size_t                          mSWVsyncCount;
-+    public:
-+        VSyncThread(HwcComposer2D& hwc);
-+        void setEnabled(bool enabled);
-+    };
-+
-+    friend class VSyncThread;
 +#endif
-+
+ 
      // Returns TRUE if the container has been succesfully rendered
      // Returns FALSE if the container cannot be fully rendered
      // by this composer so nothing was rendered at all
@@ -428,8 +258,7 @@ diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
                     bool aGeometryChanged) MOZ_OVERRIDE;
  
      bool Render(EGLDisplay dpy, EGLSurface sur);
- 
-@@ -103,16 +150,23 @@ private:
+@@ -103,16 +115,21 @@ private:
      bool                    mColorFill;
      bool                    mRBSwapSupport;
      //Holds all the dynamically allocated RectVectors needed
@@ -441,10 +270,8 @@ diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
 +    struct cb_context;
 +    cb_context*                     mCBContext;
 +    size_t                          mVSyncCount;
-+    int64_t                        mTimeStamp;
-+    android::sp<VSyncThread>                 mVSyncThread;	
-+    bool                            mIsSilkEnabled;
-+    bool                            mIsSupportHWVsync;
++
++    mozilla::layers::VsyncData      mVsyncData;
  #endif
      nsTArray<layers::LayerComposite*> mHwcLayerMap;
      bool                    mPrepared;
@@ -453,118 +280,16 @@ diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
  } // namespace mozilla
  
  #endif // mozilla_HwcComposer2D
-diff --git a/widget/gonk/libdisplay/GonkDisplay.h b/widget/gonk/libdisplay/GonkDisplay.h
---- a/widget/gonk/libdisplay/GonkDisplay.h
-+++ b/widget/gonk/libdisplay/GonkDisplay.h
-@@ -12,16 +12,17 @@
-  * See the License for the specific language governing permissions and
-  * limitations under the License.
-  */
- 
- #ifndef GONKDISPLAY_H
- #define GONKDISPLAY_H
- 
- #include <system/window.h>
-+#include <utils/Timers.h>
- 
- namespace mozilla {
- 
- namespace layers {
- class Layer;
- }
- 
- typedef void * EGLDisplay;
-@@ -57,16 +58,22 @@ public:
-     virtual void SetFBReleaseFd(int fd) = 0;
- 
-     /**
-      * Get FramebufferSurface AcquireFence's file descriptor
-      * AcquireFence will be signaled when a buffer's content is available.
-      */
-     virtual int GetPrevFBAcquireFd() = 0;
- 
-+#if ANDROID_VERSION >= 17
-+    typedef void (*OnEventControlCallbackFunc)(bool enabled);
-+    virtual nsecs_t getRefreshPeriod() const = 0;
-+    virtual void OnEventControl(OnEventControlCallbackFunc callback) = 0;
-+#endif
-+
-     float xdpi;
-     uint32_t surfaceformat;
- };
- 
- __attribute__ ((weak))
- GonkDisplay* GetGonkDisplay();
- 
- }
 diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
 --- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
 +++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
-@@ -40,16 +40,17 @@ static GonkDisplayJB* sGonkDisplay = nul
- GonkDisplayJB::GonkDisplayJB()
-     : mList(nullptr)
-     , mModule(nullptr)
-     , mFBModule(nullptr)
-     , mHwc(nullptr)
-     , mFBDevice(nullptr)
-     , mEnabledCallback(nullptr)
-     , mPowerModule(nullptr)
-+    , mEventControlCallbackFunc(nullptr)
- {
-     int err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &mFBModule);
-     ALOGW_IF(err, "%s module not found", GRALLOC_HARDWARE_MODULE_ID);
-     if (!err) {
-         err = framebuffer_open(mFBModule, &mFBDevice);
-         ALOGW_IF(err, "could not open framebuffer");
-     }
- 
-@@ -77,28 +78,30 @@ GonkDisplayJB::GonkDisplayJB()
-     }
- 
-     if (!err && mHwc) {
-         if (mFBDevice) {
-             framebuffer_close(mFBDevice);
-             mFBDevice = nullptr;
-         }
- 
--        int32_t values[3];
-+        int32_t values[4];
-         const uint32_t attrs[] = {
-             HWC_DISPLAY_WIDTH,
-             HWC_DISPLAY_HEIGHT,
-             HWC_DISPLAY_DPI_X,
-+            HWC_DISPLAY_VSYNC_PERIOD,
-             HWC_DISPLAY_NO_ATTRIBUTE
-         };
-         mHwc->getDisplayAttributes(mHwc, 0, 0, attrs, values);
- 
-         mWidth = values[0];
-         mHeight = values[1];
-         xdpi = values[2] / 1000.0f;
-+	 mRefreshPeriod = nsecs_t(values[3]);
-         surfaceformat = HAL_PIXEL_FORMAT_RGBA_8888;
-     }
- 
-     err = hw_get_module(POWER_HARDWARE_MODULE_ID,
-                                            (hw_module_t const**)&mPowerModule);
-     if (!err)
-         mPowerModule->init(mPowerModule);
-     ALOGW_IF(err, "Couldn't load %s module (%s)", POWER_HARDWARE_MODULE_ID, strerror(-err));
-@@ -150,36 +153,59 @@ GonkDisplayJB::~GonkDisplayJB()
- 
- ANativeWindow*
+@@ -152,34 +152,49 @@ ANativeWindow*
  GonkDisplayJB::GetNativeWindow()
  {
      return mSTClient.get();
  }
  
  void
-+GonkDisplayJB::OnEventControl(OnEventControlCallbackFunc callback)
-+{
-+    mEventControlCallbackFunc = callback;
-+}
-+
-+void
  GonkDisplayJB::SetEnabled(bool enabled)
  {
 -    if (enabled) {
@@ -581,12 +306,10 @@ diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/G
 +        if (sState != enabled)	 {
 +	     if (enabled) {
 +                mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, false);
-+	         if (mEventControlCallbackFunc)
-+		      mEventControlCallbackFunc(true);
++	         mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, true);
 +	     }
 +	     else {
-+	         if (mEventControlCallbackFunc)
-+		      mEventControlCallbackFunc(false);
++	         mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, false);
 +                mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, true);
 +	     }
 +        }
@@ -617,43 +340,3 @@ diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/G
  }
  
  void*
-diff --git a/widget/gonk/libdisplay/GonkDisplayJB.h b/widget/gonk/libdisplay/GonkDisplayJB.h
---- a/widget/gonk/libdisplay/GonkDisplayJB.h
-+++ b/widget/gonk/libdisplay/GonkDisplayJB.h
-@@ -49,27 +49,36 @@ public:
-     virtual void UpdateFBSurface(EGLDisplay dpy, EGLSurface sur);
- 
-     virtual void SetFBReleaseFd(int fd);
- 
-     virtual int GetPrevFBAcquireFd();
- 
-     bool Post(buffer_handle_t buf, int fence);
- 
-+#if ANDROID_VERSION >= 17
-+    virtual nsecs_t getRefreshPeriod() const {return mRefreshPeriod;}
-+    virtual void OnEventControl(OnEventControlCallbackFunc callback);
-+#endif
-+
- private:
-     hw_module_t const*        mModule;
-     hw_module_t const*        mFBModule;
-     hwc_composer_device_1_t*  mHwc;
-     framebuffer_device_t*     mFBDevice;
-     power_module_t*           mPowerModule;
-     android::sp<android::FramebufferSurface> mFBSurface;
-     android::sp<ANativeWindow> mSTClient;
-     android::sp<android::IGraphicBufferAlloc> mAlloc;
-     android::sp<android::GraphicBuffer> mBootAnimBuffer;
-     hwc_display_contents_1_t* mList;
-     uint32_t mWidth;
-     uint32_t mHeight;
-+    nsecs_t mRefreshPeriod;
-     OnEnabledCallbackType mEnabledCallback;
-+#if ANDROID_VERSION >= 17
-+    OnEventControlCallbackFunc mEventControlCallbackFunc;
-+#endif
- };
- 
- }
- 
- #endif /* GONKDISPLAYJB_H */

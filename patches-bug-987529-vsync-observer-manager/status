@@ -1,0 +1,5 @@
+c5c79f921fef4b7bb6add7e27c361222e82241bc:gfx_trace_makefile.patch
+e4a4d6219e94ad9513771b4b3e2d244752600b24:enable-systrace.patch
+8cfe066598863db89f615918dd3f50f7d9a61832:timer.patch
+bfd2a8dab7c907a0ac3737472b87c1f8ab12e5da:hwc_send_vsync.patch
+60cac491a8969be9aa403a0926101eef206e65e1:vsync_manager.patch

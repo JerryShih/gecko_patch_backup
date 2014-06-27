@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent c52acd35580f702da5f5e6a6b4ed2804ff5c386b
+# Parent 9d2bd41141f14b4186888a98e2bd8d82f2bc9a53
 # User Jerry Shih <hshih@mozilla.com>
 check visibilityChange in PresShell
 
@@ -164,10 +164,10 @@ diff --git a/view/src/nsViewManager.cpp b/view/src/nsViewManager.cpp
 +
 +  if (mPresShell) {
 +    isVisible = mPresShell->IsVisible();
-+    nsIDocument* document = mPresShell->GetDocument();
-+    if (document) {
-+      isHidden = document->Hidden();
-+    }
++    //nsIDocument* document = mPresShell->GetDocument();
++    //if (document) {
++    //  isHidden = document->Hidden();
++    //}
 +  }
 +
    if (mRootView) {

@@ -1,0 +1,148 @@
+# HG changeset patch
+# Parent 7d491f2685e706a3b111d267fe937fcfa3dcf015
+# User Jerry Shih <hshih@mozilla.com>
+debug event passing time
+
+diff --git a/gfx/layers/VsyncDispatcher.cpp b/gfx/layers/VsyncDispatcher.cpp
+--- a/gfx/layers/VsyncDispatcher.cpp
++++ b/gfx/layers/VsyncDispatcher.cpp
+@@ -3,16 +3,18 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "VsyncDispatcher.h"
+ #include "mozilla/layers/VsyncEventParent.h"
+ #include "mozilla/layers/VsyncEventChild.h"
+ #include "mozilla/layers/CompositorParent.h"
++#include "GeckoProfiler.h"
++#include "ElapsedTimer.h"
+ #include "mozilla/StaticPtr.h"
+ #include "nsThreadUtils.h"
+ #include "nsRefreshDriver.h"
+ #ifdef MOZ_WIDGET_GONK
+ #include "nsAppShell.h"
+ #endif
+ 
+ #include "base/thread.h"
+@@ -259,28 +261,36 @@ VsyncDispatcher::NotifyInputEventProcess
+ //  //2. compose
+ //  Compose(VsyncData(0));
+ //#endif
+ }
+ 
+ void
+ VsyncDispatcher::DispatchVsync(const VsyncData& aVsyncData)
+ {
++  PROFILER_LABEL("VsyncDispatcher", "DispatchVsync", js::ProfileEntry::Category::GRAPHICS);
++
+ #ifdef ENABLE_INPUTDISPATCHER_NOTIFY
+   //1. input
+   if (mInputDispatcher) {
++    //static StatisticScopeElapsedTimer timer("bignose VsyncDispatcher");
++    //StatisticScopeElapsedTimerHelper timer_helper(timer);
++    //timer_helper.Start();
++
+     nsCOMPtr<nsIRunnable> mainThreadInputTask =
+         NS_NewRunnableMethodWithArg<const VsyncData&>(this,
+                                                       &VsyncDispatcher::InputEventDispatch,
+                                                       aVsyncData);
+     //block vsync event passing until main thread input module updated
+     MonitorAutoLock inputLock(mInputMonitor);
+ 
+     NS_DispatchToMainThread(mainThreadInputTask);
+     inputLock.Wait(PR_MillisecondsToInterval(4));
++
++    //timer_helper.End();
+   }
+ #endif
+ 
+ #ifdef ENABLE_COMPOSITOR_NOTIFY
+   //2. compose
+   Compose(aVsyncData);
+ #endif
+ 
+diff --git a/layout/style/nsStyleContext.cpp b/layout/style/nsStyleContext.cpp
+--- a/layout/style/nsStyleContext.cpp
++++ b/layout/style/nsStyleContext.cpp
+@@ -401,18 +401,18 @@ nsStyleContext::ApplyStyleFixups(bool aS
+   // Compute User Interface style, to trigger loads of cursors
+   StyleUserInterface();
+ }
+ 
+ nsChangeHint
+ nsStyleContext::CalcStyleDifference(nsStyleContext* aOther,
+                                     nsChangeHint aParentHintsNotHandledForDescendants)
+ {
+-  PROFILER_LABEL("nsStyleContext", "CalcStyleDifference",
+-    js::ProfileEntry::Category::CSS);
++  //PROFILER_LABEL("nsStyleContext", "CalcStyleDifference",
++  //  js::ProfileEntry::Category::CSS);
+ 
+   NS_ABORT_IF_FALSE(NS_IsHintSubset(aParentHintsNotHandledForDescendants,
+                                     nsChangeHint_Hints_NotHandledForDescendants),
+                     "caller is passing inherited hints, but shouldn't be");
+ 
+   nsChangeHint hint = NS_STYLE_HINT_NONE;
+   NS_ENSURE_TRUE(aOther, hint);
+   // We must always ensure that we populate the structs on the new style
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -61,16 +61,17 @@
+ 
+ #include "android/log.h"
+ #include "libui/EventHub.h"
+ #include "libui/InputReader.h"
+ #include "libui/InputDispatcher.h"
+ #include "cutils/properties.h"
+ #include "mozilla/Preferences.h"
+ 
++#include "ElapsedTimer.h"
+ #include "VsyncDispatcher.h"
+ 
+ #ifdef MOZ_NUWA_PROCESS
+ #include "ipc/Nuwa.h"
+ #endif
+ 
+ #include "mozilla/Preferences.h"
+ #include "GeckoProfiler.h"
+@@ -748,29 +749,38 @@ isExpired(const UserInputData& data)
+ {
+     uint64_t timeNowMs =
+         nanosecsToMillisecs(systemTime(SYSTEM_TIME_MONOTONIC));
+     return (timeNowMs - data.timeMs) > kInputExpirationThresholdMs;
+ }
+ 
+ void GeckoInputDispatcher::dispatchPendingEvents()
+ {
++    PROFILER_LABEL("GeckoInputDispatcher", "dispatchPendingEvents", js::ProfileEntry::Category::GRAPHICS);
++
++    //static StatisticScopeElapsedTimer timer("bignose GeckoInputDispatcher");
++    //StatisticScopeElapsedTimerHelper timer_helper(timer);
++
++    //timer_helper.Start();
++
+     // Touch up recieve, this stroke is dead.
+     if (!mTouchUpSamples.empty()) {
+         sendTouchOrMouseEvent(mTouchUpSamples[0]);
+         VsyncDispatcher::GetInstance()->RegisterInputDispatcher(false);
+         // Discard all pending events.
+         mTouchMoveSamples.clear();
+         mTouchUpSamples.clear();
+     }
+     // Receive mouse move events.
+     else if (!mTouchMoveSamples.empty()) {
+         UserInputData sample = resample();
+         sendTouchOrMouseEvent(sample);
+     }
++
++    //timer_helper.End();
+ }
+ 
+ UserInputData
+ GeckoInputDispatcher::resample()
+ {
+     // Three conditions
+     // 1. No touch move event - if this happens, either vsync event is too quick 
+     //     or touch event is too slow. Not a normal case.

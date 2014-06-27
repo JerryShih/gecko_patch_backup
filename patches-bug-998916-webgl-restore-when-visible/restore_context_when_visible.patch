@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent 117e96c403f5cd18bd2eae113dc330572ed21afb
+# Parent 366b5c0c02d3eec99cc0f03c053622ad19a170de
 # User Jerry Shih <hshih@mozilla.com>
 Bug 998916 - part 2: restore webgl context when visible
 
@@ -24,7 +24,7 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
  #include "mozilla/EnumeratedArrayCycleCollection.h"
  
  #include "Layers.h"
-@@ -66,38 +67,154 @@
+@@ -66,43 +67,150 @@
  #endif
  
  using namespace mozilla;
@@ -36,16 +36,14 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +WebGLObserver::WebGLObserver(WebGLContext* aContext)
 +    : mContext(aContext)
 +{
-+
 +}
 +
 +WebGLObserver::~WebGLObserver()
 +{
-+
 +}
 +
 +void
-+WebGLObserver::UnregisterObserver()
++WebGLObserver::Destroy()
 +{
 +    UnregisterMemoryPressureEvent();
 +    UnregisterVisibilityChangeEvent();
@@ -61,8 +59,8 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +
 +    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
 +
-+    NS_WARN_IF_FALSE(canvasElement,
-+        "WebGL HTMLCanvasElement is null. Can't register visibilitychange event");
++    MOZ_ASSERT(canvasElement);
++
 +    if (canvasElement) {
 +        nsIDocument* document = canvasElement->OwnerDoc();
 +
@@ -82,8 +80,6 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +
 +    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
 +
-+    NS_WARN_IF_FALSE(canvasElement,
-+        "WebGL HTMLCanvasElement is null. Can't unregister visibilitychange event");
 +    if (canvasElement) {
 +        nsIDocument* document = canvasElement->OwnerDoc();
 +
@@ -103,8 +99,8 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +    nsCOMPtr<nsIObserverService> observerService =
 +        mozilla::services::GetObserverService();
 +
-+    NS_WARN_IF_FALSE(observerService,
-+        "WebGL ObserverService is null. Can't register memory-pressure event");
++    MOZ_ASSERT(observerService);
++
 +    if (observerService) {
 +        observerService->AddObserver(this, "memory-pressure", false);
 +    }
@@ -120,8 +116,8 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +    nsCOMPtr<nsIObserverService> observerService =
 +        mozilla::services::GetObserverService();
 +
-+    NS_WARN_IF_FALSE(observerService,
-+        "WebGL ObserverService is null. Can't unregister memory-pressure event");
++    MOZ_ASSERT(observerService);
++
 +    if (observerService) {
 +        observerService->RemoveObserver(this, "memory-pressure");
 +    }
@@ -136,43 +132,43 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +                       const char16_t* aSomeData)
  {
 -    if (strcmp(aTopic, "memory-pressure"))
-+    if (strcmp(aTopic, "memory-pressure")) {
++    if (!mContext || strcmp(aTopic, "memory-pressure")) {
          return NS_OK;
--    bool wantToLoseContext = true;
 +    }
-+
+ 
+-    bool wantToLoseContext = true;
 +    bool wantToLoseContext = mContext->mLoseContextOnMemoryPressure;
-+
+ 
      if (!mContext->mCanLoseContextInForeground &&
          ProcessPriorityManager::CurrentProcessIsForeground())
      {
          wantToLoseContext = false;
 -    } else if (!nsCRT::strcmp(aSomeData,
--                            MOZ_UTF16("heap-minimize")))
+-                              MOZ_UTF16("heap-minimize")))
 -    {
 -        wantToLoseContext = mContext->mLoseContextOnHeapMinimize;
      }
-+
+ 
      if (wantToLoseContext) {
          mContext->ForceLoseContext();
      }
-+
+ 
      return NS_OK;
  }
-+
+ 
 +NS_IMETHODIMP
 +WebGLObserver::HandleEvent(nsIDOMEvent* aEvent)
 +{
 +    nsAutoString type;
 +    aEvent->GetType(type);
-+    if (!type.EqualsLiteral("visibilitychange")) {
++    if (!mContext || !type.EqualsLiteral("visibilitychange")) {
 +        return NS_OK;
 +    }
 +
 +    HTMLCanvasElement* canvasElement = mContext->GetCanvas();
 +
-+    NS_WARN_IF_FALSE(canvasElement,
-+        "WebGL HTMLCanvasElement is null. Can't restore");
++    MOZ_ASSERT(canvasElement);
++
 +    if (canvasElement && !canvasElement->OwnerDoc()->Hidden()) {
 +        mContext->ForceRestoreContext();
 +    }
@@ -188,9 +184,9 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
      // Set default alpha state based on preference.
      if (Preferences::GetBool("webgl.default-no-alpha", false))
          alpha = false;
-@@ -164,59 +281,57 @@ WebGLContext::WebGLContext()
-     mPixelStoreUnpackAlignment = 4;
+@@ -172,60 +280,58 @@ WebGLContext::WebGLContext()
      WebGLMemoryTracker::AddWebGLContext(this);
+ 
      mAllowContextRestore = true;
      mLastLossWasSimulated = false;
      mContextLossTimerRunning = false;
@@ -201,6 +197,7 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 +    mLoseContextOnMemoryPressure = false;
      mCanLoseContextInForeground = true;
 +    mRestoreWhenVisible = false;
+ 
      mAlreadyGeneratedWarnings = 0;
      mAlreadyWarnedAboutFakeVertexAttrib0 = false;
      mAlreadyWarnedAboutViewportLargerThanDest = false;
@@ -227,7 +224,7 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
  
  WebGLContext::~WebGLContext()
  {
-+    mContextObserver->UnregisterObserver();
++    mContextObserver->Destroy();
 +
      DestroyResourcesAndContext();
      WebGLMemoryTracker::RemoveWebGLContext(this);
@@ -256,7 +253,7 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
  
      mBound2DTextures.Clear();
      mBoundCubeMapTextures.Clear();
-@@ -1331,16 +1446,20 @@ WebGLContext::UpdateContextLossStatus()
+@@ -1276,16 +1382,20 @@ WebGLContext::UpdateContextLossStatus()
          if (!mAllowContextRestore)
              return;
  
@@ -277,10 +274,17 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
          // Context is lost, but we should try to restore it.
  
          if (!mAllowContextRestore) {
-@@ -1370,32 +1489,39 @@ WebGLContext::UpdateContextLossStatus()
+@@ -1309,38 +1419,46 @@ WebGLContext::UpdateContextLossStatus()
+                                              true,
+                                              true);
+         mEmitContextLostErrorOnce = true;
+         return;
+     }
+ }
  
  void
- WebGLContext::ForceLoseContext()
+-WebGLContext::ForceLoseContext()
++WebGLContext::ForceLoseContext(bool simulateLosing)
  {
      printf_stderr("WebGL(%p)::ForceLoseContext\n", this);
      MOZ_ASSERT(!IsContextLost());
@@ -290,13 +294,14 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
  
      // Burn it all!
      DestroyResourcesAndContext();
- 
++    mLastLossWasSimulated = simulateLosing;
++
 +    // Register visibility change observer to defer the context restoring.
 +    // Restore the context when the app is visible.
 +    if (mRestoreWhenVisible && !mLastLossWasSimulated) {
 +        mContextObserver->RegisterVisibilityChangeEvent();
 +    }
-+
+ 
      // Queue up a task, since we know the status changed.
      EnqueueUpdateContextLossStatus();
  }
@@ -321,7 +326,7 @@ diff --git a/content/canvas/src/WebGLContext.cpp b/content/canvas/src/WebGLConte
 diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext.h
 --- a/content/canvas/src/WebGLContext.h
 +++ b/content/canvas/src/WebGLContext.h
-@@ -15,16 +15,17 @@
+@@ -16,16 +16,17 @@
  #include "nsTArray.h"
  #include "nsCycleCollectionNoteChild.h"
  
@@ -339,7 +344,7 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
  #include "mozilla/LinkedList.h"
  #include "mozilla/CheckedInt.h"
  #include "mozilla/Scoped.h"
-@@ -54,17 +55,17 @@ class nsIDocShell;
+@@ -55,17 +56,17 @@ class nsIDocShell;
  #define MINVALUE_GL_MAX_VARYING_VECTORS               8     // Page 164
  #define MINVALUE_GL_MAX_TEXTURE_IMAGE_UNITS           8     // Page 164
  #define MINVALUE_GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS    0     // Page 164
@@ -354,11 +359,11 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
  class WebGLActiveInfo;
  class WebGLExtensionBase;
  class WebGLBuffer;
- class WebGLVertexAttribData;
+ struct WebGLVertexAttribData;
  class WebGLShader;
  class WebGLProgram;
  class WebGLQuery;
-@@ -125,17 +126,17 @@ class WebGLContext :
+@@ -141,17 +142,17 @@ class WebGLContext :
      friend class WebGLExtensionCompressedTextureATC;
      friend class WebGLExtensionCompressedTextureETC1;
      friend class WebGLExtensionCompressedTexturePVRTC;
@@ -377,7 +382,7 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
          CONTEXT_LOST_WEBGL = 0x9242,
          UNPACK_COLORSPACE_CONVERSION_WEBGL = 0x9243,
          BROWSER_DEFAULT_WEBGL = 0x9244,
-@@ -832,18 +833,19 @@ protected:
+@@ -912,18 +913,19 @@ protected:
      WebGLContextOptions mOptions;
  
      bool mInvalidated;
@@ -398,7 +403,26 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
      void DeleteWebGLObjectsArray(nsTArray<WebGLObjectType>& array);
  
      GLuint mActiveTexture;
-@@ -1180,17 +1182,17 @@ protected:
+@@ -1157,17 +1159,17 @@ protected:
+                              GLenum internalFormat,
+                              GLsizei width,
+                              GLsizei height,
+                              GLint border,
+                              GLenum format,
+                              GLenum type,
+                              const GLvoid *data);
+ 
+-    void ForceLoseContext();
++    void ForceLoseContext(bool simulateLosing = false);
+     void ForceRestoreContext();
+ 
+     nsTArray<WebGLRefPtr<WebGLTexture> > mBound2DTextures;
+     nsTArray<WebGLRefPtr<WebGLTexture> > mBoundCubeMapTextures;
+ 
+     WebGLRefPtr<WebGLProgram> mCurrentProgram;
+ 
+     uint32_t mMaxFramebufferColorAttachments;
+@@ -1268,17 +1270,17 @@ protected:
      // see bug 713305. This RAII helper guarantees that we're on the discrete GPU, during its lifetime
      // Debouncing note: we don't want to switch GPUs too frequently, so try to not create and destroy
      // these objects at high frequency. Having WebGLContext's hold one such object seems fine,
@@ -417,7 +441,7 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
  
      friend class WebGLTexture;
      friend class WebGLFramebuffer;
-@@ -1276,26 +1278,36 @@ WebGLContext::ValidateObject(const char*
+@@ -1366,26 +1368,36 @@ WebGLContext::ValidateObject(const char*
      if (!aObject) {
          ErrorInvalidValue("%s: null object passed as argument", info);
          return false;
@@ -445,7 +469,7 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
 +    WebGLObserver(WebGLContext* aContext);
 +    ~WebGLObserver();
 +
-+    void UnregisterObserver();
++    void Destroy();
 +
 +    void RegisterVisibilityChangeEvent();
 +    void UnregisterVisibilityChangeEvent();
@@ -464,7 +488,7 @@ diff --git a/content/canvas/src/WebGLContext.h b/content/canvas/src/WebGLContext
 diff --git a/content/canvas/src/WebGLContextGL.cpp b/content/canvas/src/WebGLContextGL.cpp
 --- a/content/canvas/src/WebGLContextGL.cpp
 +++ b/content/canvas/src/WebGLContextGL.cpp
-@@ -3828,18 +3828,18 @@ WebGLContext::TexSubImage2D(GLenum targe
+@@ -3873,18 +3873,17 @@ WebGLContext::TexSubImage2D(GLenum targe
  }
  
  void
@@ -473,9 +497,9 @@ diff --git a/content/canvas/src/WebGLContextGL.cpp b/content/canvas/src/WebGLCon
      if (IsContextLost())
          return ErrorInvalidOperation("loseContext: Context is already lost.");
  
-+    mLastLossWasSimulated = true;
-     ForceLoseContext();
+-    ForceLoseContext();
 -    mLastLossWasSimulated = true;
++    ForceLoseContext(true);
  }
  
  void
@@ -501,7 +525,7 @@ diff --git a/content/canvas/src/WebGLContextReporter.cpp b/content/canvas/src/We
  
  NS_IMETHODIMP
  WebGLMemoryTracker::CollectReports(nsIHandleReportCallback* aHandleReport,
-                                    nsISupports* aData)
+                                    nsISupports* aData, bool aAnonymize)
  {
  #define REPORT(_path, _kind, _units, _amount, _desc)                          \
      do {                                                                      \
@@ -509,7 +533,7 @@ diff --git a/content/canvas/src/WebGLContextReporter.cpp b/content/canvas/src/We
 diff --git a/content/canvas/src/WebGLContextValidate.cpp b/content/canvas/src/WebGLContextValidate.cpp
 --- a/content/canvas/src/WebGLContextValidate.cpp
 +++ b/content/canvas/src/WebGLContextValidate.cpp
-@@ -1615,18 +1615,19 @@ WebGLContext::InitAndValidateGL()
+@@ -1548,18 +1548,19 @@ WebGLContext::InitAndValidateGL()
      GLenum error = gl->fGetError();
      if (error != LOCAL_GL_NO_ERROR) {
          GenerateWarning("GL error 0x%x occurred during OpenGL context initialization, before WebGL initialization!", error);
@@ -530,13 +554,13 @@ diff --git a/content/canvas/src/WebGLContextValidate.cpp b/content/canvas/src/We
      // These are the default values, see 6.2 State tables in the
      // OpenGL ES 2.0.25 spec.
      mColorWriteMask[0] = 1;
-@@ -1817,24 +1818,18 @@ WebGLContext::InitAndValidateGL()
- 
-     if (IsWebGL2() &&
-         !InitWebGL2())
-     {
-         // Todo: Bug 898404: Only allow WebGL2 on GL>=3.0 on desktop GL.
+@@ -1773,24 +1774,18 @@ WebGLContext::InitAndValidateGL()
          return false;
+     }
+ 
+     // Default value for all disabled vertex attributes is [0, 0, 0, 1]
+     for (int32_t index = 0; index < mGLMaxVertexAttribs; ++index) {
+         VertexAttrib4f(index, 0, 0, 0, 1);
      }
  
 -    mMemoryPressureObserver
@@ -549,7 +573,7 @@ diff --git a/content/canvas/src/WebGLContextValidate.cpp b/content/canvas/src/We
 -                                     false);
 -    }
 -
-     mDefaultVertexArray = new WebGLVertexArray(this);
+     mDefaultVertexArray = WebGLVertexArray::Create(this);
      mDefaultVertexArray->mAttribs.SetLength(mGLMaxVertexAttribs);
      mBoundVertexArray = mDefaultVertexArray;
  
@@ -562,7 +586,7 @@ diff --git a/content/canvas/src/WebGLContextValidate.cpp b/content/canvas/src/We
 diff --git a/modules/libpref/src/init/all.js b/modules/libpref/src/init/all.js
 --- a/modules/libpref/src/init/all.js
 +++ b/modules/libpref/src/init/all.js
-@@ -3632,18 +3632,19 @@ pref("webgl.disabled", false);
+@@ -3704,18 +3704,19 @@ pref("webgl.disabled", false);
  pref("webgl.shader_validator", true);
  pref("webgl.prefer-native-gl", false);
  pref("webgl.min_capability_mode", false);

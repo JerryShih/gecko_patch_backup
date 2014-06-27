@@ -1,0 +1,5 @@
+# HG changeset patch
+# Parent e86b84998b186642cb162adb265af423f7f4555a
+# User Jerry Shih <hshih@mozilla.com>
+try: -b do -p linux64-valgrind -u reftest,reftest-ipc,reftest-no-accel,crashtest,mochitest-1,mochitest-2,mochitest-bc,mochitest-dt,mochitest-o,mochitest-2,mochitest-4,mochitest-gl -t none
+

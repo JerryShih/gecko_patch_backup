@@ -1,0 +1,121 @@
+# HG changeset patch
+# Parent 641d1927ed91426401cebbe9e791b01df2792688
+# User Jerry Shih <hshih@mozilla.com>
+test input event
+
+
+diff --git a/gfx/layers/opengl/CompositorOGL.cpp b/gfx/layers/opengl/CompositorOGL.cpp
+--- a/gfx/layers/opengl/CompositorOGL.cpp
++++ b/gfx/layers/opengl/CompositorOGL.cpp
+@@ -1306,19 +1306,29 @@ CompositorOGL::EndFrame()
+   }
+ 
+   mCurrentRenderTarget = nullptr;
+ 
+   if (mTexturePool) {
+     mTexturePool->EndFrame();
+   }
+ 
++  {
++  PROFILER_LABEL("CompositorOGL", "EndFrame-swap",
++    js::ProfileEntry::Category::GRAPHICS);
++
+   mGLContext->SwapBuffers();
+   mGLContext->fBindBuffer(LOCAL_GL_ARRAY_BUFFER, 0);
+ 
++  }
++
++  {
++  PROFILER_LABEL("CompositorOGL", "EndFrame-Unbind",
++    js::ProfileEntry::Category::GRAPHICS);
++
+   // Unbind all textures
+   mGLContext->fActiveTexture(LOCAL_GL_TEXTURE0);
+   mGLContext->fBindTexture(LOCAL_GL_TEXTURE_2D, 0);
+   if (!mGLContext->IsGLES()) {
+     mGLContext->fBindTexture(LOCAL_GL_TEXTURE_RECTANGLE_ARB, 0);
+   }
+ 
+   mGLContext->fActiveTexture(LOCAL_GL_TEXTURE1);
+@@ -1327,16 +1337,18 @@ CompositorOGL::EndFrame()
+     mGLContext->fBindTexture(LOCAL_GL_TEXTURE_RECTANGLE_ARB, 0);
+   }
+ 
+   mGLContext->fActiveTexture(LOCAL_GL_TEXTURE2);
+   mGLContext->fBindTexture(LOCAL_GL_TEXTURE_2D, 0);
+   if (!mGLContext->IsGLES()) {
+     mGLContext->fBindTexture(LOCAL_GL_TEXTURE_RECTANGLE_ARB, 0);
+   }
++
++  }
+ }
+ 
+ #if defined(MOZ_WIDGET_GONK) && ANDROID_VERSION >= 17
+ void
+ CompositorOGL::SetFBAcquireFence(Layer* aLayer)
+ {
+   // OpenGL does not provide ReleaseFence for rendering.
+   // Instead use FBAcquireFence as layer buffer's ReleaseFence
+diff --git a/widget/gonk/libui/InputListener.cpp b/widget/gonk/libui/InputListener.cpp
+--- a/widget/gonk/libui/InputListener.cpp
++++ b/widget/gonk/libui/InputListener.cpp
+@@ -75,16 +75,35 @@ NotifyMotionArgs::NotifyMotionArgs(nsecs
+         eventTime(eventTime), deviceId(deviceId), source(source), policyFlags(policyFlags),
+         action(action), flags(flags), metaState(metaState), buttonState(buttonState),
+         edgeFlags(edgeFlags), displayId(displayId), pointerCount(pointerCount),
+         xPrecision(xPrecision), yPrecision(yPrecision), downTime(downTime) {
+     for (uint32_t i = 0; i < pointerCount; i++) {
+         this->pointerProperties[i].copyFrom(pointerProperties[i]);
+         this->pointerCoords[i].copyFrom(pointerCoords[i]);
+     }
++
++    /*
++    ALOGE("bignose NotifyMotionArgs start");
++    ALOGE("  bignose NotifyMotionArgs: eventTime:%lld, deviceId:%d, source:%d, policyFlags:%d",
++        eventTime,deviceId,source,policyFlags);
++    ALOGE("  bignose NotifyMotionArgs: action:%d, flags:%d, metaState:%d, buttonState:%d",
++        action,flags,metaState,buttonState);
++    ALOGE("  bignose NotifyMotionArgs: edgeFlags:%d, displayId:%d, pointerCount:%d",
++        edgeFlags,displayId,pointerCount);
++    for (uint32_t i = 0; i < pointerCount; i++) {
++      ALOGE("  bignose NotifyMotionArgs: pointerProperties:%d",i);
++      ALOGE("    bignose NotifyMotionArgs: id:%d,toolType:%d",this->pointerProperties[i].id,this->pointerProperties[i].toolType);
++
++      //this->pointerCoords[i].copyFrom(pointerCoords[i]);
++    }
++    ALOGE("  bignose NotifyMotionArgs: xPrecision:%f,yPrecision:%f",xPrecision,yPrecision);
++    ALOGE("  bignose NotifyMotionArgs: downTime:%lld",downTime);
++    ALOGE("bignose NotifyMotionArgs end");
++    */
+ }
+ 
+ NotifyMotionArgs::NotifyMotionArgs(const NotifyMotionArgs& other) :
+         eventTime(other.eventTime), deviceId(other.deviceId), source(other.source),
+         policyFlags(other.policyFlags),
+         action(other.action), flags(other.flags),
+         metaState(other.metaState), buttonState(other.buttonState),
+         edgeFlags(other.edgeFlags), displayId(other.displayId),
+diff --git a/widget/gonk/libui/InputReader.cpp b/widget/gonk/libui/InputReader.cpp
+--- a/widget/gonk/libui/InputReader.cpp
++++ b/widget/gonk/libui/InputReader.cpp
+@@ -304,16 +304,20 @@ void InputReader::loopOnce() {
+     // resulting in a deadlock.  This situation is actually quite plausible because the
+     // listener is actually the input dispatcher, which calls into the window manager,
+     // which occasionally calls into the input reader.
+     mQueuedListener->flush();
+ }
+ 
+ void InputReader::processEventsLocked(const RawEvent* rawEvents, size_t count) {
+     for (const RawEvent* rawEvent = rawEvents; count;) {
++        /*
++        ALOGE("bignose raw event, when:%lld ,deviceid:%d, type:%d, code:%d, value:%d",
++            rawEvent->when,rawEvent->deviceId,rawEvent->type,rawEvent->code,rawEvent->value);
++        */
+         int32_t type = rawEvent->type;
+         size_t batchSize = 1;
+         if (type < EventHubInterface::FIRST_SYNTHETIC_EVENT) {
+             int32_t deviceId = rawEvent->deviceId;
+             while (batchSize < count) {
+                 if (rawEvent[batchSize].type >= EventHubInterface::FIRST_SYNTHETIC_EVENT
+                         || rawEvent[batchSize].deviceId != deviceId) {
+                     break;

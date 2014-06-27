@@ -1,4 +1,8 @@
+restore_context_when_visible.patch
+try_linux
+try_push
 gfx_trace_makefile.patch
 jb-4.2.2.patch
-fix_webgl_loseContext_ext.patch
+fixup-context-loss.patch
 restore_when_visible.patch
+fix_webgl_loseContext_ext.patch

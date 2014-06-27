@@ -1,0 +1,154 @@
+# HG changeset patch
+# Parent 509dc519d47886cbd89b80ac3e248b7b853dcfc8
+# User Jerry Shih <hshih@mozilla.com>
+generate auto move touch event
+
+
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -648,16 +648,18 @@ public:
+     void dispatchPendingEvents();
+ 
+ protected:
+     virtual ~GeckoInputDispatcher() {}
+     void sendTouchOrMouseEvent(UserInputData& data);
+     UserInputData resample();
+ 
+ private:
++    void GenerateTestInputEvent(const NotifyMotionArgs* args);
++
+     // mQueueLock should generally be locked while using mEventQueue.
+     // UserInputData is pushed on on the InputReaderThread and
+     // popped and dispatched on the main thread.
+     mozilla::Mutex mQueueLock;
+     std::queue<UserInputData> mEventQueue;
+     sp<EventHub> mEventHub;
+ 
+     int mTouchDownCount;
+@@ -784,16 +786,106 @@ GeckoInputDispatcher::resample()
+     }
+     mTouchMoveSamples.clear();
+ 
+     // Push the last move event back to pending buffer for the next vsync notification.
+     mTouchMoveSamples.push_back(end);
+     return sample;
+ }
+ 
++void GeckoInputDispatcher::GenerateTestInputEvent(const NotifyMotionArgs* args)
++{
++  char propValue[PROPERTY_VALUE_MAX];
++  property_get("debug.touchevent.x", propValue, "0");
++  bool isTestx = (atoi(propValue) == 1) ? true : false;
++  property_get("debug.touchevent.y", propValue, "0");
++  bool isTesty = (atoi(propValue) == 1) ? true : false;
++
++  static float xTrans = 384;
++  static float yTrans = 400;
++
++  bool gincreasex = true;
++  bool gincreasey = true;
++
++  while (isTestx || isTesty) {
++    ATRACE_CALL();
++
++    property_get("debug.touchevent.x", propValue, "0");
++    isTestx = (atoi(propValue) == 1) ? true : false;
++    property_get("debug.touchevent.y", propValue, "0");
++    isTesty = (atoi(propValue) == 1) ? true : false;
++
++    if (isTestx) {
++      if (xTrans > 568)
++        gincreasex = false;
++
++      if (xTrans < 200)
++        gincreasex = true;
++    } else
++      xTrans = 384;
++
++    if (isTesty) {
++      if (yTrans > 600)
++        gincreasey = false;
++
++      if (yTrans < 200)
++        gincreasey = true;
++    } else
++      yTrans = 400;
++
++    UserInputData data;
++    // hack
++    data.timeMs = nanosecsToMillisecs(systemTime());
++    data.type = UserInputData::MOTION_DATA;
++    data.action = args->action;
++    data.flags = args->flags;
++    data.metaState = args->metaState;
++    data.deviceId = args->deviceId;
++    MOZ_ASSERT(args->pointerCount <= MAX_POINTERS);
++    data.motion.touchCount = args->pointerCount;
++    for (uint32_t i = 0; i < args->pointerCount; ++i) {
++      ::Touch& touch = data.motion.touches[i];
++      touch.id = args->pointerProperties[i].id;
++      memcpy(&touch.coords, &args->pointerCoords[i],
++          sizeof(*args->pointerCoords));
++      // hack
++      touch.coords.setAxisValue(AMOTION_EVENT_AXIS_X, xTrans);
++      touch.coords.setAxisValue(AMOTION_EVENT_AXIS_Y, yTrans);
++    }
++    /*
++     const ::Touch& aPoint = data.motion.touches[0];
++     uint64_t vsync;
++     VsyncInfo aVsyncInfo;
++     GetCurrentVsyncInfo(&aVsyncInfo);
++     vsync = ns2ms(aVsyncInfo.timestamp());
++     */
++    {
++      MutexAutoLock lock(mQueueLock);
++      //LOG("[Butter-Resample] notifyMotionTest %f %f msg:%d %llu %llu %llu", aPoint.coords.getX(), aPoint.coords.getY(), (data.action & AMOTION_EVENT_ACTION_MASK), data.timeMs, vsync, ns2ms(systemTime()));
++      mEventQueue.push(data);
++    }
++    gAppShell->NotifyNativeEvent();
++
++    if (isTestx) {
++      if (gincreasex)
++        xTrans += 4;
++      else
++        xTrans -= 4;
++    }
++
++    if (isTesty) {
++      if (gincreasey)
++        yTrans += 4;
++      else
++        yTrans -= 4;
++    }
++    usleep(10 * 1000);
++  }
++}
++
+ void GeckoInputDispatcher::sendTouchOrMouseEvent(UserInputData& data)
+ {
+     bool captured;
+     nsEventStatus status = sendTouchEvent(data, &captured);
+     if (captured)
+         return;
+     sendMouseEvent(data, status != nsEventStatus_eConsumeNoDefault);
+ }
+@@ -946,16 +1038,18 @@ GeckoInputDispatcher::notifyKey(const No
+     }
+     gAppShell->NotifyNativeEvent();
+ }
+ 
+ 
+ void
+ GeckoInputDispatcher::notifyMotion(const NotifyMotionArgs* args)
+ {
++    GenerateTestInputEvent(args);
++
+     UserInputData data;
+     data.timeMs = nanosecsToMillisecs(args->eventTime);
+     data.type = UserInputData::MOTION_DATA;
+     data.action = args->action;
+     data.flags = args->flags;
+     data.metaState = args->metaState;
+     data.deviceId = args->deviceId;
+     MOZ_ASSERT(args->pointerCount <= MAX_POINTERS);

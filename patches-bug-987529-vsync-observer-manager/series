@@ -1,5 +1,11 @@
 gfx_trace_makefile.patch
-jb-4.2.2.patch
-0004-enable-systrace.patch
-vsync_manager.patch
+enable-systrace.patch
+timer.patch
 hwc_send_vsync.patch
+vsync_manager.patch
+vsync_protocol.patch
+delay_log.patch
+auto_move_input_event.patch
+vsync_performance_debug.patch
+jb-4.2.2.patch
+test_input_event.patch
