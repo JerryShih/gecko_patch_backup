@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent ee1f7fa7ff46520ed385a05eedd8aa27c4492492
+# Parent bfd2a8dab7c907a0ac3737472b87c1f8ab12e5da
 # User Jerry Shih <hshih@mozilla.com>
 add VsyncDispatcher to send vsync event to other module
 
@@ -7,7 +7,7 @@ diff --git a/gfx/layers/VsyncDispatcher.cpp b/gfx/layers/VsyncDispatcher.cpp
 new file mode 100644
 --- /dev/null
 +++ b/gfx/layers/VsyncDispatcher.cpp
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,446 @@
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set sw=2 ts=8 et ft=cpp : */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -129,16 +129,19 @@ new file mode 100644
 +}
 +
 +VsyncDispatcher::VsyncDispatcher()
-+  : mInputDispatcher(false)
++  : mHasInputDispatcher(false)
 +  , mEnableVsyncNotification(false)
 +  , mInputMonitor("vsync main thread input monitor")
++  , mCompositorListMutex("compositor list mutex")
++  , mRefreshDriverListMutex("refresh driver list mutex")
++  , mVsyncEventParentListMutex("vsync parent list mutex")
++  , mHasInputDispatcherMutex("input dispatcher flag mutex")
++  , mVsyncListenerMutex("vsync listener list mutex")
 +{
-+
 +}
 +
 +VsyncDispatcher::~VsyncDispatcher()
 +{
-+
 +}
 +
 +int
@@ -149,7 +152,7 @@ new file mode 100644
 +   count += mCompositorList.Length();
 +   count += mRefreshDriverList.Length();
 +   count += mVsyncEventParentList.Length();
-+   count += (mInputDispatcher ? 1 : 0);
++   count += (mHasInputDispatcher ? 1 : 0);
 +
 +   return count;
 +}
@@ -182,68 +185,161 @@ new file mode 100644
 +}
 +
 +void
-+VsyncDispatcher::RegisterInputDispatcher(bool aReg)
++VsyncDispatcher::RegisterInputDispatcher()
 +{
-+  VSYNC_PRINT("RegisterInputDispatcher(%d)\n\r", aReg);
++  VSYNC_PRINT("RegisterInputDispatcher");
 +
 +  // This function should be called in chrome process only.
 +  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
 +  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
 +
++  //MutexAutoLock lock(mHasInputDispatcherMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //mHasInputDispatcher = true;
++
 +  GetMessageLoop()->PostTask(FROM_HERE,
 +                             NewRunnableMethod(this,
-+                             &VsyncDispatcher::RegisterInputDispatcherInternal,
-+                             aReg));
++                             &VsyncDispatcher::SetInputDispatcherInternal,
++                             true));
 +}
 +
 +void
-+VsyncDispatcher::RegisterInputDispatcherInternal(bool aReg)
++VsyncDispatcher::UnregisterInputDispatcher()
 +{
-+  mInputDispatcher = aReg;
++  VSYNC_PRINT("UnregisterInputDispatcher");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  //MutexAutoLock lock(mHasInputDispatcherMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //mHasInputDispatcher = false;
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::SetInputDispatcherInternal,
++                             false));
 +}
 +
 +void
-+VsyncDispatcher::RegisterCompositer(layers::CompositorParent* aCompositorParent, bool aReg)
++VsyncDispatcher::SetInputDispatcherInternal(bool aReg)
++{
++  mHasInputDispatcher = aReg;
++}
++
++void
++VsyncDispatcher::RegisterCompositer(layers::CompositorParent* aCompositorParent)
 +{
 +  // You should only see this log while screen is updating.
 +  // While screen is not update, this log should not appear.
 +  // Otherwise, there is a bug in CompositorParent side.
-+  VSYNC_PRINT("RegisterCompositor(%d)\n\r", aReg);
++  VSYNC_PRINT("RegisterCompositor\n");
 +
 +  // This function should be called in chrome process only.
 +  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
 +  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
 +
-+  GetMessageLoop()->PostTask(FROM_HERE,
-+                             NewRunnableMethod(this,
-+                             &VsyncDispatcher::ChangeList<layers::CompositorParent>,
-+                             &mCompositorList,
-+                             aCompositorParent,
-+                             aReg));
++  MutexAutoLock lock(mCompositorListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  ChangeList(&mCompositorList, aCompositorParent, true);
++  //ChangeList(&mCompositorList, aCompositorParent, true);
 +}
 +
 +void
-+VsyncDispatcher::RegisterRefreshDriver(nsRefreshDriver *ansRefreshDriver, bool aReg)
++VsyncDispatcher::UnregisterCompositer(layers::CompositorParent* aCompositorParent)
 +{
-+  VSYNC_PRINT("RegisterRefreshDriver(%d)\n\r", aReg);
++  // You should only see this log while screen is updating.
++  // While screen is not update, this log should not appear.
++  // Otherwise, there is a bug in CompositorParent side.
++  VSYNC_PRINT("UnregisterCompositor\n");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  MutexAutoLock lock(mCompositorListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  ChangeList(&mCompositorList, aCompositorParent, false);
++  //ChangeList(&mCompositorList, aCompositorParent, mVsyncListenerMutex, false);
++}
++
++void
++VsyncDispatcher::RegisterRefreshDriver(nsRefreshDriver *ansRefreshDriver)
++{
++  VSYNC_PRINT("RegisterRefreshDriver");
++
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mRefreshDriverListMutex, true);
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mVsyncListenerMutex, true);
 +
 +  GetMessageLoop()->PostTask(FROM_HERE,
 +                             NewRunnableMethod(this,
 +                             &VsyncDispatcher::ChangeList<nsRefreshDriver>,
 +                             &mRefreshDriverList,
 +                             ansRefreshDriver,
-+                             aReg));
++                             true));
 +}
 +
 +void
-+VsyncDispatcher::RegisterVsyncEventParent(VsyncEventParent* aVsyncEventParent, bool aReg)
++VsyncDispatcher::UnregisterRefreshDriver(nsRefreshDriver *ansRefreshDriver)
 +{
-+  VSYNC_PRINT("RegisterRefreshDriver(%d)\n\r", aReg);
++  VSYNC_PRINT("UnregisterRefreshDriver");
++
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mRefreshDriverListMutex, false);
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mVsyncListenerMutex, false);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<nsRefreshDriver>,
++                             &mRefreshDriverList,
++                             ansRefreshDriver,
++                             false));
++}
++
++void
++VsyncDispatcher::RegisterVsyncEventParent(VsyncEventParent* aVsyncEventParent)
++{
++  VSYNC_PRINT("RegisterVsyncEventParent");
 +
 +  // only be called by ipc system, and it ensures be call at vsync dispatch thread.
 +  // thus, we don't post a new task to add into the list
++  //MutexAutoLock lock(mRefreshDriverListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
 +
-+  ChangeList(&mVsyncEventParentList,aVsyncEventParent,aReg);
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, true);
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, true);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<VsyncEventParent>,
++                             &mVsyncEventParentList,
++                             aVsyncEventParent,
++                             true));
++}
++
++void
++VsyncDispatcher::UnregisterVsyncEventParent(VsyncEventParent* aVsyncEventParent)
++{
++  VSYNC_PRINT("UnregisterVsyncEventParent");
++
++  // only be called by ipc system, and it ensures be call at vsync dispatch thread.
++  // thus, we don't post a new task to add into the list
++  //MutexAutoLock lock(mRefreshDriverListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, false);
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, false);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<VsyncEventParent>,
++                             &mVsyncEventParentList,
++                             aVsyncEventParent,
++                             false));
 +}
 +
 +void
@@ -276,7 +372,7 @@ new file mode 100644
 +{
 +#ifdef ENABLE_INPUTDISPATCHER_NOTIFY
 +  //1. input
-+  if (mInputDispatcher) {
++  if (mHasInputDispatcher) {
 +    nsCOMPtr<nsIRunnable> mainThreadInputTask =
 +        NS_NewRunnableMethodWithArg<const VsyncData&>(this,
 +                                                      &VsyncDispatcher::InputEventDispatch,
@@ -321,6 +417,8 @@ new file mode 100644
 +void
 +VsyncDispatcher::Compose(const VsyncData& aVsyncData)
 +{
++  MutexAutoLock lock(mCompositorListMutex);
++
 +  // CompositorParent::ScheduleComposition is an async call, assume it takes minor
 +  // period.
 +  for (CompositorList::size_type i = 0; i < mCompositorList.Length(); i++) {
@@ -360,7 +458,7 @@ diff --git a/gfx/layers/VsyncDispatcher.h b/gfx/layers/VsyncDispatcher.h
 new file mode 100644
 --- /dev/null
 +++ b/gfx/layers/VsyncDispatcher.h
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,182 @@
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set sw=2 ts=8 et ft=cpp : */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -445,24 +543,27 @@ new file mode 100644
 +  void NotifyInputEventProcessed();
 +
 +  // Register input dispatcher.
-+  void RegisterInputDispatcher(bool aReg);
++  void RegisterInputDispatcher();
++  void UnregisterInputDispatcher();
 +
 +  // Register compositor.
-+  void RegisterCompositer(layers::CompositorParent *aParent, bool aReg);
++  void RegisterCompositer(layers::CompositorParent *aParent);
++  void UnregisterCompositer(layers::CompositorParent *aParent);
 +
 +  // Register refresh driver.
-+  void RegisterRefreshDriver(nsRefreshDriver *aDriver, bool aReg);
++  void RegisterRefreshDriver(nsRefreshDriver *aDriver);
++  void UnregisterRefreshDriver(nsRefreshDriver *aDriver);
 +
 +  // Register content process ipc parent
-+  void RegisterVsyncEventParent(VsyncEventParent* aVsyncEventParent, bool aReg);
++  void RegisterVsyncEventParent(VsyncEventParent* aVsyncEventParent);
++  void UnregisterVsyncEventParent(VsyncEventParent* aVsyncEventParent);
 +
 +private:
 +  // Singleton object. Hide constructor and destructor.
 +  VsyncDispatcher();
 +  ~VsyncDispatcher();
 +
-+  // Register Input dispather on the specific thread.
-+  void RegisterInputDispatcherInternal(bool aReg);
++  void SetInputDispatcherInternal(bool aReg);
 +
 +  // Tell the input dispatcher to handle input event.
 +  void InputEventDispatch(const VsyncData& aVsyncData);
@@ -512,20 +613,26 @@ new file mode 100644
 +  // Registered compositors
 +  typedef nsTArray<layers::CompositorParent*> CompositorList;
 +  CompositorList mCompositorList;
++  Mutex mCompositorListMutex;
 +
 +  // Registered refresh drivers.
 +  typedef nsTArray<nsRefreshDriver*> RefreshDriverList;
 +  RefreshDriverList mRefreshDriverList;
++  Mutex mRefreshDriverListMutex;
 +
 +  // Registered vsync ipc parent
 +  typedef nsTArray<VsyncEventParent*> VsyncEventParentList;
 +  VsyncEventParentList mVsyncEventParentList;
++  Mutex mVsyncEventParentListMutex;
++
++  // Sent vsync event to input dispatcher.
++  bool mHasInputDispatcher;
++  Mutex mHasInputDispatcherMutex;
++
++  Mutex mVsyncListenerMutex;
 +
 +  // Monotir for b2g main thread input event processing
 +  Monitor mInputMonitor;
-+
-+  // Sent vsync event to input dispatcher.
-+  bool mInputDispatcher;
 +
 +  bool mEnableVsyncNotification;
 +};
@@ -534,164 +641,6 @@ new file mode 100644
 +} // namespace mozilla
 +
 +#endif // mozilla_VsyncDispatcher_h
-diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
---- a/gfx/layers/ipc/CompositorParent.cpp
-+++ b/gfx/layers/ipc/CompositorParent.cpp
-@@ -48,17 +48,19 @@
- #include "mozilla/layers/CompositorD3D11.h"
- #include "mozilla/layers/CompositorD3D9.h"
- #endif
- #include "GeckoProfiler.h"
- #include "mozilla/ipc/ProtocolTypes.h"
- #include "mozilla/unused.h"
- #include "mozilla/Hal.h"
- #include "mozilla/HalTypes.h"
--
-+#include "mozilla/Preferences.h"
-+#include "VsyncDispatcher.h"
-+ 
- namespace mozilla {
- namespace layers {
- 
- using namespace base;
- using namespace mozilla::ipc;
- using namespace mozilla::gfx;
- using namespace std;
- 
-@@ -188,16 +190,18 @@ CompositorParent::CompositorParent(nsIWi
- 
-   CompositorLoop()->PostTask(FROM_HERE, NewRunnableFunction(SetThreadPriority));
- 
-   mRootLayerTreeID = AllocateLayerTreeId();
-   sIndirectLayerTrees[mRootLayerTreeID].mParent = this;
- 
-   mApzcTreeManager = new APZCTreeManager();
-   ++sCompositorThreadRefCount;
-+
-+  mEnableVsyncDispatch = Preferences::GetBool("hal.hw-vsync", true);
- }
- 
- bool
- CompositorParent::IsInCompositorThread()
- {
-   return sCompositorThread && sCompositorThread->thread_id() == PlatformThread::CurrentId();
- }
- 
-@@ -360,21 +364,20 @@ CompositorParent::ActorDestroy(ActorDest
-     mLayerManager->Destroy();
-     mLayerManager = nullptr;
-     sIndirectLayerTrees[mRootLayerTreeID].mLayerManager = nullptr;
-     mCompositionManager = nullptr;
-     mCompositor = nullptr;
-   }
- }
- 
--
- void
- CompositorParent::ScheduleRenderOnCompositorThread()
- {
--  CancelableTask *renderTask = NewRunnableMethod(this, &CompositorParent::ScheduleComposition);
-+  CancelableTask *renderTask = NewRunnableMethod(this, &CompositorParent::ScheduleCompositionNow);
-   CompositorLoop()->PostTask(FROM_HERE, renderTask);
- }
- 
- void
- CompositorParent::PauseComposition()
- {
-   MOZ_ASSERT(IsInCompositorThread(),
-              "PauseComposition() can only be called on the compositor thread");
-@@ -534,16 +537,30 @@ CalculateCompositionFrameRate()
- }
- 
- void
- CompositorParent::ScheduleComposition()
- {
-   if (mCurrentCompositeTask || mPaused) {
-     return;
-   }
-+  if (mEnableVsyncDispatch) {
-+    VsyncDispatcher::GetInstance()->RegisterCompositer(this, true);
-+  }
-+  else {
-+    ScheduleCompositionNow();
-+  }
-+}
-+
-+void
-+CompositorParent::ScheduleCompositionNow()
-+{
-+  if (mCurrentCompositeTask || mPaused) {
-+    return;
-+  }
- 
-   bool initialComposition = mLastCompose.IsNull();
-   TimeDuration delta;
-   if (!initialComposition)
-     delta = TimeStamp::Now() - mLastCompose;
- 
-   int32_t rate = CalculateCompositionFrameRate();
- 
-@@ -567,16 +584,21 @@ CompositorParent::ScheduleComposition()
-     ScheduleTask(mCurrentCompositeTask, 0);
-   }
- }
- 
- void
- CompositorParent::CompositeCallback()
- {
-   mCurrentCompositeTask = nullptr;
-+
-+  if (mEnableVsyncDispatch) {
-+    VsyncDispatcher::GetInstance()->RegisterCompositer(this, false);
-+  }
-+
-   CompositeToTarget(nullptr);
- }
- 
- void
- CompositorParent::CompositeToTarget(DrawTarget* aTarget, const nsIntRect* aRect)
- {
-   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
-   PROFILER_LABEL("CompositorParent", "Composite",
-diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent.h
---- a/gfx/layers/ipc/CompositorParent.h
-+++ b/gfx/layers/ipc/CompositorParent.h
-@@ -253,16 +253,17 @@ protected:
-   void SetEGLSurfaceSize(int width, int height);
- 
-   void InitializeLayerManager(const nsTArray<LayersBackend>& aBackendHints);
-   void PauseComposition();
-   void ResumeComposition();
-   void ResumeCompositionAndResize(int width, int height);
-   void ForceComposition();
-   void CancelCurrentCompositeTask();
-+  void ScheduleCompositionNow();
- 
-   /**
-    * Creates a global map referencing each compositor by ID.
-    *
-    * This map is used by the ImageBridge protocol to trigger
-    * compositions without having to keep references to the
-    * compositor
-    */
-@@ -331,15 +332,17 @@ protected:
-   uint64_t mCompositorID;
-   uint64_t mRootLayerTreeID;
- 
-   bool mOverrideComposeReadiness;
-   CancelableTask* mForceCompositionTask;
- 
-   nsRefPtr<APZCTreeManager> mApzcTreeManager;
- 
-+  bool mEnableVsyncDispatch;
-+
-   DISALLOW_EVIL_CONSTRUCTORS(CompositorParent);
- };
- 
- } // layers
- } // mozilla
- 
- #endif // mozilla_layers_CompositorParent_h
 diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
 --- a/gfx/layers/moz.build
 +++ b/gfx/layers/moz.build
@@ -788,12 +737,12 @@ diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
 +    // VsyncDispatcher manages registered refresh driver in a list.
 +    // We don't have to add this driver into RefreshDriverTimer's
 +    // list anymore.
-+    VsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver, true);
++    VsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver);
 +  }
 +
 +  virtual void RemoveRefreshDriver(nsRefreshDriver* aDriver)
 +  {
-+    VsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver, false);
++    VsyncDispatcher::GetInstance()->UnregisterRefreshDriver(aDriver);
 +  }
 +
 +protected:
@@ -1068,7 +1017,7 @@ diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
 +    // Touch up recieve, this stroke is dead.
 +    if (!mTouchUpSamples.empty()) {
 +        sendTouchOrMouseEvent(mTouchUpSamples[0]);
-+        VsyncDispatcher::GetInstance()->RegisterInputDispatcher(false);
++        VsyncDispatcher::GetInstance()->UnregisterInputDispatcher();
 +        // Discard all pending events.
 +        mTouchMoveSamples.clear();
 +        mTouchUpSamples.clear();
@@ -1150,7 +1099,7 @@ diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
 +                switch (data.action & AMOTION_EVENT_ACTION_MASK) {
 +                case AMOTION_EVENT_ACTION_DOWN:
 +                  // Register vsync niotification.
-+                  VsyncDispatcher::GetInstance()->RegisterInputDispatcher(true);
++                  VsyncDispatcher::GetInstance()->RegisterInputDispatcher();
 +                  break;
 +                case AMOTION_EVENT_ACTION_MOVE:
 +                    // Buffering move samples

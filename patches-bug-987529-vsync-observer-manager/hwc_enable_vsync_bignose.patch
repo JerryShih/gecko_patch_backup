@@ -1,0 +1,112 @@
+# HG changeset patch
+# Parent 2af4b796728fbbb9de1bc873bb053c37570b4da7
+# User Jerry Shih <hshih@mozilla.com>
+Bug 987527 - enable vsync event in HWComposer
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -291,16 +291,18 @@ pref("layers.offmainthreadcomposition.en
+ pref("layers.offmainthreadcomposition.async-animations", true);
+ #ifndef MOZ_WIDGET_GONK
+ pref("dom.ipc.tabs.disabled", true);
+ #else
+ pref("dom.ipc.tabs.disabled", false);
+ pref("layers.acceleration.disabled", false);
+ pref("layers.async-pan-zoom.enabled", true);
+ pref("gfx.content.azure.backends", "cairo");
++// hw vsync really reflects the tick of actual system vsync signal which is reported from hardware
++pref("gfx.hw-vsync", true);
+ #endif
+ 
+ // Web Notifications
+ pref("notification.feature.enabled", true);
+ 
+ // IndexedDB
+ pref("dom.indexedDB.warningQuota", 5);
+ 
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -21,16 +21,17 @@
+ #include "Framebuffer.h"
+ #include "GLContext.h"                  // for GLContext
+ #include "HwcUtils.h"
+ #include "HwcComposer2D.h"
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/PLayerTransaction.h"
+ #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ #include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
++#include "mozilla/Preferences.h"
+ #include "mozilla/StaticPtr.h"
+ #include "cutils/properties.h"
+ #include "gfx2DGlue.h"
+ 
+ #if ANDROID_VERSION >= 17
+ #include "libdisplay/FramebufferSurface.h"
+ #ifndef HWC_BLIT
+ #define HWC_BLIT (HWC_FRAMEBUFFER_TARGET + 1)
+@@ -71,16 +72,17 @@ HwcComposer2D::HwcComposer2D()
+     , mList(nullptr)
+     , mGLContext(nullptr)
+     , mMaxLayerCount(0)
+     , mColorFill(false)
+     , mRBSwapSupport(false)
+ #if ANDROID_VERSION >= 17
+     , mPrevRetireFence(Fence::NO_FENCE)
+     , mPrevDisplayFence(Fence::NO_FENCE)
++    , mEnableHWVsync(false)
+ #endif
+     , mPrepared(false)
+ {
+ }
+ 
+ HwcComposer2D::~HwcComposer2D() {
+     free(mList);
+ }
+@@ -110,16 +112,24 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+         }
+         if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+             mRBSwapSupport = !!supported;
+         }
+     } else {
+         mColorFill = false;
+         mRBSwapSupport = false;
+     }
++
++    if (mHwc->registerProcs) {
++        mEnableHWVsync = Preferences::GetBool("gfx.hw-vsync", false);
++
++        if (mEnableHWVsync) {
++
++        }
++    }
+ #else
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+     mRBSwapSupport = true;
+ #endif
+ 
+     mDpy = dpy;
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -108,16 +108,17 @@ private:
+     bool                    mColorFill;
+     bool                    mRBSwapSupport;
+     //Holds all the dynamically allocated RectVectors needed
+     //to render the current frame
+     std::list<RectVector>   mVisibleRegions;
+ #if ANDROID_VERSION >= 17
+     android::sp<android::Fence> mPrevRetireFence;
+     android::sp<android::Fence> mPrevDisplayFence;
++    bool                    mEnableHWVsync;
+ #endif
+     nsTArray<layers::LayerComposite*> mHwcLayerMap;
+     bool                    mPrepared;
+ };
+ 
+ } // namespace mozilla
+ 
+ #endif // mozilla_HwcComposer2D

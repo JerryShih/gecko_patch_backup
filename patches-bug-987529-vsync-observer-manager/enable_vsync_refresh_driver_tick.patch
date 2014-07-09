@@ -1,0 +1,173 @@
+# HG changeset patch
+# Parent d9cdae94ebb37d76345bb0464996f77f65637ca9
+# User Jerry Shih <hshih@mozilla.com>
+Tick refresh driver with vsync event.
+
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -44,17 +44,22 @@
+ #include "nsPerformance.h"
+ #include "mozilla/dom/WindowBinding.h"
+ #include "RestyleManager.h"
+ #include "Layers.h"
+ #include "imgIContainer.h"
+ #include "nsIFrameRequestCallback.h"
+ #include "mozilla/dom/ScriptSettings.h"
+ 
++#ifdef MOZ_WIDGET_GONK
++#include "GonkVsyncDispatcher.h"
++#endif
++
+ using namespace mozilla;
++using namespace mozilla::layers;
+ using namespace mozilla::widget;
+ 
+ #ifdef PR_LOGGING
+ static PRLogModuleInfo *gLog = nullptr;
+ #define LOG(...) PR_LOG(gLog, PR_LOG_NOTICE, (__VA_ARGS__))
+ #else
+ #define LOG(...) do { } while(0)
+ #endif
+@@ -184,16 +189,65 @@ protected:
+   // bacause of c++ protected shenanigans
+   static void TimerTick(nsITimer* aTimer, void* aClosure)
+   {
+     RefreshDriverTimer *timer = static_cast<RefreshDriverTimer*>(aClosure);
+     timer->Tick();
+   }
+ };
+ 
++// After register this nsRefreshDriver into VsyncDispatcher, VsyncDispatcher
++// calls nsRefereshDriver::Tick function while vsync event recieve.
++// The only reason to construct this Timer is to minimize code change in
++// nsRefreshDriver.
++class VsyncRefreshDriverTimer :
++    public RefreshDriverTimer
++{
++public:
++  VsyncRefreshDriverTimer(double aRate)
++    : RefreshDriverTimer(aRate)
++  {
++    // Do nothing.
++  }
++
++  virtual ~VsyncRefreshDriverTimer()
++  {
++    // Do nothing.
++  }
++
++  virtual void AddRefreshDriver(nsRefreshDriver* aDriver)
++  {
++    // VsyncDispatcher manages registered refresh driver in a list.
++    // We don't have to add this driver into RefreshDriverTimer's
++    // list anymore.
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->RegisterRefreshDriver(aDriver);
++#endif
++  }
++
++  virtual void RemoveRefreshDriver(nsRefreshDriver* aDriver)
++  {
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->UnregisterRefreshDriver(aDriver);
++#endif
++  }
++
++protected:
++  virtual void StartTimer()
++  {
++    mLastFireEpoch = JS_Now();
++    mLastFireTime = TimeStamp::Now();
++
++    mTargetTime = mLastFireTime + mRateDuration;
++  }
++
++  virtual void StopTimer() { }
++  virtual void ScheduleNextTick(TimeStamp aNowTime) { }
++};
++
+ /*
+  * A RefreshDriverTimer that uses a nsITimer as the underlying timer.  Note that
+  * this is a ONE_SHOT timer, not a repeating one!  Subclasses are expected to
+  * implement ScheduleNextTick and intelligently calculate the next time to tick,
+  * and to reset mTimer.  Using a repeating nsITimer gets us into a lot of pain
+  * with its attempt at intelligent slack removal and such, so we don't do it.
+  */
+ class SimpleTimerBasedRefreshDriverTimer :
+@@ -559,17 +613,17 @@ GetFirstFrameDelay(imgIRequest* req)
+   // If this image isn't animated, there isn't a first frame delay.
+   int32_t delay = container->GetFirstFrameDelay();
+   if (delay < 0)
+     return 0;
+ 
+   return static_cast<uint32_t>(delay);
+ }
+ 
+-static PreciseRefreshDriverTimer *sRegularRateTimer = nullptr;
++static RefreshDriverTimer         *sRegularRateTimer = nullptr;
+ static InactiveRefreshDriverTimer *sThrottledRateTimer = nullptr;
+ 
+ #ifdef XP_WIN
+ static int32_t sHighPrecisionTimerRequests = 0;
+ // a bare pointer to avoid introducing a static constructor
+ static nsITimer *sDisableHighPrecisionTimersTimer = nullptr;
+ #endif
+ 
+@@ -664,23 +718,29 @@ nsRefreshDriver::ChooseTimer() const
+       sThrottledRateTimer = new InactiveRefreshDriverTimer(GetThrottledTimerInterval(),
+                                                            DEFAULT_INACTIVE_TIMER_DISABLE_SECONDS * 1000.0);
+     return sThrottledRateTimer;
+   }
+ 
+   if (!sRegularRateTimer) {
+     bool isDefault = true;
+     double rate = GetRegularTimerInterval(&isDefault);
++
++    if (Preferences::GetBool("gfx.hw-vsync", true)) {
++      sRegularRateTimer = new VsyncRefreshDriverTimer(rate);
++    }
++    else {
+ #ifdef XP_WIN
+-    if (PreciseRefreshDriverTimerWindowsDwmVsync::IsSupported()) {
+-      sRegularRateTimer = new PreciseRefreshDriverTimerWindowsDwmVsync(rate, isDefault);
+-    }
++      if (PreciseRefreshDriverTimerWindowsDwmVsync::IsSupported()) {
++        sRegularRateTimer = new PreciseRefreshDriverTimerWindowsDwmVsync(rate, isDefault);
++      }
+ #endif
+-    if (!sRegularRateTimer) {
+-      sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      if (!sRegularRateTimer) {
++        sRegularRateTimer = new PreciseRefreshDriverTimer(rate);
++      }
+     }
+   }
+   return sRegularRateTimer;
+ }
+ 
+ nsRefreshDriver::nsRefreshDriver(nsPresContext* aPresContext)
+   : mActiveTimer(nullptr),
+     mReflowCause(nullptr),
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -199,17 +199,17 @@ HwcComposer2D::Vsync(int aDisplay, int64
+     //process vsync here
+     //printf_stderr("vsync event timestamp:%lld", aTimestamp);
+     static int frameCount = 0;
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("debug.vsync_div", propValue, "1");
+     int div = atoi(propValue);
+  
+     if (!(frameCount % div)) {
+-        GonkVsyncDispatcher::GetInstance()->NotifyVsync(mozilla::layers::VsyncData(aTimestamp));
++        GonkVsyncDispatcher::GetInstance()->NotifyVsync(aTimestamp);
+     }
+ }
+ 
+ void
+ HwcComposer2D::Hotplug(int aDisplay, int aConnected)
+ {
+     //no op
+ }

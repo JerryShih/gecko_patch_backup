@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent 626a55133d9bf3950f5ae7f2bb9244dfb0d7cf97
+# Parent 3affeafae08a45e75c512433b3ea19a76bf36c7f
 # User Jerry Shih <hshih@mozilla.com>
 add vsync top protocol
 
@@ -24,7 +24,7 @@ diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
  #include "mozilla/sandboxTarget.h"
  #elif defined(XP_LINUX)
  #include "mozilla/Sandbox.h"
-@@ -883,21 +884,28 @@ PCompositorChild*
+@@ -884,21 +885,28 @@ PCompositorChild*
  ContentChild::AllocPCompositorChild(mozilla::ipc::Transport* aTransport,
                                      base::ProcessId aOtherProcess)
  {
@@ -101,27 +101,27 @@ diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
  #include "nsAnonymousTemporaryFile.h"
  #include "nsAppRunner.h"
  #include "nsAutoPtr.h"
-@@ -1899,16 +1900,19 @@ ContentParent::InitInternal(ProcessPrior
-             }
-         }
-     }
- #ifdef MOZ_WIDGET_GONK
-     DebugOnly<bool> opened = PSharedBufferManager::Open(this);
-     MOZ_ASSERT(opened);
+@@ -1923,16 +1924,19 @@ ContentParent::InitInternal(ProcessPrior
+             opened = PImageBridge::Open(this);
+             MOZ_ASSERT(opened);
  #endif
- 
-+    DebugOnly<bool> vsyncOpened = PVsyncEvent::Open(this);
-+    MOZ_ASSERT(vsyncOpened);
+         }
+ #ifdef MOZ_WIDGET_GONK
+         DebugOnly<bool> opened = PSharedBufferManager::Open(this);
+         MOZ_ASSERT(opened);
+ #endif
 +
++        DebugOnly<bool> vsyncOpened = PVsyncEvent::Open(this);
++        MOZ_ASSERT(vsyncOpened);
+     }
+ 
      if (aSendRegisteredChrome) {
          nsCOMPtr<nsIChromeRegistry> registrySvc = nsChromeRegistry::GetService();
          nsChromeRegistryChrome* chromeRegistry =
              static_cast<nsChromeRegistryChrome*>(registrySvc.get());
          chromeRegistry->SendRegisteredChrome(this);
      }
- 
-     if (gAppData) {
-@@ -2539,21 +2543,28 @@ PBackgroundParent*
+@@ -2578,21 +2582,28 @@ PBackgroundParent*
  ContentParent::AllocPBackgroundParent(Transport* aTransport,
                                        ProcessId aOtherProcess)
  {
@@ -200,7 +200,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
  include ProtocolTypes;
  
  using GeoPosition from "nsGeoPositionIPCSerialiser.h";
-@@ -280,16 +281,17 @@ struct DataStoreSetting {
+@@ -281,16 +282,17 @@ struct DataStoreSetting {
    bool enabled;
  };
  
@@ -256,7 +256,7 @@ diff --git a/gfx/layers/ipc/VsyncEventChild.cpp b/gfx/layers/ipc/VsyncEventChild
 new file mode 100644
 --- /dev/null
 +++ b/gfx/layers/ipc/VsyncEventChild.cpp
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,148 @@
 +/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set sw=2 ts=4 et tw=80 : */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -270,8 +270,6 @@ new file mode 100644
 +#ifdef MOZ_NUWA_PROCESS
 +#include "ipc/Nuwa.h"
 +#endif
-+
-+#include "VsyncDispatcher.h"
 +
 +//#define VSYNC_EVENT_CHILD_CREATE_THREAD
 +
@@ -291,20 +289,20 @@ new file mode 100644
 +
 +static VsyncEventChild* sVsyncEventChild = nullptr;
 +
-+static Thread* sVsyncEventThread = nullptr;
++static Thread* sVsyncEventChildThread = nullptr;
 +
 +static bool
 +CreateVsyncChildThread()
 +{
-+  if (sVsyncEventThread) {
++  if (sVsyncEventChildThread) {
 +    return true;
 +  }
 +
-+  sVsyncEventThread = new Thread("Vsync child ipc thread");
++  sVsyncEventChildThread = new Thread("Vsync child ipc thread");
 +
-+  if (!sVsyncEventThread->Start()) {
-+    delete sVsyncEventThread;
-+    sVsyncEventThread = nullptr;
++  if (!sVsyncEventChildThread->Start()) {
++    delete sVsyncEventChildThread;
++    sVsyncEventChildThread = nullptr;
 +    return false;
 +  }
 +
@@ -346,10 +344,7 @@ new file mode 100644
 +  if (!CreateVsyncChildThread()) {
 +    return nullptr;
 +  }
-+
-+  VsyncDispatcher::StartUpOnExistedThread(sVsyncEventThread->message_loop());
-+
-+  sVsyncEventChild = new VsyncEventChild(sVsyncEventThread->message_loop(),
++  sVsyncEventChild = new VsyncEventChild(sVsyncEventChildThread->message_loop(),
 +                                         aTransport);
 +
 +  sVsyncEventChild->GetMessageLoop()->PostTask(FROM_HERE, NewRunnableFunction(
@@ -358,10 +353,7 @@ new file mode 100644
 +                                               aTransport,
 +                                               processHandle));
 +#else
-+  VsyncDispatcher::StartUpOnExistedThread(MessageLoop::current());
-+
-+  sVsyncEventChild = new VsyncEventChild(MessageLoop::current(),
-+                                         aTransport);
++  sVsyncEventChild = new VsyncEventChild(MessageLoop::current(), aTransport);
 +
 +  sVsyncEventChild->Open(aTransport, aOtherProcess, XRE_GetIOMessageLoop(), ChildSide);
 +#endif
@@ -393,8 +385,6 @@ new file mode 100644
 +bool VsyncEventChild::RecvNotifyVsyncEvent(const VsyncData& aVsyncData)
 +{
 +  VSYNC_DEBUG_MESSAGE;
-+
-+  VsyncDispatcher::GetInstance()->DispatchVsync(aVsyncData);
 +
 +  return true;
 +}
@@ -463,7 +453,7 @@ diff --git a/gfx/layers/ipc/VsyncEventParent.cpp b/gfx/layers/ipc/VsyncEventPare
 new file mode 100644
 --- /dev/null
 +++ b/gfx/layers/ipc/VsyncEventParent.cpp
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,147 @@
 +/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set sw=2 ts=4 et tw=80 : */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -474,8 +464,6 @@ new file mode 100644
 +#include "mozilla/ipc/Transport.h"
 +#include "base/thread.h"
 +#include "nsXULAppAPI.h"
-+
-+#include "VsyncDispatcher.h"
 +
 +//#define PRINT_VSYNC_DEBUG
 +
@@ -490,6 +478,26 @@ new file mode 100644
 +
 +namespace mozilla {
 +namespace layers {
++
++static Thread* sVsyncEventParentThread = nullptr;
++
++static bool
++CreateVsyncParentThread()
++{
++  if (sVsyncEventParentThread) {
++    return true;
++  }
++
++  sVsyncEventParentThread = new Thread("Vsync parent ipc thread");
++
++  if (!sVsyncEventParentThread->Start()) {
++    delete sVsyncEventParentThread;
++    sVsyncEventParentThread = nullptr;
++    return false;
++  }
++
++  return true;
++}
 +
 +static void
 +ConnectVsyncEventParent(PVsyncEventParent* aVsyncEventParent,
@@ -511,9 +519,11 @@ new file mode 100644
 +    return nullptr;
 +  }
 +
-+  VsyncDispatcher::StartUpThread();
++  if (!CreateVsyncParentThread()) {
++    return nullptr;
++  }
 +
-+  VsyncEventParent* vsync = new VsyncEventParent(VsyncDispatcher::GetInstance()->GetMessageLoop(),
++  VsyncEventParent* vsync = new VsyncEventParent(sVsyncEventParentThread->message_loop(),
 +                                                 aTransport);
 +
 +  vsync->GetMessageLoop()->PostTask(FROM_HERE, NewRunnableFunction(
@@ -545,8 +555,6 @@ new file mode 100644
 +{
 +  VSYNC_DEBUG_MESSAGE;
 +
-+  VsyncDispatcher::GetInstance()->RegisterVsyncEventParent(this);
-+
 +  return true;
 +}
 +
@@ -555,8 +563,6 @@ new file mode 100644
 +{
 +  VSYNC_DEBUG_MESSAGE;
 +
-+  VsyncDispatcher::GetInstance()->UnregisterVsyncEventParent(this);
-+
 +  return true;
 +}
 +
@@ -564,8 +570,6 @@ new file mode 100644
 +VsyncEventParent::ActorDestroy(ActorDestroyReason aActorDestroyReason)
 +{
 +  VSYNC_DEBUG_MESSAGE;
-+
-+  VsyncDispatcher::GetInstance()->UnregisterVsyncEventParent(this);
 +
 +  return;
 +}
@@ -601,7 +605,7 @@ diff --git a/gfx/layers/ipc/VsyncEventParent.h b/gfx/layers/ipc/VsyncEventParent
 new file mode 100644
 --- /dev/null
 +++ b/gfx/layers/ipc/VsyncEventParent.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,41 @@
 +/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set sw=2 ts=4 et tw=80 : */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -612,8 +616,6 @@ new file mode 100644
 +#define MOZILLA_VSYNC_EVENT_PARENT_H
 +
 +#include "mozilla/layers/PVsyncEventParent.h"
-+
-+class MessageLoop;
 +
 +namespace mozilla {
 +namespace layers {
@@ -686,7 +688,7 @@ diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
      'opengl/OGLShaderProgram.cpp',
      'opengl/TextureClientOGL.cpp',
      'opengl/TextureHostOGL.cpp',
-@@ -341,16 +345,17 @@ IPDL_SOURCES = [
+@@ -340,16 +344,17 @@ IPDL_SOURCES = [
      'ipc/LayersSurfaces.ipdlh',
      'ipc/PCompositable.ipdl',
      'ipc/PCompositor.ipdl',
@@ -704,74 +706,10 @@ diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
  
  include('/ipc/chromium/chromium-config.mozbuild')
  
-diff --git a/widget/gonk/nsWindow.cpp b/widget/gonk/nsWindow.cpp
---- a/widget/gonk/nsWindow.cpp
-+++ b/widget/gonk/nsWindow.cpp
-@@ -239,41 +239,42 @@ nsWindow::DoDraw(void)
-     if (listener) {
-         listener->DidPaintWindow();
-     }
- }
- 
- nsEventStatus
- nsWindow::DispatchInputEvent(WidgetGUIEvent& aEvent, bool* aWasCaptured)
- {
--    VsyncDispatcher::VsyncDispatcherInputProcessingHelper inputHelper;
-+    {
-+        //notify VsyncDispatcher apzc updated
-+        VsyncDispatcher::VsyncDispatcherInputProcessingHelper inputMonitor;
- 
--    if (aWasCaptured) {
--        *aWasCaptured = false;
--    }
--    if (!gFocusedWindow) {
--        return nsEventStatus_eIgnore;
--    }
-+        if (aWasCaptured) {
-+            *aWasCaptured = false;
-+        }
-+        if (!gFocusedWindow) {
-+            return nsEventStatus_eIgnore;
-+        }
- 
--    gFocusedWindow->UserActivity();
-+        gFocusedWindow->UserActivity();
- 
--    aEvent.widget = gFocusedWindow;
-+        aEvent.widget = gFocusedWindow;
- 
--    if (TabParent* capturer = TabParent::GetEventCapturer()) {
--        bool captured = capturer->TryCapture(aEvent);
--        if (aWasCaptured) {
--            *aWasCaptured = captured;
--        }
--        if (captured) {
--            return nsEventStatus_eConsumeNoDefault;
-+        if (TabParent* capturer = TabParent::GetEventCapturer()) {
-+            bool captured = capturer->TryCapture(aEvent);
-+            if (aWasCaptured) {
-+                *aWasCaptured = captured;
-+            }
-+            if (captured) {
-+                return nsEventStatus_eConsumeNoDefault;
-+            }
-         }
-     }
- 
--    inputHelper.Notify();
--
-     nsEventStatus status;
-     gFocusedWindow->DispatchEvent(&aEvent, status);
-     return status;
- }
- 
- NS_IMETHODIMP
- nsWindow::Create(nsIWidget *aParent,
-                  void *aNativeParent,
 diff --git a/xpcom/glue/nsHashKeys.h b/xpcom/glue/nsHashKeys.h
 --- a/xpcom/glue/nsHashKeys.h
 +++ b/xpcom/glue/nsHashKeys.h
-@@ -476,18 +476,18 @@ private:
+@@ -488,19 +488,19 @@ private:
   * the string lives longer than the hash table.
   */
  class nsCharPtrHashKey : public PLDHashEntryHdr
@@ -780,15 +718,16 @@ diff --git a/xpcom/glue/nsHashKeys.h b/xpcom/glue/nsHashKeys.h
    typedef const char* KeyType;
    typedef const char* KeyTypePointer;
  
--  nsCharPtrHashKey(const char* aKey) : mKey(strdup(aKey)) { }
--  nsCharPtrHashKey(const nsCharPtrHashKey& toCopy) : mKey(strdup(toCopy.mKey)) { }
-+  nsCharPtrHashKey(const char* aKey) : mKey(::strdup(aKey)) { }
-+  nsCharPtrHashKey(const nsCharPtrHashKey& toCopy) : mKey(::strdup(toCopy.mKey)) { }
- 
-   nsCharPtrHashKey(nsCharPtrHashKey&& other)
-     : mKey(other.mKey)
+-  nsCharPtrHashKey(const char* aKey) : mKey(strdup(aKey)) {}
++  nsCharPtrHashKey(const char* aKey) : mKey(::strdup(aKey)) {}
+   nsCharPtrHashKey(const nsCharPtrHashKey& aToCopy)
+-    : mKey(strdup(aToCopy.mKey))
++    : mKey(::strdup(aToCopy.mKey))
    {
-     other.mKey = nullptr;
    }
  
-   ~nsCharPtrHashKey() { if (mKey) free(const_cast<char *>(mKey)); }
+   nsCharPtrHashKey(nsCharPtrHashKey&& aOther)
+     : mKey(aOther.mKey)
+   {
+     aOther.mKey = nullptr;
+   }

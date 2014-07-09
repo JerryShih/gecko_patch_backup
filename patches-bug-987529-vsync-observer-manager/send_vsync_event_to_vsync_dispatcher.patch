@@ -1,0 +1,53 @@
+# HG changeset patch
+# Parent d7f55b8357bb78263333b93e211ec0adbc03cf2b
+# User Jerry Shih <hshih@mozilla.com>
+Hwc sends vsync event to VsyncDispatcher.
+
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -14,16 +14,17 @@
+  * limitations under the License.
+  */
+ 
+ #include <android/log.h>
+ #include <string.h>
+ 
+ #include "libdisplay/GonkDisplay.h"
+ #include "Framebuffer.h"
++#include "GonkVsyncDispatcher.h"
+ #include "HwcUtils.h"
+ #include "HwcComposer2D.h"
+ #include "LayerScope.h"
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/PLayerTransaction.h"
+ #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ #include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
+ #include "mozilla/Preferences.h"
+@@ -191,17 +192,25 @@ HwcComposer2D::Invalidate()
+ {
+     //no op
+ }
+ 
+ void
+ HwcComposer2D::Vsync(int aDisplay, int64_t aTimestamp)
+ {
+     //process vsync here
+-    printf_stderr("vsync event timestamp:%lld", aTimestamp);
++    //printf_stderr("vsync event timestamp:%lld", aTimestamp);
++    static int frameCount = 0;
++    char propValue[PROPERTY_VALUE_MAX];
++    property_get("debug.vsync_div", propValue, "1");
++    int div = atoi(propValue);
++ 
++    if (!(frameCount % div)) {
++        GonkVsyncDispatcher::GetInstance()->NotifyVsync(mozilla::layers::VsyncData(aTimestamp));
++    }
+ }
+ 
+ void
+ HwcComposer2D::Hotplug(int aDisplay, int aConnected)
+ {
+     //no op
+ }
+ #endif

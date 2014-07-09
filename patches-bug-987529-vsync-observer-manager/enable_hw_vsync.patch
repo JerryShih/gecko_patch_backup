@@ -1,0 +1,27 @@
+# HG changeset patch
+# Parent 954f38d4ecfad03ddfadecdbd34806d1401e7d9f
+# User Jerry Shih <hshih@mozilla.com>
+enable hw vsync
+
+diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
+--- a/b2g/app/b2g.js
++++ b/b2g/app/b2g.js
+@@ -291,17 +291,17 @@ pref("layers.offmainthreadcomposition.en
+ pref("layers.offmainthreadcomposition.async-animations", true);
+ #ifndef MOZ_WIDGET_GONK
+ pref("dom.ipc.tabs.disabled", true);
+ #else
+ pref("dom.ipc.tabs.disabled", false);
+ pref("layers.acceleration.disabled", false);
+ pref("layers.async-pan-zoom.enabled", true);
+ pref("gfx.content.azure.backends", "cairo");
+-pref("gfx.hw-vsync", false);
++pref("gfx.hw-vsync", true);
+ #endif
+ 
+ // Web Notifications
+ pref("notification.feature.enabled", true);
+ 
+ // IndexedDB
+ pref("dom.indexedDB.warningQuota", 5);
+ 

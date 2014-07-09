@@ -1,0 +1,385 @@
+# HG changeset patch
+# Parent 46ff7b820f864a4847d76bd250b0dd8b0588da50
+# User Jerry Shih <hshih@mozilla.com>
+Do dispatch input event aligned with vsync event
+
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -37,31 +37,33 @@
+ #ifdef MOZ_OMX_DECODER
+ #include "MediaResourceManagerService.h"
+ #endif
+ #include "mozilla/TouchEvents.h"
+ #include "mozilla/FileUtils.h"
+ #include "mozilla/Hal.h"
+ #include "mozilla/MouseEvents.h"
+ #include "mozilla/Mutex.h"
++#include "mozilla/Monitor.h"
+ #include "mozilla/Services.h"
+ #include "mozilla/TextEvents.h"
+ #if ANDROID_VERSION >= 18
+ #include "nativewindow/FakeSurfaceComposer.h"
+ #endif
+ #include "nsAppShell.h"
+ #include "mozilla/dom/Touch.h"
+ #include "nsGkAtoms.h"
+ #include "nsIObserverService.h"
+ #include "nsIScreen.h"
+ #include "nsScreenManagerGonk.h"
+ #include "nsThreadUtils.h"
+ #include "nsWindow.h"
+ #include "OrientationObserver.h"
+ #include "GonkMemoryPressureMonitoring.h"
++#include "GonkVsyncDispatcher.h"
+ 
+ #include "android/log.h"
+ #include "libui/EventHub.h"
+ #include "libui/InputReader.h"
+ #include "libui/InputDispatcher.h"
+ 
+ #ifdef MOZ_NUWA_PROCESS
+ #include "ipc/Nuwa.h"
+@@ -83,16 +85,17 @@
+     (void)0
+ #endif
+ 
+ using namespace android;
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::services;
+ using namespace mozilla::widget;
++using namespace mozilla::layers;
+ 
+ bool gDrawRequest = false;
+ static nsAppShell *gAppShell = nullptr;
+ static int epollfd = 0;
+ static int signalfds[2] = {0};
+ static bool sDevInputAudioJack;
+ static int32_t sHeadphoneState;
+ static int32_t sMicrophoneState;
+@@ -104,16 +107,20 @@ NS_IMPL_ISUPPORTS_INHERITED(nsAppShell, 
+ 
+ static uint64_t
+ nanosecsToMillisecs(nsecs_t nsecs)
+ {
+     return nsecs / 1000000;
+ }
+ 
+ namespace mozilla {
++void DispatchPendingEvent()
++{
++    gAppShell->DispatchPendingEvent();
++}
+ 
+ bool ProcessNextEvent()
+ {
+     return gAppShell->ProcessNextNativeEvent(true);
+ }
+ 
+ void NotifyEvent()
+ {
+@@ -210,16 +217,41 @@ sendMouseEvent(uint32_t msg, UserInputDa
+         event.clickCount = 1;
+     event.modifiers = data.DOMModifiers();
+ 
+     event.mFlags.mNoCrossProcessBoundaryForwarding = !forwardToChildren;
+ 
+     nsWindow::DispatchInputEvent(event);
+ }
+ 
++static void 
++sendMouseEvent(UserInputData& data, bool forwardToChildren)
++{
++     uint32_t msg;
++         
++    switch (data.action & AMOTION_EVENT_ACTION_MASK) {
++        case AMOTION_EVENT_ACTION_DOWN:
++            msg = NS_MOUSE_BUTTON_DOWN;
++            break;
++        case AMOTION_EVENT_ACTION_POINTER_DOWN:
++        case AMOTION_EVENT_ACTION_POINTER_UP:
++        case AMOTION_EVENT_ACTION_MOVE:
++        case AMOTION_EVENT_ACTION_HOVER_MOVE:
++            msg = NS_MOUSE_MOVE;
++            break;
++        case AMOTION_EVENT_ACTION_OUTSIDE:
++        case AMOTION_EVENT_ACTION_CANCEL:
++        case AMOTION_EVENT_ACTION_UP:
++            msg = NS_MOUSE_BUTTON_UP;
++            break;
++    }
++
++    sendMouseEvent(msg, data, forwardToChildren);
++}
++
+ static void
+ addDOMTouch(UserInputData& data, WidgetTouchEvent& event, int i)
+ {
+     const ::Touch& touch = data.motion.touches[i];
+     event.touches.AppendElement(
+         new dom::Touch(touch.id,
+                        nsIntPoint(floor(touch.coords.getX() + 0.5), floor(touch.coords.getY() + 0.5)),
+                        nsIntPoint(touch.coords.getAxisValue(AMOTION_EVENT_AXIS_SIZE),
+@@ -596,16 +628,17 @@ public:
+         : mQueueLock("GeckoInputDispatcher::mQueueMutex")
+         , mEventHub(aEventHub)
+         , mTouchDownCount(0)
+         , mKeyDownCount(0)
+         , mTouchEventsFiltered(false)
+         , mKeyEventsFiltered(false)
+     {
+       mEnabledUniformityInfo = Preferences::GetBool("layers.uniformity-info", false);
++      mEnableVsyncNotification = Preferences::GetBool("hal.hw-vsync", true);
+     }
+ 
+     virtual void dump(String8& dump);
+ 
+     virtual void monitor() {}
+ 
+     // Called on the main thread
+     virtual void dispatchOnce();
+@@ -628,35 +661,41 @@ public:
+     virtual void setInputFilterEnabled(bool enabled) {}
+     virtual bool transferTouchFocus(const sp<InputChannel>& fromChannel,
+             const sp<InputChannel>& toChannel) { return true; }
+ 
+     virtual status_t registerInputChannel(const sp<InputChannel>& inputChannel,
+             const sp<InputWindowHandle>& inputWindowHandle, bool monitor);
+     virtual status_t unregisterInputChannel(const sp<InputChannel>& inputChannel);
+ 
+-
++    void dispatchPendingEvents();
+ 
+ protected:
+     virtual ~GeckoInputDispatcher() {}
++    void sendTouchOrMouseEvent(UserInputData& data);
++    UserInputData resample();
+ 
+ private:
+     // mQueueLock should generally be locked while using mEventQueue.
+     // UserInputData is pushed on on the InputReaderThread and
+     // popped and dispatched on the main thread.
+     mozilla::Mutex mQueueLock;
+     std::queue<UserInputData> mEventQueue;
+     sp<EventHub> mEventHub;
+ 
+     int mTouchDownCount;
+     int mKeyDownCount;
+     bool mTouchEventsFiltered;
+     bool mKeyEventsFiltered;
+     BitSet32 mTouchDown;
+     bool mEnabledUniformityInfo;
++
++    bool mEnableVsyncNotification;
++    std::vector<UserInputData> mTouchMoveSamples;
++    std::vector<UserInputData> mTouchUpSamples;
+ };
+ 
+ // GeckoInputReaderPolicy
+ void
+ GeckoInputReaderPolicy::setDisplayInfo()
+ {
+     static_assert(nsIScreen::ROTATION_0_DEG ==
+                   DISPLAY_ORIENTATION_0,
+@@ -702,16 +741,81 @@ GeckoInputDispatcher::dump(String8& dump
+ static bool
+ isExpired(const UserInputData& data)
+ {
+     uint64_t timeNowMs =
+         nanosecsToMillisecs(systemTime(SYSTEM_TIME_MONOTONIC));
+     return (timeNowMs - data.timeMs) > kInputExpirationThresholdMs;
+ }
+ 
++void GeckoInputDispatcher::dispatchPendingEvents()
++{
++    // Touch up recieve, this stroke is dead.
++    if (!mTouchUpSamples.empty()) {
++        sendTouchOrMouseEvent(mTouchUpSamples[0]);
++        GonkVsyncDispatcher::GetInstance()->UnregisterInputDispatcher();
++        // Discard all pending events.
++        mTouchMoveSamples.clear();
++        mTouchUpSamples.clear();
++    }
++    // Receive mouse move events.
++    else if (!mTouchMoveSamples.empty()) {
++        UserInputData sample = resample();
++        sendTouchOrMouseEvent(sample);
++    }
++}
++
++UserInputData
++GeckoInputDispatcher::resample()
++{
++    // Three conditions
++    // 1. No touch move event - if this happens, either vsync event is too quick 
++    //     or touch event is too slow. Not a normal case.
++    // 2. 1 ~ 2 touch evnets: in the case that vsync refresh rate is 60 FPS and 
++    //     touch dirver refresh rate is 100 FPS. Pretty normal condition.
++    // 3. Move then 3 touch events: if this happens, either vsync event is too 
++    //     slow or  touch event is too quick. Not a normal case.
++    
++    if (mTouchMoveSamples.size() == 1) {
++        return mTouchMoveSamples[0];
++    }
++
++    UserInputData begin = mTouchMoveSamples.front();
++    UserInputData end = mTouchMoveSamples.back();
++    
++    uint64_t now = ns2ms(systemTime(SYSTEM_TIME_MONOTONIC));
++    float timeFactor = (now - begin.timeMs) / static_cast<float>(end.timeMs - begin.timeMs);
++    int strokes = std::min(end.motion.touchCount, begin.motion.touchCount);
++
++    UserInputData sample = end;
++    for (int i = 0; i < strokes; i++) {        
++        const ::Touch& begineTouch = begin.motion.touches[i];
++        const ::Touch& endTouch = end.motion.touches[i]; 
++        float x = begineTouch.coords.getX() + timeFactor * (endTouch.coords.getX() - begineTouch.coords.getX() );
++        float y = begineTouch.coords.getY() + timeFactor * (endTouch.coords.getY() - begineTouch.coords.getY() );
++         
++        sample.motion.touches[i].coords.setAxisValue(AMOTION_EVENT_AXIS_X, x);
++        sample.motion.touches[i].coords.setAxisValue(AMOTION_EVENT_AXIS_Y, y);
++    }
++    mTouchMoveSamples.clear();
++
++    // Push the last move event back to pending buffer for the next vsync notification.
++    mTouchMoveSamples.push_back(end);
++    return sample;
++}
++
++void GeckoInputDispatcher::sendTouchOrMouseEvent(UserInputData& data)
++{
++    bool captured;
++    nsEventStatus status = sendTouchEvent(data, &captured);
++    if (captured)
++        return;
++    sendMouseEvent(data, status != nsEventStatus_eConsumeNoDefault);
++}
++
+ void
+ GeckoInputDispatcher::dispatchOnce()
+ {
+     UserInputData data;
+     {
+         MutexAutoLock lock(mQueueLock);
+         if (mEventQueue.empty())
+             return;
+@@ -757,16 +861,34 @@ GeckoInputDispatcher::dispatchOnce()
+         }
+ 
+         if (mTouchEventsFiltered) {
+             return;
+         }
+ 
+         nsEventStatus status = nsEventStatus_eIgnore;
+         if (action != AMOTION_EVENT_ACTION_HOVER_MOVE) {
++            if (mEnableVsyncNotification) {
++                // TODO: for prototype, I handle only primary touch pointer
++                switch (data.action & AMOTION_EVENT_ACTION_MASK) {
++                case AMOTION_EVENT_ACTION_DOWN:
++                  // Register vsync niotification.
++                  GonkVsyncDispatcher::GetInstance()->RegisterInputDispatcher();
++                  break;
++                case AMOTION_EVENT_ACTION_MOVE:
++                    // Buffering move samples
++                    mTouchMoveSamples.push_back(data);
++                    return;
++                case AMOTION_EVENT_ACTION_UP:
++                    // Buffering up samples
++                    mTouchUpSamples.push_back(data);
++                    return;
++               }
++            }
++
+             bool captured;
+             status = sendTouchEvent(data, &captured);
+             if (mEnabledUniformityInfo) {
+                 printUniformityInfo(data);
+             }
+             if (captured) {
+                 return;
+             }
+@@ -866,16 +988,17 @@ GeckoInputDispatcher::notifyMotion(const
+            ((mEventQueue.back().action & AMOTION_EVENT_ACTION_MASK) ==
+              AMOTION_EVENT_ACTION_MOVE ||
+             (mEventQueue.back().action & AMOTION_EVENT_ACTION_MASK) ==
+              AMOTION_EVENT_ACTION_HOVER_MOVE))
+             mEventQueue.back() = data;
+         else
+             mEventQueue.push(data);
+     }
++
+     gAppShell->NotifyNativeEvent();
+ }
+ 
+ 
+ 
+ void GeckoInputDispatcher::notifySwitch(const NotifySwitchArgs* args)
+ {
+     if (!sDevInputAudioJack)
+@@ -1089,16 +1212,22 @@ nsAppShell::AddFdHandler(int fd, FdHandl
+ 
+ void
+ nsAppShell::ScheduleNativeEventCallback()
+ {
+     mNativeCallbackRequest = true;
+     NotifyEvent();
+ }
+ 
++void 
++nsAppShell::DispatchPendingEvent()
++{
++    mDispatcher->dispatchPendingEvents();
++}
++
+ bool
+ nsAppShell::ProcessNextNativeEvent(bool mayWait)
+ {
+     PROFILER_LABEL("nsAppShell", "ProcessNextNativeEvent",
+         js::ProfileEntry::Category::EVENTS);
+ 
+     epoll_event events[16] = {{ 0 }};
+ 
+diff --git a/widget/gonk/nsAppShell.h b/widget/gonk/nsAppShell.h
+--- a/widget/gonk/nsAppShell.h
++++ b/widget/gonk/nsAppShell.h
+@@ -20,16 +20,19 @@
+ 
+ #include "mozilla/Mutex.h"
+ #include "nsBaseAppShell.h"
+ #include "nsTArray.h"
+ 
+ #include "utils/RefBase.h"
+ 
+ namespace mozilla {
++class Monitor;
++
++void DispatchPendingEvent();
+ bool ProcessNextEvent();
+ void NotifyEvent();
+ }
+ 
+ extern bool gDrawRequest;
+ 
+ class FdHandler;
+ typedef void(*FdHandlerCallback)(int, FdHandler *);
+@@ -68,17 +71,18 @@ public:
+ 
+     nsresult Init();
+ 
+     NS_IMETHOD Exit() MOZ_OVERRIDE;
+ 
+     virtual bool ProcessNextNativeEvent(bool maywait);
+ 
+     void NotifyNativeEvent();
+-
++    void DispatchPendingEvent();
++    
+     static void NotifyScreenInitialized();
+     static void NotifyScreenRotation();
+ 
+ protected:
+     virtual ~nsAppShell();
+ 
+     virtual void ScheduleNativeEventCallback();
+ 

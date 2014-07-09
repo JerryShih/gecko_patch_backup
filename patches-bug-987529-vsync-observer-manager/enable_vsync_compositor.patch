@@ -1,0 +1,68 @@
+# HG changeset patch
+# Parent fb00242f4f2cb790d062fc09702c3a682c909a17
+# User Jerry Shih <hshih@mozilla.com>
+Do compose with vsync event.
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -50,16 +50,19 @@
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ #include "mozilla/unused.h"
+ #include "mozilla/Hal.h"
+ #include "mozilla/HalTypes.h"
+ #include "mozilla/StaticPtr.h"
+ #include "mozilla/Preferences.h"
++#ifdef MOZ_WIDGET_GONK
++#include "GonkVsyncDispatcher.h"
++#endif
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ using namespace base;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+@@ -586,16 +589,19 @@ CalculateCompositionFrameRate()
+ void
+ CompositorParent::ScheduleComposition()
+ {
+   if (mCurrentCompositeTask || mPaused) {
+     return;
+   }
+   if (mEnableVsyncDispatch) {
+     //register compositer to vsync dispatcher
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->RegisterCompositer(this);
++#endif
+   }
+   else {
+     ScheduleCompositionNow();
+   }
+ }
+ 
+ void
+ CompositorParent::ScheduleCompositionNow()
+@@ -634,16 +640,19 @@ CompositorParent::ScheduleCompositionNow
+ 
+ void
+ CompositorParent::CompositeCallback()
+ {
+   mCurrentCompositeTask = nullptr;
+ 
+   if (mEnableVsyncDispatch) {
+     //unregister compositer to vsync dispatcher
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->UnregisterCompositer(this);
++#endif
+   }
+ 
+   CompositeToTarget(nullptr);
+ }
+ 
+ void
+ CompositorParent::CompositeToTarget(DrawTarget* aTarget, const nsIntRect* aRect)
+ {

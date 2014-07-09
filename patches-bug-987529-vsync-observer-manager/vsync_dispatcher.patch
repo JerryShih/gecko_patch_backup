@@ -1,0 +1,577 @@
+# HG changeset patch
+# Parent f213f10ee609a6d0e2a1dba63a279051437c706a
+# User Jerry Shih <hshih@mozilla.com>
+create VsyncDispatcher to control and dispatch vsync event to other module
+
+diff --git a/gfx/layers/VsyncDispatcher.cpp b/gfx/layers/VsyncDispatcher.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/VsyncDispatcher.cpp
+@@ -0,0 +1,449 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "VsyncDispatcher.h"
++#include "mozilla/layers/VsyncEventParent.h"
++#include "mozilla/layers/VsyncEventChild.h"
++#include "mozilla/layers/CompositorParent.h"
++#include "mozilla/StaticPtr.h"
++#include "nsThreadUtils.h"
++#include "nsRefreshDriver.h"
++#ifdef MOZ_WIDGET_GONK
++#include "nsAppShell.h"
++#endif
++
++#include "base/thread.h"
++
++//#define DEBUG_VSYNC
++#ifdef DEBUG_VSYNC
++#define VSYNC_PRINT(...) do { printf_stderr("VDispatcher: " __VA_ARGS__); } while (0)
++#else
++#define VSYNC_PRINT(...) do { } while (0)
++#endif
++
++// Enable vsycn recievers to get vsync event.
++// 1. Enable Vsync driven refresh driver. Define this flag only after original
++//    timer trigger flow have been removed.
++#define ENABLE_REFRESHDRIVER_NOTIFY
++// 2. Enable Vsync driven input dispatch. Define this flag only after original
++//    NativeEventProcess flow be removed.
++#define ENABLE_INPUTDISPATCHER_NOTIFY
++// 3. Enable Vsync driven composition. Define this flag only after original
++//    SchdedulCompositor callers been removed.
++#define ENABLE_COMPOSITOR_NOTIFY
++
++//using namespace base;
++
++namespace mozilla {
++namespace layers {
++
++base::Thread* sVsyncDispatchThread = nullptr;
++MessageLoop* sVsyncDispatchMessageLoop = nullptr;
++
++static bool
++CreateThread()
++{
++  if (sVsyncDispatchThread) {
++    return true;
++  }
++
++  sVsyncDispatchThread = new base::Thread("Vsync dispatch thread");
++
++  if (!sVsyncDispatchThread->Start()) {
++    delete sVsyncDispatchThread;
++    sVsyncDispatchThread = nullptr;
++    return false;
++  }
++
++  sVsyncDispatchMessageLoop = sVsyncDispatchThread->message_loop();
++
++  return true;
++}
++
++// Singleton
++// TODO: where to distroy sVsyncDispatcher?
++// Caller should not be able to call any publuc member function of this
++// singleton after VsyncDispatcher::Shutdown
++static StaticRefPtr<VsyncDispatcher> sVsyncDispatcher;
++
++// TODO:
++// Generically, introduce a new singleton casue trouble in at_exit process.
++// Try to find a holder to host VsyncDispatcher.
++/*static*/ VsyncDispatcher*
++VsyncDispatcher::GetInstance()
++{
++  if (sVsyncDispatcher.get() == nullptr) {
++    if (XRE_GetProcessType() == GeckoProcessType_Default) {
++      StartUpThread();
++    }
++    else{
++      StartUpOnExistedThread(MessageLoop::current());
++    }
++
++    sVsyncDispatcher = new VsyncDispatcher();
++  }
++
++  return sVsyncDispatcher;
++}
++
++/*static*/ void
++VsyncDispatcher::StartUpThread()
++{
++  //only b2g need to create a new thread
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  if (!sVsyncDispatchMessageLoop) {
++    CreateThread();
++  }
++}
++
++/*static*/ void
++VsyncDispatcher::StartUpOnExistedThread(MessageLoop* aMessageLoop)
++{
++  if (!sVsyncDispatchMessageLoop) {
++    sVsyncDispatchMessageLoop = aMessageLoop;
++  }
++}
++
++// TODO:
++// 1. VSyncDispather::GetInstance and Shutdown need to be thread safe
++// 2. Call Shutdown at? gfxPlatform or?
++void
++VsyncDispatcher::Shutdown()
++{
++  if (sVsyncDispatcher.get()) {
++    delete sVsyncDispatcher;
++    sVsyncDispatcher = nullptr;
++  }
++}
++
++VsyncDispatcher::VsyncDispatcher()
++  : mHasInputDispatcher(false)
++  , mEnableVsyncNotification(false)
++  , mInputMonitor("vsync main thread input monitor")
++  , mCompositorListMutex("compositor list mutex")
++  , mRefreshDriverListMutex("refresh driver list mutex")
++  , mVsyncEventParentListMutex("vsync parent list mutex")
++  , mHasInputDispatcherMutex("input dispatcher flag mutex")
++  , mVsyncListenerMutex("vsync listener list mutex")
++{
++}
++
++VsyncDispatcher::~VsyncDispatcher()
++{
++}
++
++int
++VsyncDispatcher::GetRegistedObjectCount() const
++{
++   int count = 0;
++
++   count += mCompositorList.Length();
++   count += mRefreshDriverList.Length();
++   count += mVsyncEventParentList.Length();
++   count += (mHasInputDispatcher ? 1 : 0);
++
++   return count;
++}
++
++void
++VsyncDispatcher::CheckVsyncNotification()
++{
++  // If this process is content process, we check the observer number to
++  // enable/disable vsync notification
++  if (XRE_GetProcessType() != GeckoProcessType_Default) {
++    if (GetRegistedObjectCount() > 0) {
++      if (!mEnableVsyncNotification) {
++        mEnableVsyncNotification = true;
++        VsyncEventChild::GetSingleton()->SendEnableVsyncEventNotification();
++      }
++    }
++    else{
++      if (mEnableVsyncNotification) {
++        mEnableVsyncNotification = false;
++        VsyncEventChild::GetSingleton()->SendDisableVsyncEventNotification();
++      }
++    }
++  }
++}
++
++MessageLoop*
++VsyncDispatcher::GetMessageLoop()
++{
++  return sVsyncDispatchMessageLoop;
++}
++
++void
++VsyncDispatcher::RegisterInputDispatcher()
++{
++  VSYNC_PRINT("RegisterInputDispatcher");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  //MutexAutoLock lock(mHasInputDispatcherMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //mHasInputDispatcher = true;
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::SetInputDispatcherInternal,
++                             true));
++}
++
++void
++VsyncDispatcher::UnregisterInputDispatcher()
++{
++  VSYNC_PRINT("UnregisterInputDispatcher");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  //MutexAutoLock lock(mHasInputDispatcherMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //mHasInputDispatcher = false;
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::SetInputDispatcherInternal,
++                             false));
++}
++
++void
++VsyncDispatcher::SetInputDispatcherInternal(bool aReg)
++{
++  mHasInputDispatcher = aReg;
++}
++
++void
++VsyncDispatcher::RegisterCompositer(layers::CompositorParent* aCompositorParent)
++{
++  // You should only see this log while screen is updating.
++  // While screen is not update, this log should not appear.
++  // Otherwise, there is a bug in CompositorParent side.
++  VSYNC_PRINT("RegisterCompositor\n");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  MutexAutoLock lock(mCompositorListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  ChangeList(&mCompositorList, aCompositorParent, true);
++  //ChangeList(&mCompositorList, aCompositorParent, true);
++}
++
++void
++VsyncDispatcher::UnregisterCompositer(layers::CompositorParent* aCompositorParent)
++{
++  // You should only see this log while screen is updating.
++  // While screen is not update, this log should not appear.
++  // Otherwise, there is a bug in CompositorParent side.
++  VSYNC_PRINT("UnregisterCompositor\n");
++
++  // This function should be called in chrome process only.
++  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++  //MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
++
++  MutexAutoLock lock(mCompositorListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  ChangeList(&mCompositorList, aCompositorParent, false);
++  //ChangeList(&mCompositorList, aCompositorParent, mVsyncListenerMutex, false);
++}
++
++void
++VsyncDispatcher::RegisterRefreshDriver(nsRefreshDriver *ansRefreshDriver)
++{
++  VSYNC_PRINT("RegisterRefreshDriver");
++
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mRefreshDriverListMutex, true);
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mVsyncListenerMutex, true);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<nsRefreshDriver>,
++                             &mRefreshDriverList,
++                             ansRefreshDriver,
++                             true));
++}
++
++void
++VsyncDispatcher::UnregisterRefreshDriver(nsRefreshDriver *ansRefreshDriver)
++{
++  VSYNC_PRINT("UnregisterRefreshDriver");
++
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mRefreshDriverListMutex, false);
++  //ChangeList(&mRefreshDriverList, ansRefreshDriver, mVsyncListenerMutex, false);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<nsRefreshDriver>,
++                             &mRefreshDriverList,
++                             ansRefreshDriver,
++                             false));
++}
++
++void
++VsyncDispatcher::RegisterVsyncEventParent(VsyncEventParent* aVsyncEventParent)
++{
++  VSYNC_PRINT("RegisterVsyncEventParent");
++
++  // only be called by ipc system, and it ensures be call at vsync dispatch thread.
++  // thus, we don't post a new task to add into the list
++  //MutexAutoLock lock(mRefreshDriverListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, true);
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, true);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<VsyncEventParent>,
++                             &mVsyncEventParentList,
++                             aVsyncEventParent,
++                             true));
++}
++
++void
++VsyncDispatcher::UnregisterVsyncEventParent(VsyncEventParent* aVsyncEventParent)
++{
++  VSYNC_PRINT("UnregisterVsyncEventParent");
++
++  // only be called by ipc system, and it ensures be call at vsync dispatch thread.
++  // thus, we don't post a new task to add into the list
++  //MutexAutoLock lock(mRefreshDriverListMutex);
++  //MutexAutoLock lock(mVsyncListenerMutex);
++
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, false);
++  //ChangeList(&mVsyncEventParentList, mRefreshDriverList, false);
++
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::ChangeList<VsyncEventParent>,
++                             &mVsyncEventParentList,
++                             aVsyncEventParent,
++                             false));
++}
++
++void
++VsyncDispatcher::NotifyVsync(const VsyncData& aVsyncData)
++{
++  GetMessageLoop()->PostTask(FROM_HERE,
++                             NewRunnableMethod(this,
++                             &VsyncDispatcher::DispatchVsync,
++                             aVsyncData));
++}
++
++void
++VsyncDispatcher::NotifyInputEventProcessed()
++{
++  {
++    MonitorAutoLock inputLock(mInputMonitor);
++
++    inputLock.Notify();
++  }
++
++//  //schedule composition here to reduce the compositor latency
++//#ifdef ENABLE_COMPOSITOR_NOTIFY
++//  //2. compose
++//  Compose(VsyncData(0));
++//#endif
++}
++
++void
++VsyncDispatcher::DispatchVsync(const VsyncData& aVsyncData)
++{
++#ifdef ENABLE_INPUTDISPATCHER_NOTIFY
++  //1. input
++  if (mHasInputDispatcher) {
++    nsCOMPtr<nsIRunnable> mainThreadInputTask =
++        NS_NewRunnableMethodWithArg<const VsyncData&>(this,
++                                                      &VsyncDispatcher::InputEventDispatch,
++                                                      aVsyncData);
++    //block vsync event passing until main thread input module updated
++    MonitorAutoLock inputLock(mInputMonitor);
++
++    NS_DispatchToMainThread(mainThreadInputTask);
++    inputLock.Wait(PR_MillisecondsToInterval(4));
++  }
++#endif
++
++#ifdef ENABLE_COMPOSITOR_NOTIFY
++  //2. compose
++  Compose(aVsyncData);
++#endif
++
++#ifdef ENABLE_REFRESHDRIVER_NOTIFY
++  //3. content process tick
++  NotifyVsyncEventChild(aVsyncData);
++
++  //4. current process tick
++  nsCOMPtr<nsIRunnable> mainThreadTickTask =
++      NS_NewRunnableMethodWithArg<const VsyncData&>(this,
++                                                    &VsyncDispatcher::Tick,
++                                                    aVsyncData);
++  NS_DispatchToMainThread(mainThreadTickTask);
++#endif
++}
++
++void
++VsyncDispatcher::InputEventDispatch(const VsyncData& aVsyncData)
++{
++  MOZ_RELEASE_ASSERT(NS_IsMainThread());
++  //MOZ_ASSERT(NS_IsMainThread());
++
++#ifdef MOZ_WIDGET_GONK
++  DispatchPendingEvent();
++#endif
++}
++
++void
++VsyncDispatcher::Compose(const VsyncData& aVsyncData)
++{
++  MutexAutoLock lock(mCompositorListMutex);
++
++  // CompositorParent::ScheduleComposition is an async call, assume it takes minor
++  // period.
++  for (CompositorList::size_type i = 0; i < mCompositorList.Length(); i++) {
++    layers::CompositorParent *compositor = mCompositorList[i];
++    // TODO: need to change behavior of ScheduleComposition(). No Delay, fire
++    // Composit ASAP.
++    compositor->ScheduleRenderOnCompositorThread();
++  }
++}
++
++void
++VsyncDispatcher::NotifyVsyncEventChild(const VsyncData& aVsyncData)
++{
++  // Tick all registered content process.
++  for (VsyncEventParentList::size_type i = 0; i < mVsyncEventParentList.Length(); i++) {
++    VsyncEventParent* parent = mVsyncEventParentList[i];
++    parent->SendNotifyVsyncEvent(aVsyncData);
++  }
++}
++
++void
++VsyncDispatcher::Tick(const VsyncData& aVsyncData)
++{
++  MOZ_RELEASE_ASSERT(NS_IsMainThread());
++  //MOZ_ASSERT(NS_IsMainThread());
++
++  // Tick all registered refresh drivers.
++  for (RefreshDriverList::size_type i = 0; i < mRefreshDriverList.Length(); i++) {
++    nsRefreshDriver *driver = mRefreshDriverList[i];
++    driver->DoTick();
++  }
++}
++
++} // namespace layers
++} // namespace mozilla
+diff --git a/gfx/layers/VsyncDispatcher.h b/gfx/layers/VsyncDispatcher.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/VsyncDispatcher.h
+@@ -0,0 +1,53 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_VsyncDispatcher_h
++#define mozilla_VsyncDispatcher_h
++
++#include "base/ref_counted.h"
++#include "base/message_loop.h"
++#include "mozilla/RefPtr.h"
++
++namespace base {
++  class Thread;
++}
++
++namespace mozilla {
++namespace layers {
++
++class VsyncDispatcher : public base::RefCountedThreadSafe<VsyncDispatcher>
++{
++  friend class base::RefCountedThreadSafe<VsyncDispatcher>;
++
++public:
++  static void StartUpThread();
++  static void StartUpOnExistedThread(MessageLoop* aMessageLoop);
++
++  static VsyncDispatcher* GetInstance();
++
++  static void Shutdown();
++
++  // Get vsync dispatcher's message loop
++  MessageLoop* GetMessageLoop();
++
++  // notify all registered vsync observer
++  void NotifyVsync(const VsyncData& aVsyncData);
++
++  // dispatch vsync event
++  void DispatchVsync(const VsyncData& aVsyncData);
++
++private:
++  // Singleton object. Hide constructor and destructor.
++  VsyncDispatcher();
++  ~VsyncDispatcher();
++
++  bool mEnableVsyncNotification;
++};
++
++} // namespace layers
++} // namespace mozilla
++
++#endif // mozilla_VsyncDispatcher_h
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -34,16 +34,17 @@ EXPORTS += [
+     'LayerSorter.h',
+     'LayerTreeInvalidation.h',
+     'opengl/Composer2D.h',
+     'opengl/OGLShaderProgram.h',
+     'opengl/TexturePoolOGL.h',
+     'ReadbackLayer.h',
+     'SharedTextureImage.h',
+     'TiledLayerBuffer.h',
++    'VsyncDispatcher.h',
+ ]
+ 
+ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
+     UNIFIED_SOURCES += [
+         'D3D9SurfaceImage.cpp',
+     ]
+     if CONFIG['MOZ_ENABLE_D3D9_LAYER']:
+         EXPORTS += [
+@@ -304,16 +305,17 @@ UNIFIED_SOURCES += [
+     'opengl/CompositorOGL.cpp',
+     'opengl/OGLShaderProgram.cpp',
+     'opengl/TextureClientOGL.cpp',
+     'opengl/TextureHostOGL.cpp',
+     'opengl/TexturePoolOGL.cpp',
+     'ReadbackProcessor.cpp',
+     'RenderTrace.cpp',
+     'RotatedBuffer.cpp',
++    'VsyncDispatcher.cpp',
+     'YCbCrImageDataSerializer.cpp',
+ ]
+ 
+ SOURCES += [
+     'basic/BasicImageLayer.cpp',
+     'ImageContainer.cpp',
+     'Layers.cpp',
+     'LayerTreeInvalidation.cpp',
+diff --git a/widget/moz.build b/widget/moz.build
+--- a/widget/moz.build
++++ b/widget/moz.build
+@@ -89,16 +89,17 @@ if CONFIG['MOZ_METRO']:
+         'MetroUIUtils.idl',
+         'nsIWinMetroUtils.idl',
+     ]
+ 
+ XPIDL_MODULE = 'widget'
+ 
+ EXPORTS += [
+     'InputData.h',
++    'IVsyncDispatcher.h'
+     'nsIDeviceContextSpec.h',
+     'nsIPluginWidget.h',
+     'nsIRollupListener.h',
+     'nsIWidget.h',
+     'nsIWidgetListener.h',
+     'nsWidgetInitData.h',
+     'nsWidgetsCID.h',
+ ]

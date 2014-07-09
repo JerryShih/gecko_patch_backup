@@ -1,0 +1,160 @@
+# HG changeset patch
+# Parent 1c33c192071500cb29900583f3a7251654d7d919
+# User Jerry Shih <hshih@mozilla.com>
+vsync compositor parent
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -49,16 +49,17 @@
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ #include "mozilla/unused.h"
+ #include "mozilla/Hal.h"
+ #include "mozilla/HalTypes.h"
+ #include "mozilla/StaticPtr.h"
++#include "mozilla/Preferences.h"
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ using namespace base;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+@@ -231,16 +232,18 @@ CompositorParent::CompositorParent(nsIWi
+                                                           this, &mCompositorID));
+ 
+   CompositorLoop()->PostTask(FROM_HERE, NewRunnableFunction(SetThreadPriority));
+ 
+   mRootLayerTreeID = AllocateLayerTreeId();
+   sIndirectLayerTrees[mRootLayerTreeID].mParent = this;
+ 
+   mApzcTreeManager = new APZCTreeManager();
++  
++  mEnableVsyncDispatch = Preferences::GetBool("gfx.hw-vsync", true);
+ }
+ 
+ bool
+ CompositorParent::IsInCompositorThread()
+ {
+   return CompositorThread() && CompositorThread()->thread_id() == PlatformThread::CurrentId();
+ }
+ 
+@@ -408,21 +411,20 @@ CompositorParent::ActorDestroy(ActorDest
+     mLayerManager->Destroy();
+     mLayerManager = nullptr;
+     sIndirectLayerTrees[mRootLayerTreeID].mLayerManager = nullptr;
+     mCompositionManager = nullptr;
+     mCompositor = nullptr;
+   }
+ }
+ 
+-
+ void
+ CompositorParent::ScheduleRenderOnCompositorThread()
+ {
+-  CancelableTask *renderTask = NewRunnableMethod(this, &CompositorParent::ScheduleComposition);
++  CancelableTask *renderTask = NewRunnableMethod(this, &CompositorParent::ScheduleCompositionNow);
+   CompositorLoop()->PostTask(FROM_HERE, renderTask);
+ }
+ 
+ void
+ CompositorParent::PauseComposition()
+ {
+   MOZ_ASSERT(IsInCompositorThread(),
+              "PauseComposition() can only be called on the compositor thread");
+@@ -582,16 +584,30 @@ CalculateCompositionFrameRate()
+ }
+ 
+ void
+ CompositorParent::ScheduleComposition()
+ {
+   if (mCurrentCompositeTask || mPaused) {
+     return;
+   }
++  if (mEnableVsyncDispatch) {
++    //register compositer to vsync dispatcher
++  }
++  else {
++    ScheduleCompositionNow();
++  }
++}
++
++void
++CompositorParent::ScheduleCompositionNow()
++{
++  if (mCurrentCompositeTask || mPaused) {
++    return;
++  }
+ 
+   bool initialComposition = mLastCompose.IsNull();
+   TimeDuration delta;
+   if (!initialComposition)
+     delta = TimeStamp::Now() - mLastCompose;
+ 
+   int32_t rate = CalculateCompositionFrameRate();
+ 
+@@ -615,16 +631,21 @@ CompositorParent::ScheduleComposition()
+     ScheduleTask(mCurrentCompositeTask, 0);
+   }
+ }
+ 
+ void
+ CompositorParent::CompositeCallback()
+ {
+   mCurrentCompositeTask = nullptr;
++
++  if (mEnableVsyncDispatch) {
++    //unregister compositer to vsync dispatcher
++  }
++
+   CompositeToTarget(nullptr);
+ }
+ 
+ void
+ CompositorParent::CompositeToTarget(DrawTarget* aTarget, const nsIntRect* aRect)
+ {
+   profiler_tracing("Paint", "Composite", TRACING_INTERVAL_START);
+   PROFILER_LABEL("CompositorParent", "Composite",
+diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent.h
+--- a/gfx/layers/ipc/CompositorParent.h
++++ b/gfx/layers/ipc/CompositorParent.h
+@@ -282,16 +282,17 @@ protected:
+   void SetEGLSurfaceSize(int width, int height);
+ 
+   void InitializeLayerManager(const nsTArray<LayersBackend>& aBackendHints);
+   void PauseComposition();
+   void ResumeComposition();
+   void ResumeCompositionAndResize(int width, int height);
+   void ForceComposition();
+   void CancelCurrentCompositeTask();
++  void ScheduleCompositionNow();
+ 
+   /**
+    * Add a compositor to the global compositor map.
+    */
+   static void AddCompositor(CompositorParent* compositor, uint64_t* id);
+   /**
+    * Remove a compositor from the global compositor map.
+    */
+@@ -332,15 +333,17 @@ protected:
+ 
+   bool mOverrideComposeReadiness;
+   CancelableTask* mForceCompositionTask;
+ 
+   nsRefPtr<APZCTreeManager> mApzcTreeManager;
+ 
+   nsRefPtr<CompositorThreadHolder> mCompositorThreadHolder;
+ 
++  bool mEnableVsyncDispatch;
++
+   DISALLOW_EVIL_CONSTRUCTORS(CompositorParent);
+ };
+ 
+ } // layers
+ } // mozilla
+ 
+ #endif // mozilla_layers_CompositorParent_h

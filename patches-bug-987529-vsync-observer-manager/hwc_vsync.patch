@@ -1,9 +1,7 @@
 # HG changeset patch
-# User vlin <vlin@mozilla.com>
-# Date 1398068233 -28800
-# Node ID 10e81e1b2f6204a53ffc3da21934ceaa93d59338
-# Parent 2af4b796728fbbb9de1bc873bb053c37570b4da7
-Bug 987527: Bug 987527 - Register Vsync monitor to HWComposer
+# Parent 642b7a76775bcd5da246999a5aa7e345d5e3f0c4
+# User Jerry Shih <hshih@mozilla.com>
+Bug 987527 - Register Vsync monitor to HWComposer
 
 diff --git a/b2g/app/b2g.js b/b2g/app/b2g.js
 --- a/b2g/app/b2g.js
@@ -31,9 +29,9 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 +++ b/widget/gonk/HwcComposer2D.cpp
 @@ -21,16 +21,17 @@
  #include "Framebuffer.h"
- #include "GLContext.h"                  // for GLContext
  #include "HwcUtils.h"
  #include "HwcComposer2D.h"
+ #include "LayerScope.h"
  #include "mozilla/layers/LayerManagerComposite.h"
  #include "mozilla/layers/PLayerTransaction.h"
  #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
@@ -65,23 +63,7 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
  HwcComposer2D::~HwcComposer2D() {
      free(mList);
  }
-@@ -96,32 +98,49 @@ HwcComposer2D::Init(hwc_display_t dpy, h
-         return -1;
-     }
- 
-     nsIntSize screenSize;
- 
-     mozilla::Framebuffer::GetSize(&screenSize);
-     mScreenRect  = nsIntRect(nsIntPoint(0, 0), screenSize);
- 
-+    char propValue[PROPERTY_VALUE_MAX];
-+
- #if ANDROID_VERSION >= 17
-     int supported = 0;
- 
-     if (mHwc->query) {
-         if (mHwc->query(mHwc, HwcUtils::HWC_COLOR_FILL, &supported) == NO_ERROR) {
-             mColorFill = !!supported;
+@@ -110,16 +112,32 @@ HwcComposer2D::Init(hwc_display_t dpy, h
          }
          if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
              mRBSwapSupport = !!supported;
@@ -107,16 +89,14 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 +        }
 +    }
  #else
--    char propValue[PROPERTY_VALUE_MAX];
+     char propValue[PROPERTY_VALUE_MAX];
      property_get("ro.display.colorfill", propValue, "0");
      mColorFill = (atoi(propValue) == 1) ? true : false;
      mRBSwapSupport = true;
  #endif
  
      mDpy = dpy;
-     mSur = sur;
-     mGLContext = aGLContext;
-@@ -134,16 +153,65 @@ HwcComposer2D::GetInstance()
+@@ -134,16 +152,65 @@ HwcComposer2D::GetInstance()
  {
      if (!sInstance) {
          LOGI("Creating new instance");
@@ -151,7 +131,7 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 +HwcComposer2D::HookHotplug(const struct hwc_procs* aProcs, int aDisplay,
 +                           int aConnected)
 +{
-+  HwcComposer2D::GetInstance()->Hotplug(aDisplay, aConnected);
++    HwcComposer2D::GetInstance()->Hotplug(aDisplay, aConnected);
 +}
 +
 +void
@@ -185,7 +165,7 @@ diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
 diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
 --- a/widget/gonk/HwcComposer2D.h
 +++ b/widget/gonk/HwcComposer2D.h
-@@ -82,42 +82,62 @@ public:
+@@ -82,43 +82,63 @@ public:
      // Returns TRUE if the container has been succesfully rendered
      // Returns FALSE if the container cannot be fully rendered
      // by this composer so nothing was rendered at all
@@ -208,14 +188,15 @@ diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
            const gfxMatrix& aParentTransform, const gfxMatrix& aGLWorldTransform);
      void setCrop(HwcLayer* layer, hwc_rect_t srcCrop);
      void setHwcGeometry(bool aGeometryChanged);
+     void SendtoLayerScope();
  
 +#if ANDROID_VERSION >= 17
 +    //hwc event callback
 +    static void HookInvalidate(const struct hwc_procs* aProcs);
 +    static void HookVsync(const struct hwc_procs* aProcs, int aDisplay,
-+                           int64_t aTimestamp);
++                          int64_t aTimestamp);
 +    static void HookHotplug(const struct hwc_procs* aProcs, int aDisplay,
-+                             int aConnected);
++                            int aConnected);
 +
 +    void Invalidate();
 +    void Vsync(int aDisplay, int64_t aTimestamp);
@@ -272,7 +253,7 @@ diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/G
      err = hw_get_module(HWC_HARDWARE_MODULE_ID, &mModule);
      ALOGW_IF(err, "%s module not found", HWC_HARDWARE_MODULE_ID);
      if (!err) {
-@@ -157,23 +157,26 @@ GonkDisplayJB::GetNativeWindow()
+@@ -157,27 +157,30 @@ GonkDisplayJB::GetNativeWindow()
  void
  GonkDisplayJB::SetEnabled(bool enabled)
  {
@@ -296,9 +277,14 @@ diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/G
 +    }
  
      if (!enabled) {
++        mPowerModule->setInteractive(mPowerModule, false);
          autosuspend_enable();
-         mPowerModule->setInteractive(mPowerModule, false);
+-        mPowerModule->setInteractive(mPowerModule, false);
      }
  }
  
  void
+ GonkDisplayJB::OnEnabled(OnEnabledCallbackType callback)
+ {
+     mEnabledCallback = callback;
+ }
