@@ -1,0 +1,269 @@
+# HG changeset patch
+# Parent f0c3aa24cc45d93a8f358c94266020eabccc175d
+# User Jerry Shih <hshih@mozilla.com>
+Bug 987527 - Register Vsync monitor to HWComposer
+
+diff --git a/widget/gonk/HwcComposer2D.cpp b/widget/gonk/HwcComposer2D.cpp
+--- a/widget/gonk/HwcComposer2D.cpp
++++ b/widget/gonk/HwcComposer2D.cpp
+@@ -21,16 +21,17 @@
+ #include "Framebuffer.h"
+ #include "HwcUtils.h"
+ #include "HwcComposer2D.h"
+ #include "LayerScope.h"
+ #include "mozilla/layers/LayerManagerComposite.h"
+ #include "mozilla/layers/PLayerTransaction.h"
+ #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
+ #include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
++#include "mozilla/Preferences.h"
+ #include "mozilla/StaticPtr.h"
+ #include "cutils/properties.h"
+ #include "gfx2DGlue.h"
+ 
+ #if ANDROID_VERSION >= 17
+ #include "libdisplay/FramebufferSurface.h"
+ #ifndef HWC_BLIT
+ #define HWC_BLIT (HWC_FRAMEBUFFER_TARGET + 1)
+@@ -71,16 +72,17 @@ HwcComposer2D::HwcComposer2D()
+     , mList(nullptr)
+     , mGLContext(nullptr)
+     , mMaxLayerCount(0)
+     , mColorFill(false)
+     , mRBSwapSupport(false)
+ #if ANDROID_VERSION >= 17
+     , mPrevRetireFence(Fence::NO_FENCE)
+     , mPrevDisplayFence(Fence::NO_FENCE)
++    , mHasHWVsync(false)
+ #endif
+     , mPrepared(false)
+ {
+ }
+ 
+ HwcComposer2D::~HwcComposer2D() {
+     free(mList);
+ }
+@@ -110,16 +112,32 @@ HwcComposer2D::Init(hwc_display_t dpy, h
+         }
+         if (mHwc->query(mHwc, HwcUtils::HWC_FORMAT_RB_SWAP, &supported) == NO_ERROR) {
+             mRBSwapSupport = !!supported;
+         }
+     } else {
+         mColorFill = false;
+         mRBSwapSupport = false;
+     }
++
++    if (Preferences::GetBool("gfx.hw-vsync", false)) {
++        if (mHwc->registerProcs) {
++            memset(&mHWCProcs, 0, sizeof(mHWCProcs));
++
++            mHWCProcs.invalidate = &HwcComposer2D::HookInvalidate;
++            mHWCProcs.vsync = &HwcComposer2D::HookVsync;
++            if (mHwc->common.version >= HWC_DEVICE_API_VERSION_1_1) {
++              mHWCProcs.hotplug = &HwcComposer2D::HookHotplug;
++            }
++            mHwc->registerProcs(mHwc, &mHWCProcs);
++            mHasHWVsync = true;
++
++            EnableVsync(false);
++        }
++    }
+ #else
+     char propValue[PROPERTY_VALUE_MAX];
+     property_get("ro.display.colorfill", propValue, "0");
+     mColorFill = (atoi(propValue) == 1) ? true : false;
+     mRBSwapSupport = true;
+ #endif
+ 
+     mDpy = dpy;
+@@ -134,16 +152,65 @@ HwcComposer2D::GetInstance()
+ {
+     if (!sInstance) {
+         LOGI("Creating new instance");
+         sInstance = new HwcComposer2D();
+     }
+     return sInstance;
+ }
+ 
++#if ANDROID_VERSION >= 17
++void
++HwcComposer2D::EnableVsync(bool aEnable)
++{
++    if (mHasHWVsync && mHwc && mHwc->eventControl){
++        mHwc->eventControl(mHwc, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, aEnable);
++    }
++}
++
++void
++HwcComposer2D::HookInvalidate(const struct hwc_procs* aProcs)
++{
++    HwcComposer2D::GetInstance()->Invalidate();
++}
++
++void
++HwcComposer2D::HookVsync(const struct hwc_procs* aProcs, int aDisplay,
++                         int64_t aTimestamp)
++{
++    HwcComposer2D::GetInstance()->Vsync(aDisplay, aTimestamp);
++}
++
++void
++HwcComposer2D::HookHotplug(const struct hwc_procs* aProcs, int aDisplay,
++                           int aConnected)
++{
++    HwcComposer2D::GetInstance()->Hotplug(aDisplay, aConnected);
++}
++
++void
++HwcComposer2D::Invalidate()
++{
++    //no op
++}
++
++void
++HwcComposer2D::Vsync(int aDisplay, int64_t aTimestamp)
++{
++    //process vsync here
++    printf_stderr("vsync event timestamp:%lld", aTimestamp);
++}
++
++void
++HwcComposer2D::Hotplug(int aDisplay, int aConnected)
++{
++    //no op
++}
++#endif
++
+ bool
+ HwcComposer2D::ReallocLayerList()
+ {
+     int size = sizeof(HwcList) +
+         ((mMaxLayerCount + LAYER_COUNT_INCREMENTS) * sizeof(HwcLayer));
+ 
+     HwcList* listrealloc = (HwcList*)realloc(mList, size);
+ 
+diff --git a/widget/gonk/HwcComposer2D.h b/widget/gonk/HwcComposer2D.h
+--- a/widget/gonk/HwcComposer2D.h
++++ b/widget/gonk/HwcComposer2D.h
+@@ -82,43 +82,63 @@ public:
+     // Returns TRUE if the container has been succesfully rendered
+     // Returns FALSE if the container cannot be fully rendered
+     // by this composer so nothing was rendered at all
+     bool TryRender(layers::Layer* aRoot, const gfx::Matrix& aGLWorldTransform,
+                    bool aGeometryChanged) MOZ_OVERRIDE;
+ 
+     bool Render(EGLDisplay dpy, EGLSurface sur);
+ 
++#if ANDROID_VERSION >= 17
++    void EnableVsync(bool aEnable);
++#endif
++
+ private:
+     void Reset();
+     void Prepare(buffer_handle_t fbHandle, int fence);
+     bool Commit();
+     bool TryHwComposition();
+     bool ReallocLayerList();
+     bool PrepareLayerList(layers::Layer* aContainer, const nsIntRect& aClip,
+           const gfxMatrix& aParentTransform, const gfxMatrix& aGLWorldTransform);
+     void setCrop(HwcLayer* layer, hwc_rect_t srcCrop);
+     void setHwcGeometry(bool aGeometryChanged);
+     void SendtoLayerScope();
+ 
++#if ANDROID_VERSION >= 17
++    //hwc event callback
++    static void HookInvalidate(const struct hwc_procs* aProcs);
++    static void HookVsync(const struct hwc_procs* aProcs, int aDisplay,
++                          int64_t aTimestamp);
++    static void HookHotplug(const struct hwc_procs* aProcs, int aDisplay,
++                            int aConnected);
++
++    void Invalidate();
++    void Vsync(int aDisplay, int64_t aTimestamp);
++    void Hotplug(int aDisplay, int aConnected);
++#endif
++
+     HwcDevice*              mHwc;
+     HwcList*                mList;
+     hwc_display_t           mDpy;
+     hwc_surface_t           mSur;
+     gl::GLContext*          mGLContext;
+     nsIntRect               mScreenRect;
+     int                     mMaxLayerCount;
+     bool                    mColorFill;
+     bool                    mRBSwapSupport;
+     //Holds all the dynamically allocated RectVectors needed
+     //to render the current frame
+     std::list<RectVector>   mVisibleRegions;
+ #if ANDROID_VERSION >= 17
+     android::sp<android::Fence> mPrevRetireFence;
+     android::sp<android::Fence> mPrevDisplayFence;
++
++    hwc_procs_t             mHWCProcs;
++    bool                    mHasHWVsync;
+ #endif
+     nsTArray<layers::LayerComposite*> mHwcLayerMap;
+     bool                    mPrepared;
+ };
+ 
+ } // namespace mozilla
+ 
+ #endif // mozilla_HwcComposer2D
+diff --git a/widget/gonk/libdisplay/GonkDisplayJB.cpp b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+--- a/widget/gonk/libdisplay/GonkDisplayJB.cpp
++++ b/widget/gonk/libdisplay/GonkDisplayJB.cpp
+@@ -50,18 +50,18 @@ GonkDisplayJB::GonkDisplayJB()
+     ALOGW_IF(err, "%s module not found", GRALLOC_HARDWARE_MODULE_ID);
+     if (!err) {
+         err = framebuffer_open(mFBModule, &mFBDevice);
+         ALOGW_IF(err, "could not open framebuffer");
+     }
+ 
+     if (!err && mFBDevice) {
+         mWidth = mFBDevice->width;
+-	 mHeight = mFBDevice->height;
+-	 xdpi = mFBDevice->xdpi;
++        mHeight = mFBDevice->height;
++        xdpi = mFBDevice->xdpi;
+         /* The emulator actually reports RGBA_8888, but EGL doesn't return
+          * any matching configuration. We force RGBX here to fix it. */
+         surfaceformat = HAL_PIXEL_FORMAT_RGBX_8888;
+     }
+ 
+     err = hw_get_module(HWC_HARDWARE_MODULE_ID, &mModule);
+     ALOGW_IF(err, "%s module not found", HWC_HARDWARE_MODULE_ID);
+     if (!err) {
+@@ -157,27 +157,30 @@ GonkDisplayJB::GetNativeWindow()
+ void
+ GonkDisplayJB::SetEnabled(bool enabled)
+ {
+     if (enabled) {
+         autosuspend_disable();
+         mPowerModule->setInteractive(mPowerModule, true);
+     }
+ 
+-    if (mHwc)
++    if (mHwc) {
+         mHwc->blank(mHwc, HWC_DISPLAY_PRIMARY, !enabled);
+-    else if (mFBDevice->enableScreen)
++    }
++    else if (mFBDevice->enableScreen) {
+         mFBDevice->enableScreen(mFBDevice, enabled);
++    }
+ 
+-    if (mEnabledCallback)
++    if (mEnabledCallback) {
+         mEnabledCallback(enabled);
++    }
+ 
+     if (!enabled) {
++        mPowerModule->setInteractive(mPowerModule, false);
+         autosuspend_enable();
+-        mPowerModule->setInteractive(mPowerModule, false);
+     }
+ }
+ 
+ void
+ GonkDisplayJB::OnEnabled(OnEnabledCallbackType callback)
+ {
+     mEnabledCallback = callback;
+ }

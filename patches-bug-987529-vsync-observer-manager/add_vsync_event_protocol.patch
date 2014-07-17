@@ -1,0 +1,733 @@
+# HG changeset patch
+# Parent 3affeafae08a45e75c512433b3ea19a76bf36c7f
+# User Jerry Shih <hshih@mozilla.com>
+Add a top-level ipc protocol for vsync event.
+
+diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
+--- a/dom/ipc/ContentChild.cpp
++++ b/dom/ipc/ContentChild.cpp
+@@ -32,16 +32,17 @@
+ #include "mozilla/ipc/BackgroundChild.h"
+ #include "mozilla/ipc/FileDescriptorUtils.h"
+ #include "mozilla/ipc/GeckoChildProcessHost.h"
+ #include "mozilla/ipc/TestShellChild.h"
+ #include "mozilla/layers/CompositorChild.h"
+ #include "mozilla/layers/ImageBridgeChild.h"
+ #include "mozilla/layers/PCompositorChild.h"
+ #include "mozilla/layers/SharedBufferManagerChild.h"
++#include "mozilla/layers/VsyncEventChild.h"
+ #include "mozilla/net/NeckoChild.h"
+ 
+ #if defined(MOZ_CONTENT_SANDBOX)
+ #if defined(XP_WIN)
+ #define TARGET_SANDBOX_EXPORTS
+ #include "mozilla/sandboxTarget.h"
+ #elif defined(XP_LINUX)
+ #include "mozilla/Sandbox.h"
+@@ -884,21 +885,28 @@ PCompositorChild*
+ ContentChild::AllocPCompositorChild(mozilla::ipc::Transport* aTransport,
+                                     base::ProcessId aOtherProcess)
+ {
+     return CompositorChild::Create(aTransport, aOtherProcess);
+ }
+ 
+ PSharedBufferManagerChild*
+ ContentChild::AllocPSharedBufferManagerChild(mozilla::ipc::Transport* aTransport,
+-                                              base::ProcessId aOtherProcess)
++                                             base::ProcessId aOtherProcess)
+ {
+     return SharedBufferManagerChild::StartUpInChildProcess(aTransport, aOtherProcess);
+ }
+ 
++PVsyncEventChild*
++ContentChild::AllocPVsyncEventChild(mozilla::ipc::Transport* aTransport,
++                                    base::ProcessId aOtherProcess)
++{
++    return VsyncEventChild::Create(aTransport, aOtherProcess);
++}
++
+ PImageBridgeChild*
+ ContentChild::AllocPImageBridgeChild(mozilla::ipc::Transport* aTransport,
+                                      base::ProcessId aOtherProcess)
+ {
+     return ImageBridgeChild::StartUpInChildProcess(aTransport, aOtherProcess);
+ }
+ 
+ PBackgroundChild*
+diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
+--- a/dom/ipc/ContentChild.h
++++ b/dom/ipc/ContentChild.h
+@@ -106,17 +106,21 @@ public:
+                              base::ProcessId otherProcess) MOZ_OVERRIDE;
+ 
+     PCompositorChild*
+     AllocPCompositorChild(mozilla::ipc::Transport* aTransport,
+                           base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+ 
+     PSharedBufferManagerChild*
+     AllocPSharedBufferManagerChild(mozilla::ipc::Transport* aTransport,
+-                                    base::ProcessId aOtherProcess) MOZ_OVERRIDE;
++                                   base::ProcessId aOtherProcess) MOZ_OVERRIDE;
++
++    PVsyncEventChild*
++    AllocPVsyncEventChild(mozilla::ipc::Transport* aTransport,
++                          base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+ 
+     PImageBridgeChild*
+     AllocPImageBridgeChild(mozilla::ipc::Transport* aTransport,
+                            base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+ 
+     virtual bool RecvSetProcessSandbox() MOZ_OVERRIDE;
+ 
+     PBackgroundChild*
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -56,16 +56,17 @@
+ #include "mozilla/ipc/BackgroundChild.h"
+ #include "mozilla/ipc/BackgroundParent.h"
+ #include "mozilla/ipc/FileDescriptorUtils.h"
+ #include "mozilla/ipc/TestShellParent.h"
+ #include "mozilla/ipc/InputStreamUtils.h"
+ #include "mozilla/layers/CompositorParent.h"
+ #include "mozilla/layers/ImageBridgeParent.h"
+ #include "mozilla/layers/SharedBufferManagerParent.h"
++#include "mozilla/layers/VsyncEventParent.h"
+ #include "mozilla/net/NeckoParent.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+ #include "mozilla/StaticPtr.h"
+ #include "mozilla/unused.h"
+ #include "nsAnonymousTemporaryFile.h"
+ #include "nsAppRunner.h"
+ #include "nsAutoPtr.h"
+@@ -1923,16 +1924,19 @@ ContentParent::InitInternal(ProcessPrior
+             opened = PImageBridge::Open(this);
+             MOZ_ASSERT(opened);
+ #endif
+         }
+ #ifdef MOZ_WIDGET_GONK
+         DebugOnly<bool> opened = PSharedBufferManager::Open(this);
+         MOZ_ASSERT(opened);
+ #endif
++
++        DebugOnly<bool> vsyncOpened = PVsyncEvent::Open(this);
++        MOZ_ASSERT(vsyncOpened);
+     }
+ 
+     if (aSendRegisteredChrome) {
+         nsCOMPtr<nsIChromeRegistry> registrySvc = nsChromeRegistry::GetService();
+         nsChromeRegistryChrome* chromeRegistry =
+             static_cast<nsChromeRegistryChrome*>(registrySvc.get());
+         chromeRegistry->SendRegisteredChrome(this);
+     }
+@@ -2578,21 +2582,28 @@ PBackgroundParent*
+ ContentParent::AllocPBackgroundParent(Transport* aTransport,
+                                       ProcessId aOtherProcess)
+ {
+     return BackgroundParent::Alloc(this, aTransport, aOtherProcess);
+ }
+ 
+ PSharedBufferManagerParent*
+ ContentParent::AllocPSharedBufferManagerParent(mozilla::ipc::Transport* aTransport,
+-                                                base::ProcessId aOtherProcess)
++                                               base::ProcessId aOtherProcess)
+ {
+     return SharedBufferManagerParent::Create(aTransport, aOtherProcess);
+ }
+ 
++PVsyncEventParent*
++ContentParent::AllocPVsyncEventParent(mozilla::ipc::Transport* aTransport,
++                                      base::ProcessId aOtherProcess)
++{
++    return VsyncEventParent::Create(aTransport, aOtherProcess);
++}
++
+ bool
+ ContentParent::RecvGetProcessAttributes(uint64_t* aId,
+                                         bool* aIsForApp, bool* aIsForBrowser)
+ {
+     *aId = mChildID;
+     *aIsForApp = IsForApp();
+     *aIsForBrowser = mIsForBrowser;
+ 
+diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
+--- a/dom/ipc/ContentParent.h
++++ b/dom/ipc/ContentParent.h
+@@ -369,20 +369,22 @@ private:
+     void ShutDownMessageManager();
+ 
+     PCompositorParent*
+     AllocPCompositorParent(mozilla::ipc::Transport* aTransport,
+                            base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+     PImageBridgeParent*
+     AllocPImageBridgeParent(mozilla::ipc::Transport* aTransport,
+                             base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+-
+     PSharedBufferManagerParent*
+     AllocPSharedBufferManagerParent(mozilla::ipc::Transport* aTranport,
+-                                     base::ProcessId aOtherProcess) MOZ_OVERRIDE;
++                                    base::ProcessId aOtherProcess) MOZ_OVERRIDE;
++    PVsyncEventParent*
++    AllocPVsyncEventParent(mozilla::ipc::Transport* aTranport,
++                           base::ProcessId aOtherProcess) MOZ_OVERRIDE;
+     PBackgroundParent*
+     AllocPBackgroundParent(Transport* aTransport, ProcessId aOtherProcess)
+                            MOZ_OVERRIDE;
+ 
+     virtual bool RecvGetProcessAttributes(uint64_t* aId,
+                                           bool* aIsForApp,
+                                           bool* aIsForBrowser) MOZ_OVERRIDE;
+     virtual bool RecvGetXPCOMProcessAttributes(bool* aIsOffline) MOZ_OVERRIDE;
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -25,16 +25,17 @@ include protocol PMemoryReportRequest;
+ include protocol PNecko;
+ include protocol PSharedBufferManager;
+ include protocol PSms;
+ include protocol PSpeechSynthesis;
+ include protocol PStorage;
+ include protocol PTelephony;
+ include protocol PTestShell;
+ include protocol PJavaScript;
++include protocol PVsyncEvent;
+ include DOMTypes;
+ include JavaScriptTypes;
+ include InputStreamParams;
+ include PTabContext;
+ include URIParams;
+ include ProtocolTypes;
+ 
+ using GeoPosition from "nsGeoPositionIPCSerialiser.h";
+@@ -281,16 +282,17 @@ struct DataStoreSetting {
+   bool enabled;
+ };
+ 
+ intr protocol PContent
+ {
+     parent opens PCompositor;
+     parent opens PSharedBufferManager;
+     parent opens PImageBridge;
++    parent opens PVsyncEvent;
+     child opens PBackground;
+ 
+     manages PAsmJSCacheEntry;
+     manages PBlob;
+     manages PBluetooth;
+     manages PBrowser;
+     manages PCrashReporter;
+     manages PCycleCollectWithLogs;
+diff --git a/gfx/layers/ipc/PVsyncEvent.ipdl b/gfx/layers/ipc/PVsyncEvent.ipdl
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ipc/PVsyncEvent.ipdl
+@@ -0,0 +1,29 @@
++/* -*- Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil; tab-width: 8 -*- */
++/* vim: set sw=2 ts=4 et tw=80 ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++include ProtocolTypes;
++
++namespace mozilla {
++namespace layers {
++
++struct VsyncData
++{
++  int64_t timeStamp;
++  int32_t frameNumber;
++};
++
++sync protocol PVsyncEvent
++{
++child:
++  NotifyVsyncEvent(VsyncData aVsyncData);
++
++parent:
++  EnableVsyncEventNotification();
++  DisableVsyncEventNotification();
++};
++
++} // namespace layers
++} // namespace mozilla
+diff --git a/gfx/layers/ipc/VsyncEventChild.cpp b/gfx/layers/ipc/VsyncEventChild.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ipc/VsyncEventChild.cpp
+@@ -0,0 +1,148 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=4 et tw=80 : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "mozilla/layers/VsyncEventChild.h"
++#include "base/thread.h"
++#include "nsXULAppAPI.h"
++
++#ifdef MOZ_NUWA_PROCESS
++#include "ipc/Nuwa.h"
++#endif
++
++//#define VSYNC_EVENT_CHILD_CREATE_THREAD
++
++//#define PRINT_VSYNC_DEBUG
++
++#ifdef PRINT_VSYNC_DEBUG
++#define VSYNC_DEBUG_MESSAGE printf_stderr("bignose tid:%d %s",gettid(),__PRETTY_FUNCTION__)
++#else
++#define VSYNC_DEBUG_MESSAGE
++#endif
++
++using namespace base;
++using namespace mozilla::ipc;
++
++namespace mozilla {
++namespace layers {
++
++static VsyncEventChild* sVsyncEventChild = nullptr;
++
++static Thread* sVsyncEventChildThread = nullptr;
++
++static bool
++CreateVsyncChildThread()
++{
++  if (sVsyncEventChildThread) {
++    return true;
++  }
++
++  sVsyncEventChildThread = new Thread("Vsync child ipc thread");
++
++  if (!sVsyncEventChildThread->Start()) {
++    delete sVsyncEventChildThread;
++    sVsyncEventChildThread = nullptr;
++    return false;
++  }
++
++  return true;
++}
++
++static void
++ConnectVsyncEventChild(VsyncEventChild* aVsyncEventChild,
++                       Transport* aTransport,
++                       ProcessHandle aOtherProcess)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  aVsyncEventChild->Open(aTransport, aOtherProcess, XRE_GetIOMessageLoop(), ChildSide);
++
++#ifdef MOZ_NUWA_PROCESS
++  if (IsNuwaProcess()) {
++    aVsyncEventChild->GetMessageLoop()->PostTask(FROM_HERE,
++                                                 NewRunnableFunction(NuwaMarkCurrentThread,
++                                                 (void (*)(void *))nullptr,
++                                                 (void *)nullptr));
++  }
++#endif
++}
++
++PVsyncEventChild*
++VsyncEventChild::Create(Transport* aTransport, ProcessId aOtherProcess)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  NS_ASSERTION(NS_IsMainThread(), "Should be on the main Thread!");
++
++  ProcessHandle processHandle;
++  if (!OpenProcessHandle(aOtherProcess, &processHandle)) {
++    return nullptr;
++  }
++
++#ifdef VSYNC_EVENT_CHILD_CREATE_THREAD
++  if (!CreateVsyncChildThread()) {
++    return nullptr;
++  }
++  sVsyncEventChild = new VsyncEventChild(sVsyncEventChildThread->message_loop(),
++                                         aTransport);
++
++  sVsyncEventChild->GetMessageLoop()->PostTask(FROM_HERE, NewRunnableFunction(
++                                               &ConnectVsyncEventChild,
++                                               sVsyncEventChild,
++                                               aTransport,
++                                               processHandle));
++#else
++  sVsyncEventChild = new VsyncEventChild(MessageLoop::current(), aTransport);
++
++  sVsyncEventChild->Open(aTransport, aOtherProcess, XRE_GetIOMessageLoop(), ChildSide);
++#endif
++
++  return sVsyncEventChild;
++}
++
++VsyncEventChild*
++VsyncEventChild::GetSingleton()
++{
++  return sVsyncEventChild;
++}
++
++VsyncEventChild::VsyncEventChild(MessageLoop* aMessageLoop, Transport* aTransport)
++  : mMessageLoop(aMessageLoop)
++  , mTransport(aTransport)
++{
++
++}
++
++VsyncEventChild::~VsyncEventChild()
++{
++  if (mTransport) {
++    XRE_GetIOMessageLoop()->PostTask(FROM_HERE,
++                                     new DeleteTask<Transport>(mTransport));
++  }
++}
++
++bool VsyncEventChild::RecvNotifyVsyncEvent(const VsyncData& aVsyncData)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  return true;
++}
++
++void
++VsyncEventChild::ActorDestroy(ActorDestroyReason aActorDestroyReason)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  return;
++}
++
++MessageLoop*
++VsyncEventChild::GetMessageLoop()
++{
++  return mMessageLoop;
++}
++
++} //layers
++} //mozilla
+diff --git a/gfx/layers/ipc/VsyncEventChild.h b/gfx/layers/ipc/VsyncEventChild.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ipc/VsyncEventChild.h
+@@ -0,0 +1,39 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=4 et tw=80 : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef MOZILLA_GFX_VSYNCEVENTCHILD_H
++#define MOZILLA_GFX_VSYNCEVENTCHILD_H
++
++#include "mozilla/layers/PVsyncEventChild.h"
++
++namespace mozilla {
++namespace layers {
++
++class VsyncEventChild MOZ_FINAL : public PVsyncEventChild
++{
++public:
++  static PVsyncEventChild* Create(Transport* aTransport,
++                                  ProcessId aOtherProcess);
++
++  static VsyncEventChild* GetSingleton();
++
++  VsyncEventChild(MessageLoop* aMessageLoop, Transport* aTransport);
++  ~VsyncEventChild();
++
++  virtual bool RecvNotifyVsyncEvent(const VsyncData& aVsyncData) MOZ_OVERRIDE;
++
++  virtual void ActorDestroy(ActorDestroyReason aActorDestroyReason) MOZ_OVERRIDE;
++
++  MessageLoop* GetMessageLoop();
++
++private:
++  MessageLoop* mMessageLoop;
++  Transport* mTransport;
++};
++
++} //layers
++} //mozilla
++#endif  //MOZILLA_GFX_VSYNCEVENTCHILD_H
+diff --git a/gfx/layers/ipc/VsyncEventParent.cpp b/gfx/layers/ipc/VsyncEventParent.cpp
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ipc/VsyncEventParent.cpp
+@@ -0,0 +1,147 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=4 et tw=80 : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "mozilla/layers/VsyncEventParent.h"
++#include "mozilla/ipc/Transport.h"
++#include "base/thread.h"
++#include "nsXULAppAPI.h"
++
++//#define PRINT_VSYNC_DEBUG
++
++#ifdef PRINT_VSYNC_DEBUG
++#define VSYNC_DEBUG_MESSAGE printf_stderr("bignose tid:%d %s",gettid(),__PRETTY_FUNCTION__)
++#else
++#define VSYNC_DEBUG_MESSAGE
++#endif
++
++using namespace base;
++using namespace mozilla::ipc;
++
++namespace mozilla {
++namespace layers {
++
++static Thread* sVsyncEventParentThread = nullptr;
++
++static bool
++CreateVsyncParentThread()
++{
++  if (sVsyncEventParentThread) {
++    return true;
++  }
++
++  sVsyncEventParentThread = new Thread("Vsync parent ipc thread");
++
++  if (!sVsyncEventParentThread->Start()) {
++    delete sVsyncEventParentThread;
++    sVsyncEventParentThread = nullptr;
++    return false;
++  }
++
++  return true;
++}
++
++static void
++ConnectVsyncEventParent(PVsyncEventParent* aVsyncEventParent,
++                        Transport* aTransport,
++                        ProcessHandle aOtherProcess)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  aVsyncEventParent->Open(aTransport, aOtherProcess, XRE_GetIOMessageLoop(), ParentSide);
++}
++
++/*static*/ PVsyncEventParent*
++VsyncEventParent::Create(Transport* aTransport, ProcessId aOtherProcess)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  ProcessHandle processHandle;
++  if (!OpenProcessHandle(aOtherProcess, &processHandle)) {
++    return nullptr;
++  }
++
++  if (!CreateVsyncParentThread()) {
++    return nullptr;
++  }
++
++  VsyncEventParent* vsync = new VsyncEventParent(sVsyncEventParentThread->message_loop(),
++                                                 aTransport);
++
++  vsync->GetMessageLoop()->PostTask(FROM_HERE, NewRunnableFunction(
++                                    &ConnectVsyncEventParent,
++                                    vsync,
++                                    aTransport,
++                                    processHandle));
++
++  return vsync;
++}
++
++VsyncEventParent::VsyncEventParent(MessageLoop* aMessageLoop, Transport* aTransport)
++  : mMessageLoop(aMessageLoop)
++  , mTransport(aTransport)
++{
++
++}
++
++VsyncEventParent::~VsyncEventParent()
++{
++  if (mTransport) {
++    XRE_GetIOMessageLoop()->PostTask(FROM_HERE,
++                                     new DeleteTask<Transport>(mTransport));
++  }
++}
++
++bool
++VsyncEventParent::RecvEnableVsyncEventNotification()
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  return true;
++}
++
++bool
++VsyncEventParent::RecvDisableVsyncEventNotification()
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  return true;
++}
++
++void
++VsyncEventParent::ActorDestroy(ActorDestroyReason aActorDestroyReason)
++{
++  VSYNC_DEBUG_MESSAGE;
++
++  return;
++}
++
++IToplevelProtocol*
++VsyncEventParent::CloneToplevel(const InfallibleTArray<ProtocolFdMapping>& aFds,
++                                ProcessHandle aPeerProcess,
++                                ProtocolCloneContext* aCtx)
++{
++  for (unsigned int i = 0; i < aFds.Length(); i++) {
++    if (aFds[i].protocolId() == unsigned(GetProtocolId())) {
++      Transport* transport = OpenDescriptor(aFds[i].fd(), Transport::MODE_SERVER);
++      PVsyncEventParent* vsync = Create(transport, GetProcId(aPeerProcess));
++
++      vsync->CloneManagees(this, aCtx);
++      vsync->IToplevelProtocol::SetTransport(transport);
++
++      return vsync;
++    }
++  }
++  return nullptr;
++}
++
++MessageLoop*
++VsyncEventParent::GetMessageLoop()
++{
++  return mMessageLoop;
++}
++
++} //layers
++} //mozilla
+diff --git a/gfx/layers/ipc/VsyncEventParent.h b/gfx/layers/ipc/VsyncEventParent.h
+new file mode 100644
+--- /dev/null
++++ b/gfx/layers/ipc/VsyncEventParent.h
+@@ -0,0 +1,41 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=4 et tw=80 : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef MOZILLA_VSYNC_EVENT_PARENT_H
++#define MOZILLA_VSYNC_EVENT_PARENT_H
++
++#include "mozilla/layers/PVsyncEventParent.h"
++
++namespace mozilla {
++namespace layers {
++
++class VsyncEventParent MOZ_FINAL : public PVsyncEventParent
++{
++public:
++  static PVsyncEventParent* Create(Transport* aTransport, ProcessId aOtherProcess);
++
++  VsyncEventParent(MessageLoop* aMessageLoop, Transport* aTransport);
++  ~VsyncEventParent();
++
++  virtual bool RecvEnableVsyncEventNotification() MOZ_OVERRIDE;
++  virtual bool RecvDisableVsyncEventNotification() MOZ_OVERRIDE;
++
++  virtual void ActorDestroy(ActorDestroyReason aActorDestroyReason) MOZ_OVERRIDE;
++
++  virtual IToplevelProtocol* CloneToplevel(const InfallibleTArray<ProtocolFdMapping>& aFds,
++                                           ProcessHandle aPeerProcess,
++                                           ProtocolCloneContext* aCtx) MOZ_OVERRIDE;
++
++  MessageLoop* GetMessageLoop();
++
++private:
++  MessageLoop* mMessageLoop;
++  Transport* mTransport;
++};
++
++} //layers
++} //mozilla
++#endif  //MOZILLA_VSYNC_EVENT_PARENT_H
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -150,16 +150,18 @@ EXPORTS.mozilla.layers += [
+     'ipc/LayerTransactionChild.h',
+     'ipc/LayerTransactionParent.h',
+     'ipc/ShadowLayers.h',
+     'ipc/ShadowLayersManager.h',
+     'ipc/SharedBufferManagerChild.h',
+     'ipc/SharedBufferManagerParent.h',
+     'ipc/SharedPlanarYCbCrImage.h',
+     'ipc/SharedRGBImage.h',
++    'ipc/VsyncEventChild.h',
++    'ipc/VsyncEventParent.h',
+     'LayersTypes.h',
+     'opengl/CompositingRenderTargetOGL.h',
+     'opengl/CompositorOGL.h',
+     'opengl/GrallocTextureClient.h',
+     'opengl/GrallocTextureHost.h',
+     'opengl/MacIOSurfaceTextureClientOGL.h',
+     'opengl/MacIOSurfaceTextureHostOGL.h',
+     'opengl/TextureClientOGL.h',
+@@ -293,16 +295,18 @@ UNIFIED_SOURCES += [
+     'ipc/LayerTransactionParent.cpp',
+     'ipc/ShadowLayerChild.cpp',
+     'ipc/ShadowLayerParent.cpp',
+     'ipc/ShadowLayers.cpp',
+     'ipc/SharedBufferManagerChild.cpp',
+     'ipc/SharedBufferManagerParent.cpp',
+     'ipc/SharedPlanarYCbCrImage.cpp',
+     'ipc/SharedRGBImage.cpp',
++    'ipc/VsyncEventChild.cpp',
++    'ipc/VsyncEventParent.cpp',
+     'LayerScope.cpp',
+     'LayersLogging.cpp',
+     'LayerSorter.cpp',
+     'opengl/CompositingRenderTargetOGL.cpp',
+     'opengl/CompositorOGL.cpp',
+     'opengl/OGLShaderProgram.cpp',
+     'opengl/TextureClientOGL.cpp',
+     'opengl/TextureHostOGL.cpp',
+@@ -340,16 +344,17 @@ IPDL_SOURCES = [
+     'ipc/LayersSurfaces.ipdlh',
+     'ipc/PCompositable.ipdl',
+     'ipc/PCompositor.ipdl',
+     'ipc/PImageBridge.ipdl',
+     'ipc/PLayer.ipdl',
+     'ipc/PLayerTransaction.ipdl',
+     'ipc/PSharedBufferManager.ipdl',
+     'ipc/PTexture.ipdl',
++    'ipc/PVsyncEvent.ipdl',
+ ]
+ 
+ FAIL_ON_WARNINGS = True
+ 
+ MSVC_ENABLE_PGO = True
+ 
+ include('/ipc/chromium/chromium-config.mozbuild')
+ 
+diff --git a/xpcom/glue/nsHashKeys.h b/xpcom/glue/nsHashKeys.h
+--- a/xpcom/glue/nsHashKeys.h
++++ b/xpcom/glue/nsHashKeys.h
+@@ -488,19 +488,19 @@ private:
+  * the string lives longer than the hash table.
+  */
+ class nsCharPtrHashKey : public PLDHashEntryHdr
+ {
+ public:
+   typedef const char* KeyType;
+   typedef const char* KeyTypePointer;
+ 
+-  nsCharPtrHashKey(const char* aKey) : mKey(strdup(aKey)) {}
++  nsCharPtrHashKey(const char* aKey) : mKey(::strdup(aKey)) {}
+   nsCharPtrHashKey(const nsCharPtrHashKey& aToCopy)
+-    : mKey(strdup(aToCopy.mKey))
++    : mKey(::strdup(aToCopy.mKey))
+   {
+   }
+ 
+   nsCharPtrHashKey(nsCharPtrHashKey&& aOther)
+     : mKey(aOther.mKey)
+   {
+     aOther.mKey = nullptr;
+   }

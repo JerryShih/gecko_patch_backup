@@ -1,0 +1,252 @@
+# HG changeset patch
+# Parent 7ef50cf6131859c8850ac2d6d7d6284e14a84197
+# User Jerry Shih <hshih@mozilla.com>
+Trigger composing when vsync event comes.
+* * *
+Do compose with vsync event.
+
+diff --git a/gfx/layers/ipc/CompositorParent.cpp b/gfx/layers/ipc/CompositorParent.cpp
+--- a/gfx/layers/ipc/CompositorParent.cpp
++++ b/gfx/layers/ipc/CompositorParent.cpp
+@@ -49,16 +49,20 @@
+ #include "mozilla/layers/CompositorD3D9.h"
+ #endif
+ #include "GeckoProfiler.h"
+ #include "mozilla/ipc/ProtocolTypes.h"
+ #include "mozilla/unused.h"
+ #include "mozilla/Hal.h"
+ #include "mozilla/HalTypes.h"
+ #include "mozilla/StaticPtr.h"
++#include "mozilla/Preferences.h"
++#ifdef MOZ_WIDGET_GONK
++#include "GonkVsyncDispatcher.h"
++#endif
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ using namespace base;
+ using namespace mozilla::ipc;
+ using namespace mozilla::gfx;
+ using namespace std;
+@@ -213,16 +217,18 @@ CompositorParent::CompositorParent(nsIWi
+   , mPaused(false)
+   , mUseExternalSurfaceSize(aUseExternalSurfaceSize)
+   , mEGLSurfaceSize(aSurfaceWidth, aSurfaceHeight)
+   , mPauseCompositionMonitor("PauseCompositionMonitor")
+   , mResumeCompositionMonitor("ResumeCompositionMonitor")
+   , mOverrideComposeReadiness(false)
+   , mForceCompositionTask(nullptr)
+   , mCompositorThreadHolder(sCompositorThreadHolder)
++  , mEnableVsyncDispatch(false)
++  , mNeedVsyncCompose(false)
+ {
+   MOZ_ASSERT(NS_IsMainThread());
+   MOZ_ASSERT(CompositorThread(),
+              "The compositor thread must be Initialized before instanciating a CompositorParent.");
+   MOZ_COUNT_CTOR(CompositorParent);
+   mCompositorID = 0;
+   // FIXME: This holds on the the fact that right now the only thing that
+   // can destroy this instance is initialized on the compositor thread after
+@@ -231,16 +237,18 @@ CompositorParent::CompositorParent(nsIWi
+                                                           this, &mCompositorID));
+ 
+   CompositorLoop()->PostTask(FROM_HERE, NewRunnableFunction(SetThreadPriority));
+ 
+   mRootLayerTreeID = AllocateLayerTreeId();
+   sIndirectLayerTrees[mRootLayerTreeID].mParent = this;
+ 
+   mApzcTreeManager = new APZCTreeManager();
++  
++  mEnableVsyncDispatch = Preferences::GetBool("gfx.hw-vsync", false);
+ }
+ 
+ bool
+ CompositorParent::IsInCompositorThread()
+ {
+   return CompositorThread() && CompositorThread()->thread_id() == PlatformThread::CurrentId();
+ }
+ 
+@@ -408,17 +416,16 @@ CompositorParent::ActorDestroy(ActorDest
+     mLayerManager->Destroy();
+     mLayerManager = nullptr;
+     sIndirectLayerTrees[mRootLayerTreeID].mLayerManager = nullptr;
+     mCompositionManager = nullptr;
+     mCompositor = nullptr;
+   }
+ }
+ 
+-
+ void
+ CompositorParent::ScheduleRenderOnCompositorThread()
+ {
+   CancelableTask *renderTask = NewRunnableMethod(this, &CompositorParent::ScheduleComposition);
+   CompositorLoop()->PostTask(FROM_HERE, renderTask);
+ }
+ 
+ void
+@@ -579,45 +586,79 @@ CalculateCompositionFrameRate()
+     return layoutFrameRatePref;
+   }
+   return compositionFrameRatePref;
+ }
+ 
+ void
+ CompositorParent::ScheduleComposition()
+ {
+-  if (mCurrentCompositeTask || mPaused) {
+-    return;
++  MOZ_RELEASE_ASSERT(IsInCompositorThread(),
++      "ScheduleComposition can only be called on the compositor thread");
++
++  if (mEnableVsyncDispatch) {
++    if (mNeedVsyncCompose || mPaused) {
++      return;
++    }
++
++    mNeedVsyncCompose = true;
++    //register compositer to vsync dispatcher
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->RegisterCompositer(this);
++#endif
+   }
++  else {
++    if (mCurrentCompositeTask || mPaused) {
++      return;
++    }
+ 
+-  bool initialComposition = mLastCompose.IsNull();
+-  TimeDuration delta;
+-  if (!initialComposition)
+-    delta = TimeStamp::Now() - mLastCompose;
++    bool initialComposition = mLastCompose.IsNull();
++    TimeDuration delta;
++    if (!initialComposition)
++      delta = TimeStamp::Now() - mLastCompose;
+ 
+-  int32_t rate = CalculateCompositionFrameRate();
++    int32_t rate = CalculateCompositionFrameRate();
+ 
+-  // If rate == 0 (ASAP mode), minFrameDelta must be 0 so there's no delay.
+-  TimeDuration minFrameDelta = TimeDuration::FromMilliseconds(
+-    rate == 0 ? 0.0 : std::max(0.0, 1000.0 / rate));
++    // If rate == 0 (ASAP mode), minFrameDelta must be 0 so there's no delay.
++    TimeDuration minFrameDelta = TimeDuration::FromMilliseconds(
++      rate == 0 ? 0.0 : std::max(0.0, 1000.0 / rate));
+ 
+ 
+-  mCurrentCompositeTask = NewRunnableMethod(this, &CompositorParent::CompositeCallback);
++    mCurrentCompositeTask = NewRunnableMethod(this, &CompositorParent::CompositeCallback);
+ 
+-  if (!initialComposition && delta < minFrameDelta) {
+-    TimeDuration delay = minFrameDelta - delta;
++    if (!initialComposition && delta < minFrameDelta) {
++      TimeDuration delay = minFrameDelta - delta;
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+-    mExpectedComposeStartTime = TimeStamp::Now() + delay;
++      mExpectedComposeStartTime = TimeStamp::Now() + delay;
+ #endif
+-    ScheduleTask(mCurrentCompositeTask, delay.ToMilliseconds());
+-  } else {
++      ScheduleTask(mCurrentCompositeTask, delay.ToMilliseconds());
++    } else {
+ #ifdef COMPOSITOR_PERFORMANCE_WARNING
+-    mExpectedComposeStartTime = TimeStamp::Now();
++      mExpectedComposeStartTime = TimeStamp::Now();
+ #endif
+-    ScheduleTask(mCurrentCompositeTask, 0);
++      ScheduleTask(mCurrentCompositeTask, 0);
++    }
++  }
++}
++
++void
++CompositorParent::VsyncComposition()
++{
++  MOZ_RELEASE_ASSERT(IsInCompositorThread(),
++      "VsyncComposition can only be called on the compositor thread");
++
++  if (mEnableVsyncDispatch) {
++    mNeedVsyncCompose = false;
++
++    //unregister compositer to vsync dispatcher
++#ifdef MOZ_WIDGET_GONK
++    GonkVsyncDispatcher::GetInstance()->UnregisterCompositer(this);
++#endif
++
++    CompositeCallback();
+   }
+ }
+ 
+ void
+ CompositorParent::CompositeCallback()
+ {
+   mCurrentCompositeTask = nullptr;
+   CompositeToTarget(nullptr);
+diff --git a/gfx/layers/ipc/CompositorParent.h b/gfx/layers/ipc/CompositorParent.h
+--- a/gfx/layers/ipc/CompositorParent.h
++++ b/gfx/layers/ipc/CompositorParent.h
+@@ -142,16 +142,19 @@ public:
+    */
+   void ForceIsFirstPaint();
+   void Destroy();
+ 
+   void NotifyChildCreated(const uint64_t& aChild);
+ 
+   void AsyncRender();
+ 
++  // only can be called from compositor thread
++  void VsyncComposition();
++
+   // Can be called from any thread
+   void ScheduleRenderOnCompositorThread();
+   void SchedulePauseOnCompositorThread();
+   /**
+    * Returns true if a surface was obtained and the resume succeeded; false
+    * otherwise.
+    */
+   bool ScheduleResumeOnCompositorThread(int width, int height);
+@@ -332,15 +335,19 @@ protected:
+ 
+   bool mOverrideComposeReadiness;
+   CancelableTask* mForceCompositionTask;
+ 
+   nsRefPtr<APZCTreeManager> mApzcTreeManager;
+ 
+   nsRefPtr<CompositorThreadHolder> mCompositorThreadHolder;
+ 
++  bool mNeedVsyncCompose;
++
++  bool mEnableVsyncDispatch;
++
+   DISALLOW_EVIL_CONSTRUCTORS(CompositorParent);
+ };
+ 
+ } // layers
+ } // mozilla
+ 
+ #endif // mozilla_layers_CompositorParent_h
+diff --git a/widget/gonk/GonkVsyncDispatcher.cpp b/widget/gonk/GonkVsyncDispatcher.cpp
+--- a/widget/gonk/GonkVsyncDispatcher.cpp
++++ b/widget/gonk/GonkVsyncDispatcher.cpp
+@@ -438,17 +438,19 @@ GonkVsyncDispatcher::Compose(const Vsync
+   MutexAutoLock lock(mCompositorListMutex);
+ 
+   // CompositorParent::ScheduleComposition is an async call, assume it takes minor
+   // period.
+   for (CompositorList::size_type i = 0; i < mCompositorList.Length(); i++) {
+     layers::CompositorParent *compositor = mCompositorList[i];
+     // TODO: need to change behavior of ScheduleComposition(). No Delay, fire
+     // Composit ASAP.
+-    compositor->ScheduleRenderOnCompositorThread();
++    CompositorParent::CompositorLoop()->PostTask(FROM_HERE,
++                                        NewRunnableMethod(compositor,
++                                        &CompositorParent::VsyncComposition));
+   }
+ }
+ 
+ void
+ GonkVsyncDispatcher::NotifyVsyncEventChild(const VsyncData& aVsyncData)
+ {
+   // Tick all registered content process.
+   for (VsyncEventParentList::size_type i = 0; i < mVsyncEventParentList.Length(); i++) {

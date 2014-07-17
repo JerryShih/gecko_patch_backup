@@ -1,5 +1,5 @@
 # HG changeset patch
-# Parent e84a391b604b6690c8360f20518a70172679fff3
+# Parent a18ff2303b09a9815fff44ca649fed575cb3b712
 # User Jerry Shih <hshih@mozilla.com>
 modify gfx build option to -O0
 
@@ -96,12 +96,12 @@ diff --git a/gfx/thebes/Makefile.in b/gfx/thebes/Makefile.in
 diff --git a/ipc/chromium/Makefile.in b/ipc/chromium/Makefile.in
 --- a/ipc/chromium/Makefile.in
 +++ b/ipc/chromium/Makefile.in
-@@ -31,8 +31,11 @@ ifdef MOZ_NATIVE_LIBEVENT # {
- export-preqs = \
-   $(call mkdir_deps,$(CURDIR)/third_party/libevent) \
+@@ -33,8 +33,11 @@ export-preqs = \
    $(NULL)
  
- export:: $(export-preqs)
+ export:: $(DIST)/third_party/libevent/event.h
+ 
+ $(DIST)/third_party/libevent/event.h:: $(export-preqs)
  	echo '#include <event.h>' > $(CURDIR)/third_party/libevent/event.h
  
  endif # }

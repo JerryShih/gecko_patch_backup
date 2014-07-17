@@ -1,0 +1,758 @@
+# HG changeset patch
+# Parent 7509cba60a4c88192448f5bb597dace8865a78b7
+# User Jerry Shih <hshih@mozilla.com>
+Vsync system utils:
+1.latency measurement
+
+diff --git a/widget/VsyncDispatcherUtils.h b/widget/VsyncDispatcherUtils.h
+new file mode 100644
+--- /dev/null
++++ b/widget/VsyncDispatcherUtils.h
+@@ -0,0 +1,517 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* vim: set sw=2 ts=8 et ft=cpp : */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_VsyncDispatcherUtils_h
++#define mozilla_VsyncDispatcherUtils_h
++
++#include "base/ref_counted.h"
++#include "base/task.h"
++#include "nsThreadUtils.h"
++
++#include "GeckoProfiler.h"
++
++namespace mozilla {
++
++template<uint32_t DataNum>
++class VsyncLatencyLogger
++{
++public:
++  VsyncLatencyLogger(const char *msg="")
++    :mMsg(msg)
++  {
++    Reset();
++
++    mDataArray.reserve(DataNum);
++  }
++  ~VsyncLatencyLogger()
++  {
++
++  }
++
++  void Update(int32_t aUSLatencyData, uint32_t aFrameNumber, uint32_t aUSExecuteTime)
++  {
++    mDataArray[mNextDataIndex] = VsyncLatencyData(aUSLatencyData, aFrameNumber, aUSExecuteTime);
++    mNextDataIndex = (mNextDataIndex + 1) % DataNum;
++  }
++
++  void PrintStatisticData()
++  {
++    if (mNum) {
++      return;
++    }
++
++    uint32_t maxIndex = GetMaxIndex();
++    uint32_t minIndex = GetMinIndex();
++
++    printf_stderr("%-20s, std:%4.3f, avg:%4.3fms, max:(%d, %4.3fms, %4.3fms), min:(%d, %4.3fms, %4.3fms)",
++                  mMsg,
++                  GetMSAVG(),
++                  GetMSSTD(),
++                  mDataArray[maxIndex].mFrameNumber,
++                  mDataArray[maxIndex].mLatencyUS * 0.001f,
++                  mDataArray[maxIndex].mExecuteTimeUS * 0.001f,
++                  mDataArray[minIndex].mFrameNumber,
++                  mDataArray[minIndex].mLatencyUS * 0.001f,
++                  mDataArray[minIndex].mExecuteTimeUS * 0.001f);
++
++    Reset();
++  }
++
++  void PrintAllData()
++  {
++    if (mNum) {
++      return;
++    }
++
++    for (uint32_t i = 0; i < mNum; ++i) {
++      uint32_t index = GetDataIndex(i);
++
++      printf_stderr("%-20s, (%d, %4.3fms, %4.3fms)",
++                    mMsg,
++                    mDataArray[GetDataIndex(i)].mFrameNumber,
++                    mDataArray[GetDataIndex(i)].mLatencyUS * 0.001f,
++                    mDataArray[GetDataIndex(i)].mExecuteTimeUS * 0.001f);
++    }
++
++    Reset();
++  }
++
++private:
++  class VsyncLatencyData
++  {
++  public:
++    VsyncLatencyData()
++      : mLatencyUS(0)
++      , mFrameNumber(0)
++      , mExecuteTimeUS(0)
++    {
++    }
++
++    VsyncLatencyData(uint32_t aLatencyUS, uint32_t aFrameNumber, uint32_t aUSExecuteTime)
++    {
++      mLatencyUS = aLatencyUS;
++      mFrameNumber = aFrameNumber;
++      mExecuteTimeUS = aUSExecuteTime;
++    }
++
++    VsyncLatencyData(const VsyncLatencyData& aData)
++    {
++      mLatencyUS = aData.mLatencyUS;
++      mFrameNumber = aData.mFrameNumber;
++      mExecuteTimeUS = aData.mExecuteTimeUS;
++    }
++
++    VsyncLatencyData& operator=(const VsyncLatencyData& rData)
++    {
++      mLatencyUS = rData.mLatencyUS;
++      mFrameNumber = rData.mFrameNumber;
++      mExecuteTimeUS = rData.mExecuteTimeUS;
++
++      return *this;
++    }
++
++    uint32_t mLatencyUS;
++    uint32_t mFrameNumber;
++    uint32_t mExecuteTimeUS;
++  };
++
++  void Reset()
++  {
++    mNum = 0;
++    mNextDataIndex = 0;
++  }
++
++  uint32_t GetDataIndex(uint32_t aDataNumber)
++  {
++    return (mNextDataIndex + DataNum - mNum + aDataNumber) % DataNum;
++  }
++
++  uint32_t GetMaxIndex()
++  {
++    uint32_t maxValue = std::numeric_limits<uint32_t>::min();
++    uint32_t maxIndex = 0;
++
++    for (uint32_t i = 0; i < mNum; ++i) {
++      uint32_t index = GetDataIndex(i);
++      if (maxValue < mDataArray[index].mLatencyUS) {
++        maxValue = mDataArray[index].mLatencyUS;
++        maxIndex = index;
++      }
++    }
++
++    return maxIndex;
++  }
++
++  uint32_t GetMinIndex()
++  {
++    uint32_t minValue = std::numeric_limits<uint32_t>::max();
++    uint32_t minIndex = 0;
++
++    for (uint32_t i = 0; i < mNum; ++i) {
++      uint32_t index = GetDataIndex(i);
++      if (minValue > mDataArray[index].mLatencyUS) {
++        minValue = mDataArray[index].mLatencyUS;
++        minIndex = index;
++      }
++    }
++
++    return minIndex;
++  }
++
++  float GetMSAVG()
++  {
++    uint32_t total = 0;
++    for (uint32_t i = 0; i < mNum; ++i) {
++      total += mDataArray[GetDataIndex(i)].mLatencyUS;
++    }
++
++    return (float) total / mNum * 0.001;
++  }
++
++  float GetMSSTD(void)
++  {
++    float variance = 0.0f;
++    float avg = GetMSAVG();
++
++    for (uint32_t i = 0; i < mNum; ++i) {
++      float delta = mDataArray[GetDataIndex(i)].mLatencyUS * 0.001f - avg;
++      variance += delta * delta;
++    }
++
++    return std::sqrt(variance / mNum);
++  }
++
++  std::vector<VsyncLatencyData> mDataArray;
++  uint32_t mNum;
++  uint32_t mNextDataIndex;
++
++  const char* mMsg;
++};
++
++enum VsyncLogType{
++  VSYNC_LOG_NONE,
++  VSYNC_LOG_LATENCY,
++  VSYNC_LOG_PROFILER_TAG,
++  VSYNC_LOG_ALL,
++};
++
++template<VsyncLogType LogType>
++class VsyncLogTypeClass
++{
++public:
++  enum {
++    Value = LogType
++  };
++};
++
++template<class T, class Method, class Params, VsyncLogType PrintType = VSYNC_LOG_NONE, int DataNum = 60>
++class VsyncRunnableMethod : public RunnableMethod<T ,Method, Params>
++{
++public:
++  VsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* aObj, Method aMeth, const Params& aParams)
++    : RunnableMethod<T ,Method, Params>(aObj, aMeth, aParams)
++    , mMsg(aMsg)
++    , mTimestamp(aTimestamp)
++    , mFrameNumber(aFrameNumber)
++    , mPrint(aPrint)
++  {
++  }
++
++  virtual void Run() MOZ_OVERRIDE
++  {
++    RunImpl(VsyncLogTypeClass<PrintType>());
++  }
++
++private:
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_NONE>)
++  {
++    RunnableMethod<T ,Method, Params>::Run();
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_LATENCY>)
++  {
++    static VsyncLatencyLogger<DataNum> logger(mMsg);
++
++    uint32_t latency = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    RunnableMethod<T ,Method, Params>::Run();
++
++    uint32_t executeTime = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    logger.Update(latency, mFrameNumber, executeTime);
++    if (mPrint) {
++      logger.PrintStatisticData();
++      logger.PrintAllData();
++    }
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_PROFILER_TAG>)
++  {
++    PROFILER_LABEL("VsyncRunnableMethod", "Run",
++        js::ProfileEntry::Category::GRAPHICS);
++
++    RunnableMethod<T ,Method, Params>::Run();
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_ALL>)
++  {
++    PROFILER_LABEL("VsyncRunnableMethod", "Run",
++        js::ProfileEntry::Category::GRAPHICS);
++
++    static VsyncLatencyLogger<DataNum> logger(mMsg);
++
++    uint32_t latency = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    RunnableMethod<T ,Method, Params>::Run();
++
++    uint32_t executeTime = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    logger.Update(latency, mFrameNumber, executeTime);
++    if (mPrint) {
++      logger.PrintStatisticData();
++      logger.PrintAllData();
++    }
++  }
++
++  const char* mMsg;
++  int64_t mTimestamp;
++  int32_t mFrameNumber;
++
++  bool mPrint;
++};
++
++template<class T, class Method, class Params, VsyncLogType PrintType = VSYNC_LOG_NONE, int DataNum = 60>
++class NSVsyncRunnableMethod : public nsCancelableRunnable
++{
++public:
++  NSVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* aObj, Method aMeth, const Params& aParams)
++    : mMsg(aMsg)
++    , mTimestamp(aTimestamp)
++    , mFrameNumber(aFrameNumber)
++    , mPrint(aPrint)
++    , mObj(aObj)
++    , mMethod(aMeth)
++    , mParams(aParams)
++  {
++    if (aObj) {
++      mObj->AddRef();
++    }
++  }
++
++  ~NSVsyncRunnableMethod()
++  {
++    ReleaseCallee();
++  }
++
++  NS_IMETHOD Run() MOZ_OVERRIDE
++  {
++    if (mObj) {
++      RunImpl(VsyncLogTypeClass<PrintType>());
++    }
++
++    return NS_OK;
++  }
++
++  NS_IMETHOD Cancel() MOZ_OVERRIDE
++  {
++    ReleaseCallee();
++
++    return NS_OK;
++  }
++
++private:
++  void ReleaseCallee() {
++    if (mObj) {
++      mObj->Release();
++      mObj = nullptr;
++    }
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_NONE>)
++  {
++    DispatchToMethod(mObj, mMethod, mParams);
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_LATENCY>)
++  {
++    static VsyncLatencyLogger<DataNum> logger(mMsg);
++
++    uint32_t latency = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    DispatchToMethod(mObj, mMethod, mParams);
++
++    uint32_t executeTime = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    logger.Update(latency, mFrameNumber, executeTime);
++
++    if (mPrint) {
++      logger.PrintStatisticData();
++      logger.PrintAllData();
++    }
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_PROFILER_TAG>)
++  {
++    PROFILER_LABEL("VsyncRunnableMethod", "Run",
++        js::ProfileEntry::Category::GRAPHICS);
++
++    DispatchToMethod(mObj, mMethod, mParams);
++  }
++
++  void RunImpl(VsyncLogTypeClass<VSYNC_LOG_ALL>)
++  {
++    PROFILER_LABEL("VsyncRunnableMethod", "Run",
++        js::ProfileEntry::Category::GRAPHICS);
++
++    static VsyncLatencyLogger<DataNum> logger(mMsg);
++
++    uint32_t latency = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    DispatchToMethod(mObj, mMethod, mParams);
++
++    uint32_t executeTime = base::TimeTicks::HighResNow().ToInternalValue()- mTimestamp;
++
++    logger.Update(latency, mFrameNumber, executeTime);
++
++    if (mPrint) {
++      logger.PrintStatisticData();
++      logger.PrintAllData();
++    }
++  }
++
++  const char* mMsg;
++  int64_t mTimestamp;
++  int32_t mFrameNumber;
++  bool mPrint;
++
++  T* mObj;
++  Method mMethod;
++  Params mParams;
++};
++
++template<class T, class Method>
++inline CancelableTask*
++NewVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method)
++{
++  typedef Tuple0 ParamsType;
++
++  return new VsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                        aTimestamp,
++                                                        aFrameNumber,
++                                                        aPrint,
++                                                        object,
++                                                        method,
++                                                        MakeTuple());
++}
++
++template<class T, class Method, class A>
++inline CancelableTask*
++NewVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a)
++{
++  typedef Tuple1<A> ParamsType;
++
++  return new VsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                        aTimestamp,
++                                                        aFrameNumber,
++                                                        aPrint,
++                                                        object,
++                                                        method,
++                                                        MakeTuple(a));
++}
++
++template<class T, class Method, class A, class B>
++inline CancelableTask*
++NewVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a, const B& b)
++{
++  typedef Tuple2<A, B> ParamsType;
++
++  return new VsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                        aTimestamp,
++                                                        aFrameNumber,
++                                                        aPrint,
++                                                        object,
++                                                        method,
++                                                        MakeTuple(a, b));
++}
++
++template<class T, class Method, class A, class B, class C>
++inline CancelableTask*
++NewVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a, const B& b, const C& c)
++{
++  typedef Tuple3<A, B, C> ParamsType;
++
++  return new VsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                        aTimestamp,
++                                                        aFrameNumber,
++                                                        aPrint,
++                                                        object,
++                                                        method,
++                                                        MakeTuple(a, b, c));
++}
++
++template<class T, class Method, class A, class B, class C, class D>
++inline CancelableTask*
++NewVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a, const B& b, const C& c, const D& d)
++{
++  typedef Tuple4<A, B, C, D> ParamsType;
++
++  return new VsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                        aTimestamp,
++                                                        aFrameNumber,
++                                                        aPrint,
++                                                        object,
++                                                        method,
++                                                        MakeTuple(a, b, c, d));
++}
++
++template<class T, class Method>
++inline  nsIRunnable*
++NewNSVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method)
++{
++  typedef Tuple0 ParamsType;
++
++  return new NSVsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                          aTimestamp,
++                                                          aFrameNumber,
++                                                          aPrint,
++                                                          object,
++                                                          method,
++                                                          MakeTuple());
++}
++
++template<class T, class Method, class A>
++inline nsIRunnable*
++NewNSVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a)
++{
++  typedef Tuple1<A> ParamsType;
++
++  return new NSVsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                          aTimestamp,
++                                                          aFrameNumber,
++                                                          aPrint,
++                                                          object,
++                                                          method,
++                                                          MakeTuple(a));
++}
++
++template<class T, class Method, class A, class B>
++inline nsIRunnable*
++NewNSVsyncRunnableMethod(const char* aMsg, int64_t aTimestamp, int32_t aFrameNumber, bool aPrint, T* object, Method method, const A& a, const B& b)
++{
++  typedef Tuple2<A, B> ParamsType;
++
++  return new NSVsyncRunnableMethod<T, Method, ParamsType>(aMsg,
++                                                          aTimestamp,
++                                                          aFrameNumber,
++                                                          aPrint,
++                                                          object,
++                                                          method,
++                                                          MakeTuple(a, b));
++}
++
++} // namespace mozilla
++
++#endif // mozilla_VsyncDispatcherUtils_h
+diff --git a/widget/gonk/GonkVsyncDispatcher.cpp b/widget/gonk/GonkVsyncDispatcher.cpp
+--- a/widget/gonk/GonkVsyncDispatcher.cpp
++++ b/widget/gonk/GonkVsyncDispatcher.cpp
+@@ -1,25 +1,26 @@
+ /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* vim: set sw=2 ts=8 et ft=cpp : */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "GonkVsyncDispatcher.h"
+-
+ #include "mozilla/layers/VsyncEventParent.h"
+ #include "mozilla/layers/VsyncEventChild.h"
+ #include "mozilla/layers/CompositorParent.h"
+ #include "mozilla/StaticPtr.h"
++#include "mozilla/VsyncDispatcherUtils.h"
+ #include "base/thread.h"
+ #include "HwcComposer2D.h"
+ #include "nsThreadUtils.h"
+ #include "nsRefreshDriver.h"
+ #include "nsAppShell.h"
++#include "GeckoProfiler.h"
+ 
+ //#define DEBUG_VSYNC
+ #ifdef DEBUG_VSYNC
+ #define VSYNC_PRINT(...) do { printf_stderr("VDispatcher: " __VA_ARGS__); } while (0)
+ #else
+ #define VSYNC_PRINT(...) do { } while (0)
+ #endif
+ 
+@@ -385,45 +386,67 @@ GonkVsyncDispatcher::NotifyInputEventPro
+ //  //2. compose
+ //  Compose(VsyncData(0));
+ //#endif
+ }
+ 
+ void
+ GonkVsyncDispatcher::DispatchVsync(const VsyncData& aVsyncData)
+ {
++  PROFILER_LABEL("GonkVsyncDispatcher", "DispatchVsync",
++            js::ProfileEntry::Category::GRAPHICS);
++
+ #ifdef ENABLE_INPUTDISPATCHER_NOTIFY
+   //1. input
+   if (EnableInputDispatch) {
+-    nsCOMPtr<nsIRunnable> mainThreadInputTask =
+-        NS_NewRunnableMethodWithArg<const VsyncData&>(this,
+-                                                      &GonkVsyncDispatcher::InputEventDispatch,
+-                                                      aVsyncData);
++//    nsCOMPtr<nsIRunnable> mainThreadInputTask =
++//        NS_NewRunnableMethodWithArg<const VsyncData&>(this,
++//                                                      &GonkVsyncDispatcher::InputEventDispatch,
++//                                                      aVsyncData);
++    nsCOMPtr<nsIRunnable> mainThreadInputTask = NewNSVsyncRunnableMethod("bignose input",
++                                                                         aVsyncData.timeStamp(),
++                                                                         aVsyncData.frameNumber(),
++                                                                         false,
++                                                                         this,
++                                                                         &GonkVsyncDispatcher::InputEventDispatch,
++                                                                         aVsyncData);
++
+     //block vsync event passing until main thread input module updated
+     MonitorAutoLock inputLock(mInputMonitor);
+ 
+     NS_DispatchToMainThread(mainThreadInputTask);
++
+     inputLock.Wait(PR_MillisecondsToInterval(4));
+   }
+ #endif
+ 
++  static VsyncLatencyLogger<60> logger("bignose monitor");
++  logger.Update(base::TimeTicks::HighResNow().ToInternalValue()- aVsyncData.timeStamp(), aVsyncData.frameNumber(), 0);
++
+ #ifdef ENABLE_COMPOSITOR_NOTIFY
+   //2. compose
+   Compose(aVsyncData);
+ #endif
+ 
+ #ifdef ENABLE_REFRESHDRIVER_NOTIFY
+   //3. content process tick
+   NotifyVsyncEventChild(aVsyncData);
+ 
+   //4. current process tick
+-  nsCOMPtr<nsIRunnable> mainThreadTickTask =
+-      NS_NewRunnableMethodWithArg<const VsyncData&>(this,
+-                                                    &GonkVsyncDispatcher::Tick,
+-                                                    aVsyncData);
++//  nsCOMPtr<nsIRunnable> mainThreadTickTask =
++//      NS_NewRunnableMethodWithArg<const VsyncData&>(this,
++//                                                    &GonkVsyncDispatcher::Tick,
++//                                                    aVsyncData);
++  nsCOMPtr<nsIRunnable> mainThreadTickTask = NewNSVsyncRunnableMethod("bignose tick",
++                                                                      aVsyncData.timeStamp(),
++                                                                      aVsyncData.frameNumber(),
++                                                                      false,
++                                                                      this,
++                                                                      &GonkVsyncDispatcher::Tick,
++                                                                      aVsyncData);
+   NS_DispatchToMainThread(mainThreadTickTask);
+ #endif
+ }
+ 
+ void
+ GonkVsyncDispatcher::InputEventDispatch(const VsyncData& aVsyncData)
+ {
+   MOZ_RELEASE_ASSERT(NS_IsMainThread());
+@@ -438,19 +461,26 @@ GonkVsyncDispatcher::Compose(const Vsync
+   MutexAutoLock lock(mCompositorListMutex);
+ 
+   // CompositorParent::ScheduleComposition is an async call, assume it takes minor
+   // period.
+   for (CompositorList::size_type i = 0; i < mCompositorList.Length(); i++) {
+     layers::CompositorParent *compositor = mCompositorList[i];
+     // TODO: need to change behavior of ScheduleComposition(). No Delay, fire
+     // Composit ASAP.
++//    CompositorParent::CompositorLoop()->PostTask(FROM_HERE,
++//                                        NewRunnableMethod(compositor,
++//                                        &CompositorParent::VsyncComposition));
+     CompositorParent::CompositorLoop()->PostTask(FROM_HERE,
+-                                        NewRunnableMethod(compositor,
+-                                        &CompositorParent::VsyncComposition));
++                                                 NewVsyncRunnableMethod("bignose compositor",
++                                                 aVsyncData.timeStamp(),
++                                                 aVsyncData.frameNumber(),
++                                                 false,
++                                                 compositor,
++                                                 &CompositorParent::VsyncComposition));
+   }
+ }
+ 
+ void
+ GonkVsyncDispatcher::NotifyVsyncEventChild(const VsyncData& aVsyncData)
+ {
+   // Tick all registered content process.
+   for (VsyncEventParentList::size_type i = 0; i < mVsyncEventParentList.Length(); i++) {
+diff --git a/widget/gonk/nsAppShell.cpp b/widget/gonk/nsAppShell.cpp
+--- a/widget/gonk/nsAppShell.cpp
++++ b/widget/gonk/nsAppShell.cpp
+@@ -800,20 +800,28 @@ GeckoInputDispatcher::resample()
+     // Push the last move event back to pending buffer for the next vsync notification.
+     mTouchMoveSamples.push_back(end);
+     return sample;
+ }
+ 
+ void GeckoInputDispatcher::sendTouchOrMouseEvent(UserInputData& data)
+ {
+     bool captured;
++
++    //printf_stderr("bignose test input data 1");
++
+     nsEventStatus status = sendTouchEvent(data, &captured);
+-    if (captured)
++    if (captured) {
++        //printf_stderr("bignose test input data, no captured");
+         return;
++    }
++
++    //printf_stderr("bignose test input data 2");
+     sendMouseEvent(data, status != nsEventStatus_eConsumeNoDefault);
++    //printf_stderr("bignose test input data 3");
+ }
+ 
+ void
+ GeckoInputDispatcher::dispatchOnce()
+ {
+     UserInputData data;
+     {
+         MutexAutoLock lock(mQueueLock);
+diff --git a/widget/gonk/nsWindow.cpp b/widget/gonk/nsWindow.cpp
+--- a/widget/gonk/nsWindow.cpp
++++ b/widget/gonk/nsWindow.cpp
+@@ -204,16 +204,18 @@ nsWindow::DoDraw(void)
+     if (listener) {
+         listener->DidPaintWindow();
+     }
+ }
+ 
+ nsEventStatus
+ nsWindow::DispatchInputEvent(WidgetGUIEvent& aEvent, bool* aWasCaptured)
+ {
++    //printf_stderr("bignose test input data 4");
++
+     GonkVsyncDispatcher::GonkVsyncDispatcherInputProcessingHelper inputHelper;
+ 
+     if (aWasCaptured) {
+         *aWasCaptured = false;
+     }
+     if (!gFocusedWindow) {
+         return nsEventStatus_eIgnore;
+     }
+@@ -227,16 +229,17 @@ nsWindow::DispatchInputEvent(WidgetGUIEv
+         if (aWasCaptured) {
+             *aWasCaptured = captured;
+         }
+         if (captured) {
+             return nsEventStatus_eConsumeNoDefault;
+         }
+     }
+ 
++    //printf_stderr("bignose test input data 5");
+     inputHelper.Notify();
+ 
+     nsEventStatus status;
+     gFocusedWindow->DispatchEvent(&aEvent, status);
+     return status;
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/widget/moz.build b/widget/moz.build
+--- a/widget/moz.build
++++ b/widget/moz.build
+@@ -111,16 +111,17 @@ EXPORTS.mozilla += [
+     'EventForwards.h',
+     'LookAndFeel.h',
+     'MiscEvents.h',
+     'MouseEvents.h',
+     'TextEvents.h',
+     'TextRange.h',
+     'TouchEvents.h',
+     'VsyncDispatcher.h',
++    'VsyncDispatcherUtils.h',
+     'WidgetUtils.h',
+ ]
+ 
+ if CONFIG['MOZ_INSTRUMENT_EVENT_LOOP']:
+     EXPORTS.mozilla += [
+         'WidgetTraceEvent.h',
+     ]
+ 
